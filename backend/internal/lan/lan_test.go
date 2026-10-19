@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jzj2621899857/dbx-board-games/backend/internal/room"
+	"github.com/southernMortals/dbx-board-games/backend/internal/room"
 )
 
 // newHostedRoom starts a Room and its Server on loopback.

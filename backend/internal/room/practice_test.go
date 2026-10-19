@@ -3,7 +3,7 @@ package room
 import (
 	"testing"
 
-	"github.com/jzj2621899857/dbx-board-games/backend/internal/game"
+	"github.com/southernMortals/dbx-board-games/backend/internal/game"
 )
 
 func TestPracticeStartsWithOneSeatedPlayer(t *testing.T) {

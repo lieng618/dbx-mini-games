@@ -9,8 +9,8 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/jzj2621899857/dbx-board-games/backend/internal/game"
-	"github.com/jzj2621899857/dbx-board-games/backend/internal/replay"
+	"github.com/southernMortals/dbx-board-games/backend/internal/game"
+	"github.com/southernMortals/dbx-board-games/backend/internal/replay"
 )
 
 // Capacity limits.

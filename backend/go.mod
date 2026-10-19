@@ -1,4 +1,4 @@
-module github.com/jzj2621899857/dbx-board-games/backend
+module github.com/southernMortals/dbx-board-games/backend
 
 go 1.22
 

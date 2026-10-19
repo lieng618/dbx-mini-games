@@ -14,7 +14,7 @@ workbench entry. Splitting them produces two independent plugins.
 
 ## Decision
 
-Ship both games in a single package, `io.github.jzj2621899857.board-games`, with the games as
+Ship both games in a single package, `io.github.southernmortals.board-games`, with the games as
 internal modules behind one workbench. The Room's `game` field selects which module
 arbitrates.
 

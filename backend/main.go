@@ -10,7 +10,7 @@ import (
 	"os"
 	"sync"
 
-	"github.com/jzj2621899857/dbx-board-games/backend/internal/app"
+	"github.com/southernMortals/dbx-board-games/backend/internal/app"
 
 	dbxpluginsdk "github.com/t8y2/dbx/plugins/sdk/go/dbx-plugin-sdk"
 )
@@ -76,7 +76,7 @@ func main() {
 	h.app = app.New(dataDir, h.emit)
 
 	server := dbxpluginsdk.NewServer(dbxpluginsdk.Metadata{
-		ID:           "io.github.jzj2621899857.board-games",
+		ID:           "io.github.southernMortals.board-games",
 		Version:      version,
 		Capabilities: []string{"events", "lan-game"},
 	}, h)

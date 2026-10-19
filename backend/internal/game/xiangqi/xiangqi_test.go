@@ -3,7 +3,7 @@ package xiangqi
 import (
 	"testing"
 
-	"github.com/jzj2621899857/dbx-board-games/backend/internal/game"
+	"github.com/southernMortals/dbx-board-games/backend/internal/game"
 )
 
 func idx(rank, file int) int { return rank*Cols + file }

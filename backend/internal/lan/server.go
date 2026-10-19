@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jzj2621899857/dbx-board-games/backend/internal/room"
+	"github.com/southernMortals/dbx-board-games/backend/internal/room"
 )
 
 // Message is the single wire envelope for every frame in both directions.

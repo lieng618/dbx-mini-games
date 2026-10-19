@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jzj2621899857/dbx-board-games/backend/internal/discovery"
+	"github.com/southernMortals/dbx-board-games/backend/internal/discovery"
 )
 
 // TestTwoInstanceLanHandshake is the M1 acceptance test: one App hosts a room, another

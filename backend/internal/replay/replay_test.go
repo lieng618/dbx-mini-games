@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jzj2621899857/dbx-board-games/backend/internal/game"
-	"github.com/jzj2621899857/dbx-board-games/backend/internal/game/gomoku"
-	"github.com/jzj2621899857/dbx-board-games/backend/internal/game/xiangqi"
+	"github.com/southernMortals/dbx-board-games/backend/internal/game"
+	"github.com/southernMortals/dbx-board-games/backend/internal/game/gomoku"
+	"github.com/southernMortals/dbx-board-games/backend/internal/game/xiangqi"
 )
 
 func xq(rank, file int) int { return rank*9 + file }

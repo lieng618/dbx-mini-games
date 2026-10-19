@@ -3,7 +3,7 @@ package gomoku
 import (
 	"testing"
 
-	"github.com/jzj2621899857/dbx-board-games/backend/internal/game"
+	"github.com/southernMortals/dbx-board-games/backend/internal/game"
 )
 
 func place(t *testing.T, e *Engine, seats []game.Seat, cells ...int) {

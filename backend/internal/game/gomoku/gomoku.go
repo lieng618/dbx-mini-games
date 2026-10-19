@@ -4,7 +4,7 @@
 // legal, and five or more in a row wins.
 package gomoku
 
-import "github.com/jzj2621899857/dbx-board-games/backend/internal/game"
+import "github.com/southernMortals/dbx-board-games/backend/internal/game"
 
 // Side identifies a stone colour on the board.
 const (

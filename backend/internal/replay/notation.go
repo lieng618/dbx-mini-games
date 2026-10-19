@@ -3,7 +3,7 @@ package replay
 import (
 	"fmt"
 
-	"github.com/jzj2621899857/dbx-board-games/backend/internal/game"
+	"github.com/southernMortals/dbx-board-games/backend/internal/game"
 )
 
 // Chinese numerals used by conventional xiangqi notation.

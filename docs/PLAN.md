@@ -1,4 +1,4 @@
-# Delivery plan — `io.github.jzj2621899857.board-games`
+# Delivery plan — `io.github.southernmortals.board-games`
 
 Complete delivery, staged so that each milestone is independently verifiable. "Complete"
 means both games, spectators, seating, effects, packaging, signing, and catalog — not a
