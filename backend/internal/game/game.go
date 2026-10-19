@@ -48,6 +48,15 @@ var (
 	ErrNoHistory    = errors.New("no move to undo")
 )
 
+// CheckReporter is implemented by games that can report a threatened king. It is optional:
+// gomoku has no such concept.
+type CheckReporter interface {
+	// InCheck reports whether the given seat's king is currently attacked.
+	InCheck(seat Seat) bool
+	// KingSquare returns the square holding the seat's king, or -1.
+	KingSquare(seat Seat) int
+}
+
 // Engine is one game's authoritative rule machine. Implementations must be pure:
 // no clocks, no I/O, no locks. The Room serialises calls.
 type Engine interface {

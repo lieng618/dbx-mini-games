@@ -63,6 +63,19 @@ PixiJS 8 canvas plus Vue HUD.
 - Exit criteria: a full Match completes on both games; undo needs both Occupants; clock
   timeout forfeits.
 
+## M4b — Replay
+
+Added during design at the author's request: every Match is recorded and reviewable.
+
+- Move list with the originating state, so a record can be validated on load.
+- A replay cursor that supports step forward, step back, and jump-to-ply. Seeking rebuilds
+  from the opening position, which keeps forward and backward navigation symmetrical.
+- Conventional notation: Chinese move notation for 象棋 (炮八平五), coordinate notation for
+  五子棋 (H8).
+- UI: a control bar under the board with first/prev/next/last, a ply scrubber, and export.
+- Exit criteria: a finished Match replays move for move; an illegal record is rejected
+  rather than partially loaded.
+
 ## M5 — Release engineering
 
 - GitHub Actions: multi-target unsigned candidate build (`darwin-arm64`, `darwin-x64`,

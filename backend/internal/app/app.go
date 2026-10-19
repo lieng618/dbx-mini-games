@@ -34,6 +34,8 @@ type App struct {
 	adv      *discovery.Advertisement
 	client   *lan.Client
 	ticket   string
+	// localID is this machine's member id inside the room it hosts or joined.
+	localID  string
 	clock    *Clock
 	lowMotion bool
 }
@@ -76,6 +78,10 @@ func (a *App) Call(method string, params map[string]any) (any, error) {
 		return a.snapshot(), nil
 	case "room.start":
 		return a.startMatch()
+	case "room.practice.start":
+		return a.startPractice()
+	case "room.practice.end":
+		return a.endPractice()
 	case "room.seat":
 		return a.takeSeat(params)
 	case "room.release":
@@ -174,6 +180,7 @@ func (a *App) createRoom(params map[string]any) (map[string]any, error) {
 	}
 	adv, advErr := discovery.Advertise(r.ID(), name, gameName, srv.Port(), srv.PublicKey(), 1, room.SeatCount, password != "")
 	a.room, a.server, a.adv = r, srv, adv
+	a.localID = hostID
 	a.clock = newClock()
 	a.mu.Unlock()
 
@@ -221,6 +228,7 @@ func (a *App) joinRoom(params map[string]any) (map[string]any, error) {
 	a.mu.Lock()
 	a.client = client
 	a.ticket = client.Ticket()
+	a.localID = profile.ID
 	a.mu.Unlock()
 	return a.snapshot(), nil
 }
@@ -242,6 +250,7 @@ func (a *App) leaveRoom() (map[string]any, error) {
 	}
 	a.room = nil
 	a.ticket = ""
+	a.localID = ""
 	a.clock = nil
 	return map[string]any{"ok": true}, nil
 }
@@ -254,6 +263,7 @@ func (a *App) snapshot() map[string]any {
 	if a.room != nil {
 		view := map[string]any{
 			"role":      "host",
+			"selfId":    a.localID,
 			"roomId":    a.room.ID(),
 			"name":      a.room.Name(),
 			"game":      a.room.GameName(),
@@ -273,6 +283,9 @@ func (a *App) snapshot() map[string]any {
 		}
 		if a.clock != nil {
 			view["clock"] = a.clock.view()
+		}
+		for k, v := range a.boardViewLocked() {
+			view[k] = v
 		}
 		return view
 	}
@@ -301,6 +314,31 @@ func (a *App) startMatch() (map[string]any, error) {
 	return a.snapshotLocked(), nil
 }
 
+// startPractice opens a solo board so one player can inspect the table and its effects
+// before anyone else arrives.
+func (a *App) startPractice() (map[string]any, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.room == nil {
+		return nil, errors.New("not hosting a room")
+	}
+	if err := a.room.StartPractice(time.Now().UnixMilli()); err != nil {
+		return nil, err
+	}
+	return a.snapshotLocked(), nil
+}
+
+// endPractice discards the solo board and returns to the lobby.
+func (a *App) endPractice() (map[string]any, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.room == nil {
+		return nil, errors.New("not hosting a room")
+	}
+	a.room.EndPractice()
+	return a.snapshotLocked(), nil
+}
+
 func (a *App) takeSeat(params map[string]any) (map[string]any, error) {
 	seat := -1
 	if v, ok := params["seat"].(float64); ok {
@@ -311,8 +349,7 @@ func (a *App) takeSeat(params map[string]any) (map[string]any, error) {
 	if a.room == nil {
 		return nil, errors.New("not hosting a room")
 	}
-	hostID := a.room.HostID()
-	if err := a.room.TakeSeat(hostID, seat); err != nil {
+	if err := a.room.TakeSeat(a.localID, seat); err != nil {
 		return nil, err
 	}
 	return a.snapshotLocked(), nil
@@ -324,7 +361,7 @@ func (a *App) releaseSeat() (map[string]any, error) {
 	if a.room == nil {
 		return nil, errors.New("not hosting a room")
 	}
-	if err := a.room.ReleaseSeat(a.room.HostID()); err != nil {
+	if err := a.room.ReleaseSeat(a.localID); err != nil {
 		return nil, err
 	}
 	return a.snapshotLocked(), nil
@@ -343,7 +380,13 @@ func (a *App) move(params map[string]any) (map[string]any, error) {
 	if v, ok := params["to"].(float64); ok {
 		m.To = int(v)
 	}
-	if err := a.room.Move(a.room.HostID(), m, time.Now().UnixMilli()); err != nil {
+	var err error
+	if a.room.Practice() {
+		err = a.room.PracticeMove(a.localID, m)
+	} else {
+		err = a.room.Move(a.localID, m, time.Now().UnixMilli())
+	}
+	if err != nil {
 		return nil, err
 	}
 	if a.clock != nil && a.room.Phase() == room.PhasePlaying {
@@ -384,7 +427,7 @@ func (a *App) requestUndo() (map[string]any, error) {
 	if a.room == nil {
 		return nil, errors.New("not hosting a room")
 	}
-	if err := a.room.RequestUndo(a.room.HostID()); err != nil {
+	if err := a.room.RequestUndo(a.localID); err != nil {
 		return nil, err
 	}
 	return a.snapshotLocked(), nil
@@ -396,7 +439,7 @@ func (a *App) consentUndo() (map[string]any, error) {
 	if a.room == nil {
 		return nil, errors.New("not hosting a room")
 	}
-	if err := a.room.ConsentUndo(a.room.HostID()); err != nil {
+	if err := a.room.ConsentUndo(a.localID); err != nil {
 		return nil, err
 	}
 	return a.snapshotLocked(), nil
@@ -408,7 +451,7 @@ func (a *App) resign() (map[string]any, error) {
 	if a.room == nil {
 		return nil, errors.New("not hosting a room")
 	}
-	if err := a.room.Resign(a.room.HostID()); err != nil {
+	if err := a.room.Resign(a.localID); err != nil {
 		return nil, err
 	}
 	return a.snapshotLocked(), nil
@@ -461,10 +504,65 @@ func (a *App) replayNotation() (map[string]any, error) {
 	return map[string]any{"notation": notes}, nil
 }
 
+
+// boardView renders the authoritative board for a snapshot.
+//
+// A room in the lobby still shows its opening position: the table should look ready before
+// anyone starts, and a player needs to see where their pieces are.
+func (a *App) boardViewLocked() map[string]any {
+	engine, err := replay.NewEngine(a.room.GameName())
+	if err != nil {
+		return map[string]any{}
+	}
+	var lastMove *game.Move
+	if rec, ok := a.room.Replay(); ok {
+		for i, m := range rec.Moves {
+			if err := engine.Apply(m); err != nil {
+				break
+			}
+			if i == len(rec.Moves)-1 {
+				applied := m
+				lastMove = &applied
+			}
+		}
+	}
+	view := map[string]any{
+		"cells":    engine.Cells(),
+		"turnSeat": int(engine.Turn()),
+	}
+	// Last move and check state drive the presentation layer's effects. They are derived
+	// from authoritative state, so a spectator sees the same ink as the player.
+	if lastMove != nil {
+		view["lastMove"] = map[string]any{"from": lastMove.From, "to": lastMove.To}
+	}
+	// Check is only meaningful once a match is under way, and only for games that have a
+	// king to threaten.
+	if a.room.Phase() == room.PhasePlaying || a.room.Phase() == room.PhasePractice {
+		if reporter, ok := engine.(game.CheckReporter); ok {
+			seat := engine.Turn()
+			if reporter.InCheck(seat) {
+				view["inCheck"] = true
+				view["checkFocus"] = reporter.KingSquare(seat)
+			}
+		}
+	}
+	if a.room.Phase() == room.PhasePlaying || a.room.Phase() == room.PhasePractice {
+		if res := engine.Result(); res.Finished {
+			view["result"] = map[string]any{
+				"finished": true,
+				"outcome":  int(res.Outcome),
+				"reason":   res.Reason,
+			}
+		}
+	}
+	return view
+}
+
 // snapshotLocked renders a snapshot while the caller already holds the lock.
 func (a *App) snapshotLocked() map[string]any {
 	view := map[string]any{
 		"role":      "host",
+		"selfId":    a.localID,
 		"roomId":    a.room.ID(),
 		"name":      a.room.Name(),
 		"game":      a.room.GameName(),
@@ -484,6 +582,9 @@ func (a *App) snapshotLocked() map[string]any {
 	}
 	if a.clock != nil {
 		view["clock"] = a.clock.view()
+	}
+	for k, v := range a.boardViewLocked() {
+		view[k] = v
 	}
 	return view
 }

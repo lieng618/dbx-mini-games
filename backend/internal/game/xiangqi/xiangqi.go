@@ -499,6 +499,12 @@ func (e *Engine) hasLegalMove(seat game.Seat) bool {
 // inCheck reports whether the seat's general is attacked.
 func (e *Engine) inCheck(seat game.Seat) bool { return kingAttacked(e.board, seat) }
 
+// InCheck satisfies game.CheckReporter.
+func (e *Engine) InCheck(seat game.Seat) bool { return e.inCheck(seat) }
+
+// KingSquare satisfies game.CheckReporter.
+func (e *Engine) KingSquare(seat game.Seat) int { return kingIndex(e.board, seat) }
+
 // attacked reports whether any piece of by attacks the point idx. It ignores the
 // generals-facing constraint, which is checked separately.
 func attacked(board [Cells]int8, idx int, by game.Seat) bool {

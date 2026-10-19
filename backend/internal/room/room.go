@@ -44,6 +44,10 @@ const (
 	PhasePlaying Phase = "playing"
 	// PhaseFinished has a concluded match awaiting a rematch or seat changes.
 	PhaseFinished Phase = "finished"
+	// PhasePractice is a solo board: moves are accepted from the one seated player, in
+	// either seat's turn, and no result is ever recorded. It exists so a host can look at
+	// the board and its effects before anyone else arrives.
+	PhasePractice Phase = "practice"
 )
 
 // Member is one connected participant.
@@ -308,6 +312,77 @@ func (r *Room) Start(now int64) error {
 	}
 	r.phase = PhasePlaying
 	return nil
+}
+
+// StartPractice opens a solo board for the host. It requires exactly one seated player,
+// and it never produces a result.
+func (r *Room) StartPractice(now int64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.phase == PhasePlaying {
+		return ErrMatchInProgress
+	}
+	if r.seats[0] == "" && r.seats[1] == "" {
+		return ErrNoSeat
+	}
+	engine, err := replay.NewEngine(r.gameName)
+	if err != nil {
+		return err
+	}
+	r.match = &Match{
+		Engine:    engine,
+		Record:    replay.Record{Game: r.gameName},
+		Revision:  1,
+		StartedAt: now,
+	}
+	r.phase = PhasePractice
+	return nil
+}
+
+// Practice reports whether the room is on a solo board.
+func (r *Room) Practice() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.phase == PhasePractice
+}
+
+// PracticeMove applies a move on the solo board. The single seated player may move for
+// whichever side holds the turn, because there is no opponent to wait for.
+func (r *Room) PracticeMove(id string, m game.Move) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.phase != PhasePractice || r.match == nil {
+		return ErrMatchInProgress
+	}
+	member, ok := r.members[id]
+	if !ok {
+		return ErrNotMember
+	}
+	if member.Seat < 0 {
+		return ErrNotSeated
+	}
+	if err := r.match.Engine.Apply(m); err != nil {
+		return err
+	}
+	r.match.Record.Moves = append(r.match.Record.Moves, m)
+	r.match.Revision++
+	// A practice board never records a result: reaching a terminal position is simply the
+	// end of what this position can show, and the player may undo or reset freely.
+	return nil
+}
+
+// EndPractice returns to the lobby, discarding the solo board.
+func (r *Room) EndPractice() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.phase != PhasePractice {
+		return
+	}
+	r.phase = PhaseLobby
+	r.match = nil
+	r.replay = nil
 }
 
 // Move applies a move for the given member. Only the seat holder on turn may move,
