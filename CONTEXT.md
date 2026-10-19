@@ -1,0 +1,104 @@
+# CONTEXT — Board Games plugin
+
+Glossary for the DBX board-games plugin. Terms only; no implementation detail.
+
+## Games
+
+**Game** — one playable rule set. This plugin ships exactly two: 象棋 and 五子棋.
+A Game owns its rules, its board geometry, and its win condition. A Game never
+owns transport, seating, or rendering.
+
+**象棋 / Xiangqi** — Chinese chess on a 9×10 point grid. The Game in play when the
+room's `game` field is `xiangqi`.
+
+**五子棋 / Gomoku** — five-in-a-row on a 15×15 point grid, free-style rules.
+The Game in play when the room's `game` field is `gomoku`.
+
+**Free-style rules** — 五子棋 without forbidden-move (禁手) restrictions. Five or
+more in a row wins. There is deliberately no 三三 / 四四 / 长连 referee.
+
+## Room and seating
+
+**Room** — one hosted match table on the local network. A Room has one Host, up to
+two Seats, and zero or more Spectators. A Room is tied to one Game: 象棋 and 五子棋
+never share a Room.
+
+**Host** — the participant whose machine runs the authoritative sidecar listener. The
+Host is also the referee: only the Host's state is authoritative. When the Host
+leaves, the Room ends.
+
+**Seat** — an authoritative playing position. A Room has exactly two Seats
+(`seat 0` and `seat 1`), independent of Game. A Seat is either occupied or empty.
+
+**Occupant** — the participant currently holding a Seat.
+
+**Spectator** — a participant connected to the Room who holds no Seat. A Spectator
+receives the same authoritative state as an Occupant but cannot move.
+
+**Occupancy rule** — an arriving participant takes a Seat when one is empty, and
+otherwise becomes a Spectator. This is the "first to arrive sits down" behaviour:
+arrival order, not an explicit challenge, decides who plays.
+
+**Vacating** — a Seat becomes empty only when its Occupant leaves the Seat on
+purpose, or disconnects. Seats are never rotated automatically between Games.
+(This is why a completed Game does not reshuffle the table.)
+
+**Rotation** — the act of a vacated Seat being taken by the next participant. Rotation
+is triggered by Vacating, never by a Game ending.
+
+## Match
+
+**Match** — one Game played from the opening position to a terminal result between
+the two Occupants of a Room.
+
+**Move** — one Occupant's single state transition: placing a stone (五子棋) or moving
+one piece (象棋). A Move is the only way board state changes.
+
+**Turn** — the right to make the next Move. Exactly one Seat holds the Turn at any
+time. A Move by the Seat that does not hold the Turn is rejected, not queued.
+
+**Spectating** — reading a Match without holding a Seat. A Spectator's view is the
+same authoritative snapshot an Occupant sees, minus that Occupant's private affordances.
+
+**Undo request** — a proposal from one Occupant to revert the last Move. It takes
+effect only on the other Occupant's agreement. There is no unconditional Undo.
+
+**Resign** — an Occupant conceding the Match. The Match ends immediately with the
+opponent as winner.
+
+**Forfeit** — the result recorded when an Occupant disconnects and does not return
+before the reconnect window closes, or when their clock expires.
+
+## Clock
+
+**Match clock** — a per-Seat countdown of remaining thinking time. The clock of the
+Seat holding the Turn runs; the other is stopped.
+
+**Budget** — the fixed time each Seat receives for one Match. The clock is a budget,
+not a per-move increment: there are no increments and no byo-yomi.
+
+**Timeout** — a Seat whose clock reaches zero loses the Match by Forfeit.
+
+## Terminal results
+
+**Win** — decided by the Game's own win condition, by Resign, or by Forfeit.
+
+**Draw** — a Match with no winner. In 象棋 this includes stalemate (困毙 is a loss,
+not a draw) and the sixty-move no-capture rule.
+
+**仕/帅 constraint** — 象棋 forbids leaving the two generals facing each other on an
+open file. A Move that would expose them is illegal, not a loss.
+
+## Presentation
+
+**Board scene** — the canvas surface that draws the board, the pieces, and the
+effects for one Room.
+
+**Effect** — a short-lived visual response to a state transition (a placed stone, a
+captured piece, a check, a won Match). Effects read state; they never decide it.
+
+**Low-motion mode** — the participant's setting that suppresses camera shake, particle
+bursts, and long animations. Every Effect must have a low-motion form.
+
+**Spectator view** — the same Board scene rendered for a participant who holds no
+Seat, with the interactive affordances hidden.

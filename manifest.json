@@ -1,0 +1,49 @@
+{
+  "$schema": "https://raw.githubusercontent.com/t8y2/dbx/plugin-sdk-v1/plugins/manifest.schema.json",
+  "manifest_version": 1,
+  "id": "io.github.jzj2621899857.board-games",
+  "name": "Board Games",
+  "version": "0.1.0",
+  "publisher": "jzj2621899857",
+  "description": "Local-network Chinese chess and five-in-a-row, with spectators and replay.",
+  "icon": "assets/plugin.svg",
+  "source": "https://github.com/jzj2621899857/dbx-board-games",
+  "homepage": "https://github.com/jzj2621899857/dbx-board-games",
+  "engines": {
+    "dbx": ">=0.6.44",
+    "host_api": "1"
+  },
+  "permissions": [
+    "host.events"
+  ],
+  "entrypoints": {
+    "backend": {
+      "executable": "bin/dbx-plugin-board-games"
+    },
+    "ui": {
+      "root": "ui",
+      "entry": "ui/index.html"
+    }
+  },
+  "contributions": [
+    {
+      "type": "workbench",
+      "id": "io.github.jzj2621899857.board-games.workbench",
+      "label": "Board Games",
+      "description": "Host or join a local-network Chinese chess or five-in-a-row table.",
+      "icon": "assets/plugin.svg"
+    }
+  ],
+  "localizations": {
+    "zh-CN": {
+      "name": "棋牌桌",
+      "description": "本地局域网中国象棋与五子棋，支持观战与对局复盘。",
+      "contributions": {
+        "io.github.jzj2621899857.board-games.workbench": {
+          "label": "棋牌桌",
+          "description": "在局域网内开桌或加入中国象棋、五子棋对局。"
+        }
+      }
+    }
+  }
+}
