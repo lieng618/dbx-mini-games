@@ -60,7 +60,10 @@ export class BoardScene {
     this.boardLayer = new Container();
     this.pieceLayer = new Container();
     this.effectLayer = new Container();
-    this.root.addChild(this.boardLayer, this.pieceLayer, this.effectLayer);
+    // Under-effects sit between the board and the stones: a winning line belongs behind
+    // the pieces it connects, not painted over them.
+    this.underLayer = new Container();
+    this.root.addChild(this.boardLayer, this.underLayer, this.pieceLayer, this.effectLayer);
     this.app.stage.addChild(this.root);
 
     this.setGame(game);
@@ -280,6 +283,8 @@ export class BoardScene {
         new CheckEffect({
           boardWidth: this.boardBounds.width,
           boardHeight: this.boardBounds.height,
+          originX: this.boardBounds.left,
+          originY: this.boardBounds.top,
           focus,
           lowMotion: this.lowMotion,
         }),
@@ -303,7 +308,12 @@ export class BoardScene {
     const points = (snapshot.winLine || []).map((index) => cellCenter(lay, index));
     let sealAt = null;
     if (points.length) {
-      sealAt = points[Math.floor(points.length / 2)];
+      // The seal marks the decisive stone, not the middle of the line: the winning move is
+      // the one worth pointing at afterwards.
+      const lastIndex = snapshot.lastMove?.to;
+      const winIndexes = snapshot.winLine || [];
+      const at = winIndexes.indexOf(lastIndex);
+      sealAt = at >= 0 ? points[at] : points[points.length - 1];
     } else {
       // Xiangqi: stamp the losing general's square.
       for (let i = 0; i < cells.length; i++) {
@@ -340,9 +350,12 @@ export class BoardScene {
         // Gomoku encodes stones as 1 (black) and 2 (white) rather than by sign, because
         // both colours are positive piece codes in the engine. Reading the sign here would
         // paint every white stone black.
-        const stone = code === 2 ? 0xf7f2e6 : PALETTE.black;
+        const stone = code === 2 ? 0xfbf8f1 : PALETTE.black;
+        // A white stone on pale paper needs a defined edge and a soft inner shade, or it
+        // reads as a hole in the board.
         disc.circle(0, 0, radius).fill({ color: stone, alpha: 1 });
-        disc.circle(0, 0, radius).stroke({ width: 1, color: 0x8f8578, alpha: 0.55 });
+        disc.circle(0, 0, radius).stroke({ width: 1.6, color: 0x6f6555, alpha: 0.85 });
+        disc.circle(0, 0, radius * 0.72).stroke({ width: 1, color: 0x8b8272, alpha: 0.35 });
       }
       view.addChild(disc);
 
@@ -433,10 +446,12 @@ export class BoardScene {
     if (this.boardLayer) this.boardLayer.position.set(shake.x, shake.y);
     if (this.pieceLayer) this.pieceLayer.position.set(shake.x, shake.y);
     if (this.effectLayer) this.effectLayer.position.set(shake.x, shake.y);
+    if (this.underLayer) this.underLayer.position.set(shake.x, shake.y);
 
     for (const effect of this.effects) {
-      if (effect.view && !effect.view.parent && this.effectLayer) {
-        this.effectLayer.addChild(effect.view);
+      if (effect.view && !effect.view.parent) {
+        const target = effect.under ? this.underLayer : this.effectLayer;
+        if (target) target.addChild(effect.view);
       }
     }
 

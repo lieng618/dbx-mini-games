@@ -106,6 +106,8 @@ func (a *App) Call(method string, params map[string]any) (any, error) {
 		return a.replayNotation()
 	case "replay.state":
 		return a.replayState(params)
+	case "dev.scenario":
+		return a.devScenario(params)
 	default:
 		return nil, fmt.Errorf("unknown method %q", method)
 	}
@@ -555,9 +557,52 @@ func (a *App) boardViewLocked() map[string]any {
 				"outcome":  int(res.Outcome),
 				"reason":   res.Reason,
 			}
+			// A winning line lets the presentation draw through the stones that ended the
+			// match instead of guessing where the seal belongs.
+			if reporter, ok := engine.(game.WinLineReporter); ok {
+				if line := reporter.WinLine(); len(line) > 0 {
+					view["winLine"] = line
+				}
+			}
 		}
 	}
 	return view
+}
+
+// devScenario applies a named sequence of moves to the practice board.
+//
+// This exists so the presentation layer can be exercised without someone playing a real
+// match to reach a capture, a check, or a five-in-a-row. It is only reachable on a
+// practice board: a live match is never scripted.
+func (a *App) devScenario(params map[string]any) (map[string]any, error) {
+	name, _ := params["name"].(string)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.room == nil {
+		return nil, errors.New("not hosting a room")
+	}
+	if !a.room.Practice() {
+		return nil, errors.New("scenarios only run on a practice board")
+	}
+	moves, ok := scenarioMoves(a.room.GameName(), name)
+	if !ok {
+		return nil, fmt.Errorf("unknown scenario %q for %s", name, a.room.GameName())
+	}
+	// Restart the practice board first: a scenario describes a position from the opening,
+	// so replaying it on top of an existing line would be illegal and confusing.
+	a.room.EndPractice()
+	if err := a.room.StartPractice(time.Now().UnixMilli()); err != nil {
+		return nil, err
+	}
+	for _, m := range moves {
+		if err := a.room.PracticeMove(a.localID, m); err != nil {
+			return nil, err
+		}
+	}
+	if a.clock != nil {
+		a.clock.switchTurn(time.Now())
+	}
+	return a.snapshotLocked(), nil
 }
 
 // replayState returns the position at a given ply of the recorded match.

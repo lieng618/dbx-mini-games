@@ -123,6 +123,19 @@ function createLocalBridge() {
     ],
   };
 
+  // The winning fixture mirrors the sidecar's gomoku/win scenario.
+  const gomokuWinLine = () => [
+    { from: -1, to: 7 * 15 + 3 },
+    { from: -1, to: 8 * 15 + 0 },
+    { from: -1, to: 7 * 15 + 4 },
+    { from: -1, to: 8 * 15 + 2 },
+    { from: -1, to: 7 * 15 + 5 },
+    { from: -1, to: 8 * 15 + 4 },
+    { from: -1, to: 7 * 15 + 6 },
+    { from: -1, to: 8 * 15 + 6 },
+    { from: -1, to: 7 * 15 + 7 },
+  ];
+
   let scriptIndex = 0;
 
   const snapshot = () => ({
@@ -196,6 +209,26 @@ function createLocalBridge() {
           state.phase = "playing";
           resetBoard();
           return snapshot();
+        case "dev.scenario": {
+          // Apply the same fixtures the sidecar exposes, directly onto the preview board.
+          const name = params.name;
+          const line = name === "win" ? (scripts.gomokuWin || []) : (scripts[state.game] || []);
+          const lineToUse = name === "win" ? gomokuWinLine() : line;
+          const board = state.game === "xiangqi" ? xiangqiOpening() : gomokuOpening();
+          for (let i = 0; i < lineToUse.length; i++) {
+            const mv = lineToUse[i];
+            if (state.game === "xiangqi") {
+              board[mv.to] = board[mv.from];
+              board[mv.from] = 0;
+            } else {
+              board[mv.to] = i % 2 === 0 ? 1 : 2;
+            }
+          }
+          state.cells = board;
+          state.lastMove = lineToUse.length ? lineToUse[lineToUse.length - 1] : null;
+          state.phase = "practice";
+          return snapshot();
+        }
         case "room.practice.start":
           state.phase = "practice";
           resetBoard();

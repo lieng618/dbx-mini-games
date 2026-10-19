@@ -57,6 +57,13 @@ type CheckReporter interface {
 	KingSquare(seat Seat) int
 }
 
+// WinLineReporter is implemented by games that can name the squares forming the winning
+// line, so the presentation layer can draw through them. It is optional.
+type WinLineReporter interface {
+	// WinLine returns the squares of the winning line, in order, or nil.
+	WinLine() []int
+}
+
 // Engine is one game's authoritative rule machine. Implementations must be pure:
 // no clocks, no I/O, no locks. The Room serialises calls.
 type Engine interface {

@@ -115,13 +115,22 @@ func (c *Clock) switchTurn(now time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.consumeLocked(now)
-	c.running = 1 - c.running
+	if c.running < 0 || c.running >= len(c.remaining) {
+		// An unstarted clock has no turn to hand over; adopt seat zero instead of
+		// computing an out-of-range seat.
+		c.running = 0
+	} else {
+		c.running = 1 - c.running
+	}
 	c.since = now
 }
 
 // consumeLocked deducts elapsed time from the running seat.
+//
+// The index is bounds-checked: a clock that was never reset has running == -1, and an
+// out-of-range value here would panic inside a snapshot rather than degrade.
 func (c *Clock) consumeLocked(now time.Time) {
-	if c.running < 0 || c.since.IsZero() {
+	if c.running < 0 || c.running >= len(c.remaining) || c.since.IsZero() {
 		return
 	}
 	elapsed := now.Sub(c.since)

@@ -118,6 +118,37 @@ func (e *Engine) LegalFrom(from int) []int {
 	return []int{from}
 }
 
+// WinLine satisfies game.WinLineReporter. It returns the exact five squares that ended
+// the match, so the seal and the line land on the stones the player actually made.
+func (e *Engine) WinLine() []int {
+	if !e.result.Finished || len(e.history) == 0 {
+		return nil
+	}
+	last := e.history[len(e.history)-1]
+	colour := e.board[last.To]
+	if colour == Empty {
+		return nil
+	}
+	row, col := last.To/Cols, last.To%Cols
+	for _, dir := range [4][2]int{{0, 1}, {1, 0}, {1, 1}, {1, -1}} {
+		var run []int
+		for step := -4; step <= 4; step++ {
+			r := row + dir[0]*step
+			c := col + dir[1]*step
+			if r < 0 || r >= Rows || c < 0 || c >= Cols {
+				continue
+			}
+			if e.board[r*Cols+c] == colour {
+				run = append(run, r*Cols+c)
+			}
+		}
+		if len(run) >= WinLength {
+			return run
+		}
+	}
+	return nil
+}
+
 // winsAt reports whether the stone at idx completes a run of WinLength or more
 // horizontally, vertically or on either diagonal.
 func (e *Engine) winsAt(idx int, colour int8) bool {

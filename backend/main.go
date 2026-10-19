@@ -76,7 +76,7 @@ func main() {
 	h.app = app.New(dataDir, h.emit)
 
 	server := dbxpluginsdk.NewServer(dbxpluginsdk.Metadata{
-		ID:           "io.github.southernMortals.board-games",
+		ID:           "io.github.southernmortals.board-games",
 		Version:      version,
 		Capabilities: []string{"events", "lan-game"},
 	}, h)

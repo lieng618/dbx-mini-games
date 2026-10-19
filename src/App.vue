@@ -202,6 +202,18 @@ async function endPractice() {
   await call("room.practice.end");
 }
 
+/**
+ * Plays a scripted position so a specific effect can be inspected on demand.
+ *
+ * This is a practice-board convenience, not a game feature: it never runs during a real
+ * match, which the sidecar also enforces.
+ */
+async function runScenario(name) {
+  scene?.clearEffects();
+  const reply = await call("dev.scenario", { name });
+  if (reply) await loadNotation();
+}
+
 async function resign() {
   await call("game.resign");
 }
@@ -487,6 +499,16 @@ watch(game, (next) => {
           <button class="ghost" @click="leaveRoom">{{ role === "host" ? "结束房间" : "离开" }}</button>
         </div>
 
+        <div v-if="phase === 'practice'" class="scenarios">
+          <span class="hint">特效预演</span>
+          <div class="scenario-row">
+            <button class="ghost tiny" @click="runScenario('opening')">开局</button>
+            <button v-if="game === 'xiangqi'" class="ghost tiny" @click="runScenario('capture')">吃子</button>
+            <button v-if="game === 'xiangqi'" class="ghost tiny" @click="runScenario('check')">将军</button>
+            <button v-if="game === 'gomoku'" class="ghost tiny" @click="runScenario('win')">连五</button>
+          </div>
+        </div>
+
         <label class="toggle">
           <input type="checkbox" :checked="lowMotion" @change="toggleLowMotion" />
           <span>低动效模式</span>
@@ -725,6 +747,9 @@ hr { border: 0; border-top: 1px dashed var(--line); margin: 6px 0; }
 .actions { display: flex; flex-wrap: wrap; gap: 8px; }
 
 .toggle { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); cursor: pointer; }
+
+.scenarios { display: flex; flex-direction: column; gap: 5px; }
+.scenario-row { display: flex; flex-wrap: wrap; gap: 6px; }
 
 .address { display: flex; flex-direction: column; gap: 4px; }
 .address code {

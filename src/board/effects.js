@@ -130,7 +130,7 @@ export class CaptureBurstEffect {
  * low-motion form — a single soft rim pulse, no shake, no glyph.
  */
 export class CheckEffect {
-  constructor({ boardWidth, boardHeight, focus, lowMotion = false }) {
+  constructor({ boardWidth, boardHeight, originX = 0, originY = 0, focus, lowMotion = false }) {
     this.lowMotion = lowMotion;
     this.age = 0;
     this.duration = lowMotion ? 0.5 : 1.15;
@@ -141,6 +141,10 @@ export class CheckEffect {
     this.focus = focus;
     this.boardWidth = boardWidth;
     this.boardHeight = boardHeight;
+    // The frame is drawn in stage coordinates, so it needs the board's own origin: drawing
+    // from (0,0) would put the rim outside the board on the upper-left side.
+    this.originX = originX;
+    this.originY = originY;
 
     this.glyph = null;
     if (!lowMotion && focus) {
@@ -159,7 +163,7 @@ export class CheckEffect {
 
     this.rim.clear();
     this.rim
-      .roundRect(0, 0, this.boardWidth, this.boardHeight, 18)
+      .roundRect(this.originX, this.originY, this.boardWidth, this.boardHeight, 18)
       .stroke({ width: 5, color: PALETTE.red, alpha });
 
     if (this.glyph && this.focus) {
@@ -253,6 +257,8 @@ export class WinEffect {
     this.view.addChild(this.seal);
     this.points = points || [];
     this.sealAt = sealAt || (points && points.length ? points[points.length - 1] : null);
+    // The connecting line reads as a highlight on the board, so it goes under the pieces.
+    this.under = true;
   }
 
   update(dt) {
@@ -285,17 +291,16 @@ export class WinEffect {
       const overshoot = this.lowMotion ? 1 : 1.18 - 0.18 * stampT;
       const scale = overshoot * (stampT < 1 ? 0.92 + stampT * 0.08 : 1);
       const alpha = Math.min(1, stampT * 2.2);
-      const size = 54 * scale;
+      const size = 46 * scale;
       this.seal.position.set(this.sealAt.x, this.sealAt.y);
+      // A stamp reads as a solid block with a carved border, so fill it and cut the frame
+      // out in paper colour rather than drawing an outline.
       this.seal
-        .roundRect(-size, -size, size * 2, size * 2, 10)
-        .stroke({ width: 5, color: PALETTE.seal, alpha });
+        .roundRect(-size, -size, size * 2, size * 2, 12)
+        .fill({ color: PALETTE.seal, alpha: alpha * 0.92 });
       this.seal
-        .moveTo(-size * 0.5, 0)
-        .lineTo(size * 0.5, 0)
-        .moveTo(0, -size * 0.5)
-        .lineTo(0, size * 0.5)
-        .stroke({ width: 4, color: PALETTE.seal, alpha: alpha * 0.85 });
+        .roundRect(-size * 0.74, -size * 0.74, size * 1.48, size * 1.48, 8)
+        .stroke({ width: 3, color: PALETTE.paper, alpha: alpha * 0.9 });
     }
 
     if (this.age >= holdEnd + this.stampDuration) this.done = true;
