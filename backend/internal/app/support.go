@@ -66,6 +66,11 @@ func randomID() string {
 
 // localAddresses lists the machine's usable LAN addresses for manual joining, which is
 // the fallback when mDNS is blocked.
+//
+// Only addresses another machine on the same network could actually reach are kept. A
+// VPN or proxy client typically creates a tunnelled interface with a synthetic address
+// (Clash uses 198.18.0.0/15, for example); advertising that address means a peer copies it
+// and never connects.
 func localAddresses(port int) []string {
 	var out []string
 	addrs, err := net.InterfaceAddrs()
@@ -74,14 +79,44 @@ func localAddresses(port int) []string {
 	}
 	for _, addr := range addrs {
 		ipNet, ok := addr.(*net.IPNet)
-		if !ok || ipNet.IP.IsLoopback() {
+		if !ok {
 			continue
 		}
-		if v4 := ipNet.IP.To4(); v4 != nil {
-			out = append(out, fmt.Sprintf("%s:%d", v4.String(), port))
+		v4 := ipNet.IP.To4()
+		if v4 == nil {
+			continue
 		}
+		if !reachableOnLan(v4) {
+			continue
+		}
+		out = append(out, fmt.Sprintf("%s:%d", v4.String(), port))
 	}
 	return out
+}
+
+// lanBlocks are ranges that never identify a host reachable by a neighbour: loopback,
+// link-local, the benchmarking range that proxy clients borrow for fake IPs, and the
+// CGNAT range used inside tunnels.
+var lanBlocks = []net.IPNet{
+	{IP: net.IPv4(127, 0, 0, 0), Mask: net.CIDRMask(8, 32)},
+	{IP: net.IPv4(169, 254, 0, 0), Mask: net.CIDRMask(16, 32)},
+	{IP: net.IPv4(198, 18, 0, 0), Mask: net.CIDRMask(15, 32)},
+	{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)},
+	{IP: net.IPv4(0, 0, 0, 0), Mask: net.CIDRMask(8, 32)},
+}
+
+// reachableOnLan reports whether a peer on the same physical network could dial this
+// address.
+func reachableOnLan(ip net.IP) bool {
+	if ip.IsLoopback() || ip.IsUnspecified() || ip.IsMulticast() || ip.IsLinkLocalUnicast() {
+		return false
+	}
+	for _, block := range lanBlocks {
+		if block.Contains(ip) {
+			return false
+		}
+	}
+	return ip.IsPrivate()
 }
 
 // Clock is the host-authoritative match clock. The host alone decides a timeout; guests

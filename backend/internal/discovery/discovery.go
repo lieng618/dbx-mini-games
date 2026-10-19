@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"sync"
 	"time"
 
@@ -106,7 +107,8 @@ func Resolve(window time.Duration) ([]RoomInfo, error) {
 	var (
 		mu    sync.Mutex
 		found []RoomInfo
-		seen  = map[string]bool{}
+		// seen maps a room id to its index in found, so repeats replace rather than append.
+		seen = map[string]int{}
 	)
 	done := time.After(window)
 	for {
@@ -120,14 +122,61 @@ func Resolve(window time.Duration) ([]RoomInfo, error) {
 				continue
 			}
 			mu.Lock()
-			if !seen[info.RoomID+info.Address] {
-				seen[info.RoomID+info.Address] = true
+			// mDNS answers arrive per interface, so one host can be reported once per
+			// network adapter with a different address each time. A room is identified by
+			// its id, not by the address it happened to be announced from.
+			if index, already := seen[info.RoomID]; already {
+				if preferred(info, found[index]) {
+					found[index] = info
+				}
+			} else {
+				seen[info.RoomID] = len(found)
 				found = append(found, info)
 			}
 			mu.Unlock()
 		case <-done:
 			return dedupe(found), nil
 		}
+	}
+}
+
+// preferred reports whether candidate is a better address for the same room than current.
+//
+// A routable private address beats anything else, because that is the one a neighbouring
+// machine can actually dial.
+func preferred(candidate, current RoomInfo) bool {
+	return addressRank(candidate.Address) > addressRank(current.Address)
+}
+
+// addressRank scores how dialable an address is.
+func addressRank(address string) int {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return 0
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return 0
+	}
+	v4 := ip.To4()
+	if v4 == nil {
+		return 1
+	}
+	switch {
+	case v4[0] == 192 && v4[1] == 168:
+		return 4
+	case v4[0] == 10:
+		return 4
+	case v4[0] == 172 && v4[1] >= 16 && v4[1] <= 31:
+		return 4
+	case v4[0] == 198 && v4[1] == 18:
+		return 1
+	case v4[0] == 169 && v4[1] == 254:
+		return 1
+	case v4[0] == 127:
+		return 2
+	default:
+		return 3
 	}
 }
 

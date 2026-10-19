@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sync"
 	"time"
 )
 
@@ -18,7 +19,15 @@ type Client struct {
 	ticket   string
 	roomID   string
 	memberID string
-	Snapshot map[string]any
+
+	// mu guards the mutable view and the request table: the read loop updates snapshots
+	// while callers issue requests.
+	mu        sync.Mutex
+	snapshot  map[string]any
+	pending   map[string]chan Message
+	nextID    int
+	onState   func(map[string]any)
+	readError error
 }
 
 // JoinOptions describes how to reach and authenticate against a Room.
@@ -110,15 +119,137 @@ func Join(opts JoinOptions) (*Client, error) {
 		}
 	}
 	_ = conn.SetDeadline(time.Time{})
-	return &Client{
+	client := &Client{
 		conn:     conn,
 		identity: identity,
 		ticket:   welcome.Ticket,
 		roomID:   welcome.RoomID,
 		memberID: opts.Profile.ID,
-		Snapshot: snapshot,
-	}, nil
+		snapshot: snapshot,
+		pending:  map[string]chan Message{},
+	}
+	go client.readLoop()
+	return client, nil
 }
+
+// readLoop receives pushes and request replies from the host.
+func (c *Client) readLoop() {
+	for {
+		message, err := readMessage(c.conn)
+		if err != nil {
+			c.mu.Lock()
+			c.readError = err
+			for _, waiter := range c.pending {
+				close(waiter)
+			}
+			c.pending = map[string]chan Message{}
+			c.mu.Unlock()
+			return
+		}
+		switch message.Type {
+		case "state":
+			if len(message.Snapshot) == 0 {
+				continue
+			}
+			view := map[string]any{}
+			if err := json.Unmarshal(message.Snapshot, &view); err != nil {
+				continue
+			}
+			c.mu.Lock()
+			c.snapshot = view
+			notify := c.onState
+			c.mu.Unlock()
+			if notify != nil {
+				notify(view)
+			}
+		case "response":
+			c.mu.Lock()
+			waiter, ok := c.pending[message.RequestID]
+			delete(c.pending, message.RequestID)
+			c.mu.Unlock()
+			if ok {
+				waiter <- message
+			}
+		}
+	}
+}
+
+// OnState registers a callback fired whenever the host pushes a new snapshot.
+func (c *Client) OnState(fn func(map[string]any)) {
+	c.mu.Lock()
+	c.onState = fn
+	c.mu.Unlock()
+}
+
+// Call asks the host to perform an action and waits for its answer.
+//
+// The guest never applies the action locally: the host decides, then pushes the resulting
+// state back, so a spectator and a player always see the same board.
+func (c *Client) Call(method string, params any) (any, error) {
+	body, err := json.Marshal(params)
+	if err != nil {
+		return nil, err
+	}
+
+	c.mu.Lock()
+	if c.readError != nil {
+		c.mu.Unlock()
+		return nil, c.readError
+	}
+	c.nextID++
+	id := fmt.Sprintf("r%d", c.nextID)
+	waiter := make(chan Message, 1)
+	c.pending[id] = waiter
+	c.mu.Unlock()
+
+	if err := writeMessage(c.conn, Message{
+		Type:      "request",
+		Protocol:  Protocol,
+		RoomID:    c.roomID,
+		RequestID: id,
+		Method:    method,
+		Params:    body,
+	}); err != nil {
+		return nil, err
+	}
+
+	select {
+	case reply, ok := <-waiter:
+		if !ok {
+			return nil, errors.New("connection to the host closed")
+		}
+		if reply.Error != "" {
+			return nil, errors.New(reply.Error)
+		}
+		if len(reply.Result) == 0 {
+			return nil, nil
+		}
+		var decoded any
+		if err := json.Unmarshal(reply.Result, &decoded); err != nil {
+			return nil, err
+		}
+		return decoded, nil
+	case <-time.After(15 * time.Second):
+		c.mu.Lock()
+		delete(c.pending, id)
+		c.mu.Unlock()
+		return nil, errors.New("the host did not answer in time")
+	}
+}
+
+// Snapshot returns the latest state pushed by the host.
+func (c *Client) Snapshot() map[string]any {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make(map[string]any, len(c.snapshot))
+	for k, v := range c.snapshot {
+		out[k] = v
+	}
+	return out
+}
+
+// MemberID is this guest's own identity inside the room.
+func (c *Client) MemberID() string { return c.memberID }
 
 // rejection maps a host error string back to a sentinel.
 func rejection(text string) error {
@@ -139,7 +270,7 @@ func rejection(text string) error {
 func (c *Client) Ticket() string { return c.ticket }
 
 // SnapshotText renders the room view as JSON for callers that only need it verbatim.
-func (c *Client) SnapshotText() ([]byte, error) { return json.Marshal(c.Snapshot) }
+func (c *Client) SnapshotText() ([]byte, error) { return json.Marshal(c.Snapshot()) }
 
 // Close drops the connection.
 func (c *Client) Close() error { return c.conn.Close() }

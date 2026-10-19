@@ -26,6 +26,12 @@ type Message struct {
 	Profile  *Profile        `json:"profile,omitempty"`
 	Snapshot json.RawMessage `json:"snapshot,omitempty"`
 	Error    string          `json:"error,omitempty"`
+	// Request lets a guest ask the host to perform an action on its behalf. The host is the
+	// only authority, so a guest never mutates state locally.
+	RequestID string          `json:"requestId,omitempty"`
+	Method    string          `json:"method,omitempty"`
+	Params    json.RawMessage `json:"params,omitempty"`
+	Result    json.RawMessage `json:"result,omitempty"`
 }
 
 // Profile is the participant identity sent during the handshake.
@@ -42,14 +48,55 @@ type hostConn struct {
 	memberID  string
 }
 
+// RequestHandler applies one guest request against the authoritative room.
+//
+// It is supplied by the app layer so the transport stays free of game and seat rules.
+type RequestHandler func(memberID, method string, params json.RawMessage) (any, error)
+
 // Server hosts a Room over TLS on the local network.
 type Server struct {
 	identity ed25519.PrivateKey
 	listener net.Listener
 	room     *room.Room
 
-	mu    sync.Mutex
-	peers map[string]*hostConn
+	mu      sync.Mutex
+	peers   map[string]*hostConn
+	handler RequestHandler
+	// broadcasts keeps every live connection so state changes reach all guests.
+	broadcasts map[string]*hostConn
+}
+
+// SetRequestHandler installs the handler used for guest requests.
+func (s *Server) SetRequestHandler(handler RequestHandler) {
+	s.mu.Lock()
+	s.handler = handler
+	s.mu.Unlock()
+}
+
+// Broadcast sends the current snapshot to every connected guest.
+//
+// Guests are passive: they receive state and ask the host for actions, so the host pushes
+// after every change rather than answering a poll.
+func (s *Server) Broadcast(snapshotFor func(memberID string) any) {
+	s.mu.Lock()
+	peers := make([]*hostConn, 0, len(s.peers))
+	for _, peer := range s.peers {
+		peers = append(peers, peer)
+	}
+	s.mu.Unlock()
+
+	for _, peer := range peers {
+		payload, err := json.Marshal(snapshotFor(peer.memberID))
+		if err != nil {
+			continue
+		}
+		_ = s.write(peer.conn, Message{
+			Type:     "state",
+			Protocol: Protocol,
+			RoomID:   s.room.ID(),
+			Snapshot: payload,
+		})
+	}
 }
 
 // NewServer starts listening and returns the running server. The caller must Close it.
@@ -165,16 +212,36 @@ func (s *Server) handle(conn net.Conn) {
 		return
 	}
 
-	// Hold the connection open so the peer can report a disconnect.
-	buf := make([]byte, 1)
+	// Serve requests until the peer disconnects. A guest holds no authority, so every
+	// message it sends is a request for the host to act.
 	for {
-		if _, err := conn.Read(buf); err != nil {
+		message, err := s.read(conn)
+		if err != nil {
 			s.mu.Lock()
 			delete(s.peers, ticket)
 			s.mu.Unlock()
 			_ = s.room.Leave(member.ID)
 			return
 		}
+		if message.Type != "request" || message.Method == "" {
+			continue
+		}
+
+		s.mu.Lock()
+		handler := s.handler
+		s.mu.Unlock()
+
+		reply := Message{Type: "response", Protocol: Protocol, RequestID: message.RequestID}
+		if handler == nil {
+			reply.Error = "host is not ready to accept requests"
+		} else if result, callErr := handler(member.ID, message.Method, message.Params); callErr != nil {
+			reply.Error = callErr.Error()
+		} else if encoded, marshalErr := json.Marshal(result); marshalErr != nil {
+			reply.Error = "result could not be encoded"
+		} else {
+			reply.Result = encoded
+		}
+		_ = s.write(conn, reply)
 	}
 }
 

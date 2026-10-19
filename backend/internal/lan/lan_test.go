@@ -61,11 +61,11 @@ func TestHandshakeAndWelcome(t *testing.T) {
 	if client.Ticket() == "" {
 		t.Fatal("a successful join must return a reconnect ticket")
 	}
-	if client.Snapshot["roomId"] != "room-1" {
-		t.Fatalf("snapshot must carry the room id, got %v", client.Snapshot["roomId"])
+	if client.Snapshot()["roomId"] != "room-1" {
+		t.Fatalf("snapshot must carry the room id, got %v", client.Snapshot()["roomId"])
 	}
-	if client.Snapshot["selfId"] != "guest" {
-		t.Fatalf("snapshot must name the receiver, got %v", client.Snapshot["selfId"])
+	if client.Snapshot()["selfId"] != "guest" {
+		t.Fatalf("snapshot must name the receiver, got %v", client.Snapshot()["selfId"])
 	}
 
 	// The guest took the second seat by arrival order.

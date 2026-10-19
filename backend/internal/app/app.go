@@ -5,6 +5,7 @@ package app
 
 import (
 	"crypto/ed25519"
+	"encoding/json"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -76,30 +77,14 @@ func (a *App) Call(method string, params map[string]any) (any, error) {
 		return a.joinRoom(params)
 	case "room.snapshot":
 		return a.snapshot(), nil
-	case "room.start":
-		return a.startMatch()
-	case "room.practice.start":
-		return a.startPractice()
-	case "room.practice.end":
-		return a.endPractice()
-	case "room.seat":
-		return a.takeSeat(params)
-	case "room.release":
-		return a.releaseSeat()
+	case "room.start", "room.practice.start", "room.practice.end",
+		"room.seat", "room.release",
+		"game.move", "game.undo.request", "game.undo.consent", "game.resign", "game.rematch":
+		return a.act(method, params)
 	case "room.leave":
 		return a.leaveRoom()
-	case "game.move":
-		return a.move(params)
 	case "game.legal":
 		return a.legalMoves(params)
-	case "game.undo.request":
-		return a.requestUndo()
-	case "game.undo.consent":
-		return a.consentUndo()
-	case "game.resign":
-		return a.resign()
-	case "game.rematch":
-		return a.rematch()
 	case "replay.get":
 		return a.replayRecord()
 	case "replay.notation":
@@ -183,6 +168,11 @@ func (a *App) createRoom(params map[string]any) (map[string]any, error) {
 		return nil, err
 	}
 	adv, advErr := discovery.Advertise(r.ID(), name, gameName, srv.Port(), srv.PublicKey(), 1, room.SeatCount, password != "")
+	// Guests hold no authority: every action they take is a request the host applies.
+	srv.SetRequestHandler(func(memberID, method string, params json.RawMessage) (any, error) {
+		return a.serveGuest(memberID, method, params)
+	})
+
 	a.room, a.server, a.adv = r, srv, adv
 	a.localID = hostID
 	a.clock = newClock()
@@ -295,7 +285,7 @@ func (a *App) snapshot() map[string]any {
 	}
 	if a.client != nil {
 		view := map[string]any{"role": "guest", "lowMotion": a.lowMotion}
-		for k, v := range a.client.Snapshot {
+		for k, v := range a.client.Snapshot() {
 			view[k] = v
 		}
 		return view
@@ -303,101 +293,11 @@ func (a *App) snapshot() map[string]any {
 	return map[string]any{"role": "idle", "lowMotion": a.lowMotion, "profile": a.profile}
 }
 
-func (a *App) startMatch() (map[string]any, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.room == nil {
-		return nil, errors.New("not hosting a room")
-	}
-	if err := a.room.Start(time.Now().UnixMilli()); err != nil {
-		return nil, err
-	}
-	if a.clock != nil {
-		a.clock.reset(time.Now())
-	}
-	return a.snapshotLocked(), nil
-}
 
-// startPractice opens a solo board so one player can inspect the table and its effects
-// before anyone else arrives.
-func (a *App) startPractice() (map[string]any, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.room == nil {
-		return nil, errors.New("not hosting a room")
-	}
-	if err := a.room.StartPractice(time.Now().UnixMilli()); err != nil {
-		return nil, err
-	}
-	return a.snapshotLocked(), nil
-}
 
-// endPractice discards the solo board and returns to the lobby.
-func (a *App) endPractice() (map[string]any, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.room == nil {
-		return nil, errors.New("not hosting a room")
-	}
-	a.room.EndPractice()
-	return a.snapshotLocked(), nil
-}
 
-func (a *App) takeSeat(params map[string]any) (map[string]any, error) {
-	seat := -1
-	if v, ok := params["seat"].(float64); ok {
-		seat = int(v)
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.room == nil {
-		return nil, errors.New("not hosting a room")
-	}
-	if err := a.room.TakeSeat(a.localID, seat); err != nil {
-		return nil, err
-	}
-	return a.snapshotLocked(), nil
-}
 
-func (a *App) releaseSeat() (map[string]any, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.room == nil {
-		return nil, errors.New("not hosting a room")
-	}
-	if err := a.room.ReleaseSeat(a.localID); err != nil {
-		return nil, err
-	}
-	return a.snapshotLocked(), nil
-}
 
-func (a *App) move(params map[string]any) (map[string]any, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.room == nil {
-		return nil, errors.New("not hosting a room")
-	}
-	m := game.Move{From: -1, To: -1}
-	if v, ok := params["from"].(float64); ok {
-		m.From = int(v)
-	}
-	if v, ok := params["to"].(float64); ok {
-		m.To = int(v)
-	}
-	var err error
-	if a.room.Practice() {
-		err = a.room.PracticeMove(a.localID, m)
-	} else {
-		err = a.room.Move(a.localID, m, time.Now().UnixMilli())
-	}
-	if err != nil {
-		return nil, err
-	}
-	if a.clock != nil && a.room.Phase() == room.PhasePlaying {
-		a.clock.switchTurn(time.Now())
-	}
-	return a.snapshotLocked(), nil
-}
 
 func (a *App) legalMoves(params map[string]any) (map[string]any, error) {
 	a.mu.Lock()
@@ -425,53 +325,9 @@ func (a *App) legalMoves(params map[string]any) (map[string]any, error) {
 	return map[string]any{"destinations": engine.LegalFrom(from)}, nil
 }
 
-func (a *App) requestUndo() (map[string]any, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.room == nil {
-		return nil, errors.New("not hosting a room")
-	}
-	if err := a.room.RequestUndo(a.localID); err != nil {
-		return nil, err
-	}
-	return a.snapshotLocked(), nil
-}
 
-func (a *App) consentUndo() (map[string]any, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.room == nil {
-		return nil, errors.New("not hosting a room")
-	}
-	if err := a.room.ConsentUndo(a.localID); err != nil {
-		return nil, err
-	}
-	return a.snapshotLocked(), nil
-}
 
-func (a *App) resign() (map[string]any, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.room == nil {
-		return nil, errors.New("not hosting a room")
-	}
-	if err := a.room.Resign(a.localID); err != nil {
-		return nil, err
-	}
-	return a.snapshotLocked(), nil
-}
 
-func (a *App) rematch() (map[string]any, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.room == nil {
-		return nil, errors.New("not hosting a room")
-	}
-	if err := a.room.Rematch(); err != nil {
-		return nil, err
-	}
-	return a.snapshotLocked(), nil
-}
 
 func (a *App) replayRecord() (map[string]any, error) {
 	a.mu.RLock()
@@ -642,6 +498,211 @@ func (a *App) replayState(params map[string]any) (map[string]any, error) {
 		"lastMove": state.LastMove,
 		"result":   state.Result,
 	}, nil
+}
+
+
+// act performs one state-changing action on the authoritative room.
+//
+// A host applies it locally; a guest forwards it to the host and adopts the returned
+// snapshot. Guests hold no authority, so there is exactly one implementation of every
+// rule and it lives on the host.
+func (a *App) act(method string, params map[string]any) (map[string]any, error) {
+	a.mu.RLock()
+	client := a.client
+	a.mu.RUnlock()
+
+	if client != nil {
+		result, err := client.Call(method, params)
+		if err != nil {
+			return nil, err
+		}
+		return a.snapshot(), nilHelper(result)
+	}
+
+	a.mu.Lock()
+	if a.room == nil {
+		a.mu.Unlock()
+		return nil, errors.New("not hosting a room")
+	}
+	err := a.applyHostAction(method, params)
+	view := a.snapshotLocked()
+	a.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	// Guests are told about the change after the host's own state is settled, so a push
+	// never arrives describing a half-applied action.
+	a.pushState()
+	return view, nil
+}
+
+// nilHelper exists only to keep act's return shape uniform; it always returns nil.
+func nilHelper(any) error { return nil }
+
+
+// applyHostAction mutates the room for one action. The caller holds the lock.
+func (a *App) applyHostAction(method string, params map[string]any) error {
+	seatOf := func() int {
+		for index, id := range a.room.Seats() {
+			if id == a.localID {
+				return index
+			}
+		}
+		return -1
+	}
+	needSeat := func() error {
+		if seatOf() < 0 {
+			return errors.New("only seated players may do that")
+		}
+		return nil
+	}
+
+	switch method {
+	case "room.seat":
+		seat := -1
+		if v, ok := params["seat"].(float64); ok {
+			seat = int(v)
+		}
+		return a.room.TakeSeat(a.localID, seat)
+	case "room.release":
+		return a.room.ReleaseSeat(a.localID)
+	case "room.start":
+		if err := needSeat(); err != nil {
+			return err
+		}
+		if err := a.room.Start(time.Now().UnixMilli()); err != nil {
+			return err
+		}
+		if a.clock != nil {
+			a.clock.reset(time.Now())
+		}
+		return nil
+	case "room.practice.start":
+		if err := needSeat(); err != nil {
+			return err
+		}
+		return a.room.StartPractice(time.Now().UnixMilli())
+	case "room.practice.end":
+		a.room.EndPractice()
+		return nil
+	case "game.move":
+		if err := needSeat(); err != nil {
+			return err
+		}
+		m := game.Move{From: -1, To: -1}
+		if v, ok := params["from"].(float64); ok {
+			m.From = int(v)
+		}
+		if v, ok := params["to"].(float64); ok {
+			m.To = int(v)
+		}
+		if a.room.Practice() {
+			if err := a.room.PracticeMove(a.localID, m); err != nil {
+				return err
+			}
+			return nil
+		}
+		if err := a.room.Move(a.localID, m, time.Now().UnixMilli()); err != nil {
+			return err
+		}
+		if a.clock != nil && a.room.Phase() == room.PhasePlaying {
+			a.clock.switchTurn(time.Now())
+		}
+		return nil
+	case "game.undo.request":
+		if err := needSeat(); err != nil {
+			return err
+		}
+		return a.room.RequestUndo(a.localID)
+	case "game.undo.consent":
+		if err := needSeat(); err != nil {
+			return err
+		}
+		return a.room.ConsentUndo(a.localID)
+	case "game.resign":
+		if err := needSeat(); err != nil {
+			return err
+		}
+		return a.room.Resign(a.localID)
+	case "game.rematch":
+		return a.room.Rematch()
+	default:
+		return fmt.Errorf("unknown action %q", method)
+	}
+}
+
+
+// serveGuest applies one request that arrived from a guest over the LAN connection.
+//
+// The member id comes from the authenticated connection, never from the payload, so a
+// guest cannot act as somebody else.
+func (a *App) serveGuest(memberID, method string, params json.RawMessage) (any, error) {
+	decoded := map[string]any{}
+	if len(params) > 0 {
+		if err := json.Unmarshal(params, &decoded); err != nil {
+			return nil, errors.New("request parameters are not valid JSON")
+		}
+	}
+
+	a.mu.Lock()
+	if a.room == nil {
+		a.mu.Unlock()
+		return nil, errors.New("the host has no open room")
+	}
+	// Act on behalf of the requesting guest, then restore the host's own identity.
+	previous := a.localID
+	a.localID = memberID
+	err := a.applyHostAction(method, decoded)
+	a.localID = previous
+	a.mu.Unlock()
+
+	if err != nil {
+		return nil, err
+	}
+
+	a.pushState()
+	return map[string]any{"ok": true}, nil
+}
+
+// pushState sends the current snapshot to every connected guest.
+func (a *App) pushState() {
+	a.mu.RLock()
+	server := a.server
+	a.mu.RUnlock()
+	if server == nil {
+		return
+	}
+	server.Broadcast(func(memberID string) any {
+		return a.snapshotForMember(memberID)
+	})
+}
+
+// snapshotForMember renders the room view as seen by one participant.
+func (a *App) snapshotForMember(memberID string) map[string]any {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.room == nil {
+		return map[string]any{"role": "guest"}
+	}
+	view := map[string]any{
+		"role":      "guest",
+		"selfId":    memberID,
+		"roomId":    a.room.ID(),
+		"name":      a.room.Name(),
+		"game":      a.room.GameName(),
+		"phase":     string(a.room.Phase()),
+		"locked":    a.room.Locked(),
+		"seats":     a.room.Seats(),
+		"members":   a.room.Members(),
+		"lowMotion": a.lowMotion,
+	}
+	if rec, ok := a.room.Replay(); ok {
+		view["record"] = rec
+	}
+	for k, v := range a.boardViewLocked() {
+		view[k] = v
+	}
+	return view
 }
 
 // snapshotLocked renders a snapshot while the caller already holds the lock.
