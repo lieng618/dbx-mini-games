@@ -17,6 +17,8 @@ import {
   WinEffect,
   clearTransient,
 } from "./effects.js";
+import { BoardAudio, tap } from "./sound.js";
+import { PieceLayer } from "./pieces.js";
 
 /** Resolves a player's ink colour from their seat. */
 function seatColour(seat) {
@@ -31,12 +33,18 @@ export class BoardScene {
     this.lay = null;
     this.lowMotion = false;
     this.effects = [];
-    this.pieceViews = [];
-    this.selected = -1;
     this.lastCells = null;
     this.lastMove = null;
     this.result = null;
     this.destroyed = false;
+    this.audio = new BoardAudio();
+    // Effects that must fire later (a landing ink waits for the piece to arrive). Kept in
+    // one queue so an undo or a replay jump can drop them: a queued ripple for a move that
+    // no longer exists would paint ink on an empty square.
+    this.pending = [];
+    // Tracks which one-shot cues have already fired for the current position, so a
+    // repeated snapshot cannot re-trigger the check gong or the victory chime.
+    this.cued = { check: false, win: false };
   }
 
   /** Boots Pixi and mounts the canvas. Throws when the renderer cannot start. */
@@ -58,12 +66,15 @@ export class BoardScene {
 
     this.root = new Container();
     this.boardLayer = new Container();
-    this.pieceLayer = new Container();
+    this.pieces = new PieceLayer();
+    this.pieceLayer = this.pieces.root;
     this.effectLayer = new Container();
     // Under-effects sit between the board and the stones: a winning line belongs behind
     // the pieces it connects, not painted over them.
     this.underLayer = new Container();
-    this.root.addChild(this.boardLayer, this.underLayer, this.pieceLayer, this.effectLayer);
+    // Above the stones: seals and stamps land on the board, not behind it.
+    this.overlayLayer = new Container();
+    this.root.addChild(this.boardLayer, this.underLayer, this.pieceLayer, this.effectLayer, this.overlayLayer);
     this.app.stage.addChild(this.root);
 
     this.setGame(game);
@@ -78,11 +89,16 @@ export class BoardScene {
   /** Switches the board geometry. Safe to call when the room changes game. */
   setGame(game) {
     if (this.game === game) return;
+    // Effects are drawn in the old board's coordinates and some of them (the check glyph,
+    // the winning line) are game-specific, so carrying them across a switch would strand
+    // ink at meaningless positions.
+    this.clearEffects();
+    this.cued.check = false;
+    this.cued.win = false;
     this.game = game;
     this.lay = layout(game);
-    this.selected = -1;
     this.drawBoard();
-    this.clearPieces();
+    this.pieces.reset(game, this.lay);
   }
 
   /** Draws the static board: frame, grid, palace diagonals, river. */
@@ -105,6 +121,7 @@ export class BoardScene {
       .stroke({ width: 2, color: 0x8a6a3c, alpha: 0.5 });
     g.roundRect(left - 26, top - 26, lay.boardWidth + 52, lay.boardHeight + 52, 18)
       .stroke({ width: 1, color: 0x8a6a3c, alpha: 0.32 });
+    this.drawPaperGrain(g, left, top, lay);
 
     const lineColour = 0x6b5433;
     if (this.game === "xiangqi") {
@@ -161,6 +178,41 @@ export class BoardScene {
     this.boardBounds = { left, top, width: lay.boardWidth, height: lay.boardHeight };
   }
 
+  /**
+   * Speckles the paper so it reads as a sheet rather than as a flat fill.
+   *
+   * Ink effects only look wet against something absorbent. This is a fixed, deterministic
+   * scatter of very faint dots and fibre strokes, drawn once, cost paid at board paint only.
+   */
+  drawPaperGrain(g, left, top, lay) {
+    let seed = 0x2f6b1d;
+    const rand = () => {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      return seed / 0x7fffffff;
+    };
+    const w = lay.boardWidth + 68;
+    const h = lay.boardHeight + 68;
+    for (let i = 0; i < 320; i++) {
+      const x = left - 34 + rand() * w;
+      const y = top - 34 + rand() * h;
+      const r = 0.6 + rand() * 1.6;
+      g.circle(x, y, r).fill({ color: 0x8a6a3c, alpha: 0.05 + rand() * 0.07 });
+    }
+    // Fibres: short strokes whose direction is mostly diagonal, like laid paper.
+    for (let i = 0; i < 90; i++) {
+      const x = left - 34 + rand() * w;
+      const y = top - 34 + rand() * h;
+      const len = 4 + rand() * 16;
+      const angle = (rand() - 0.5) * 0.9 + (rand() < 0.5 ? 0 : Math.PI / 2);
+      g.moveTo(x, y)
+        .lineTo(x + Math.cos(angle) * len, y + Math.sin(angle) * len)
+        .stroke({ width: 0.7, color: 0x8a6a3c, alpha: 0.04 + rand() * 0.05 });
+    }
+    // Vignette: corner shadows pooling toward the edges of the sheet.
+    g.roundRect(left - 34, top - 34, w, h, 22).stroke({ width: 26, color: 0x6b5433, alpha: 0.04 });
+    g.roundRect(left - 20, top - 20, w - 28, h - 28, 18).stroke({ width: 12, color: 0x6b5433, alpha: 0.03 });
+  }
+
   /** Renders the faint 楚河汉界 across the river gap. */
   drawRiverLabel() {
     const lay = this.lay;
@@ -182,9 +234,9 @@ export class BoardScene {
     this.boardLayer.addChild(left, right);
   }
 
+  /** Drops every piece view. Only for teardown; a move must never rebuild the layer. */
   clearPieces() {
-    this.pieceLayer.removeChildren().forEach((child) => child.destroy({ children: true }));
-    this.pieceViews = [];
+    this.pieces.reset(this.game, this.lay);
   }
 
   /**
@@ -207,64 +259,58 @@ export class BoardScene {
     const cellCount = lay.cells;
     const prev = this.lastCells;
 
-    // Detect a capture or a landing by comparing arrays.
-    let landed = -1;
-    let captured = -1;
-    if (prev && prev.length === cells.length) {
-      for (let i = 0; i < cellCount; i++) {
-        const before = prev[i] || 0;
-        const after = cells[i] || 0;
-        if (before !== after) {
-          if (after !== 0) landed = i;
-          if (before !== 0 && after === 0) captured = i;
-          // A move that lands and clears the origin in one snapshot: the origin is a
-          // capture only for xiangqi, where the piece physically left.
-          if (before !== 0 && after === 0 && this.game === "xiangqi") captured = i;
-        }
-      }
-    }
-
+    // The piece layer resolves identity and animates the move; it reports what it played.
+    // Effects are then anchored to that timeline instead of to the snapshot's arrival, so
+    // the ink lands when the piece does.
     this.lastCells = Array.from(cells);
-    this.drawPieces(cells);
+    const moves = this.drawPieces(cells, snapshot) || [];
+
+    // A new position means the one-shot cues are live again. This is reset here rather than
+    // on move, because a spectator has no move callback at all.
+    if (prev && prev.length === cells.length && prev.some((v, i) => v !== cells[i])) {
+      this.cued.check = false;
+      this.cued.win = false;
+    }
 
     const lay2 = lay;
-    if (landed >= 0) {
-      const point = cellCenter(lay2, landed);
-      this.effects.push(
-        new RippleEffect({
-          x: point.x,
-          y: point.y,
-          radius: lay2.step * 0.34,
-          heavy: this.game === "xiangqi",
-          lowMotion: this.lowMotion,
-        }),
-      );
-    }
-    // A xiangqi capture shows as the destination changing from an enemy piece to ours,
-    // which the diff above reports as `landed` with a nonzero `before`. Detect that case
-    // explicitly so the burst fires on the captured square.
-    if (prev && this.game === "xiangqi" && landed >= 0 && prev[landed]) {
-      const point = cellCenter(lay2, landed);
-      this.effects.push(
-        new CaptureBurstEffect({
-          x: point.x,
-          y: point.y,
-          radius: lay2.step * 0.36,
-          colour: seatColour(prev[landed] > 0 ? 0 : 1),
-          lowMotion: this.lowMotion,
-        }),
-      );
-    }
-    if (captured >= 0 && this.game !== "xiangqi") {
-      const point = cellCenter(lay2, captured);
-      this.effects.push(
-        new CaptureBurstEffect({
-          x: point.x,
-          y: point.y,
-          radius: lay2.step * 0.3,
-          lowMotion: this.lowMotion,
-        }),
-      );
+    for (const move of moves) {
+      const travel = move.duration || 0;
+      // Landing ink fires as the piece touches down; a capture fires a beat earlier so the
+      // burst and the knock-back overlap instead of queueing.
+      this.schedule(travel, () => {
+        const turn = snapshot.turnSeat;
+        const colour = turn === 1 ? PALETTE.black : PALETTE.red;
+        this.effects.push(
+          new RippleEffect({
+            x: move.to.x,
+            y: move.to.y,
+            radius: lay2.step * 0.34,
+            colour,
+            heavy: this.game === "xiangqi",
+            lowMotion: this.lowMotion,
+          }),
+        );
+        this.audio.play(this.game === "xiangqi" ? "landHeavy" : "land", {
+          pitch: (move.to.x + move.to.y) % 2 < 1 ? 1.02 : 0.97,
+        });
+        tap(6);
+      });
+
+      if (move.captured) {
+        this.schedule(Math.max(0, travel - 0.06), () => {
+          this.effects.push(
+            new CaptureBurstEffect({
+              x: move.to.x,
+              y: move.to.y,
+              radius: lay2.step * 0.36,
+              colour: this.game === "xiangqi" ? PALETTE.red : PALETTE.ink,
+              lowMotion: this.lowMotion,
+            }),
+          );
+          this.audio.play("capture");
+          tap([10, 24, 14]);
+        });
+      }
     }
 
     // Last-move marker.
@@ -276,8 +322,10 @@ export class BoardScene {
       );
     }
 
-    // Check announcement.
-    if (snapshot.inCheck && this.boardBounds) {
+    // Check announcement. Only xiangqi has a general to threaten: a gomoku board that
+    // carries a stale inCheck flag (a room switched games, a snapshot replayed) must not
+    // sprout a 将 glyph over the stones.
+    if (snapshot.inCheck && this.boardBounds && this.game === "xiangqi") {
       const focus = snapshot.checkFocus != null ? cellCenter(lay2, snapshot.checkFocus) : null;
       this.effects.push(
         new CheckEffect({
@@ -286,9 +334,15 @@ export class BoardScene {
           originX: this.boardBounds.left,
           originY: this.boardBounds.top,
           focus,
+          step: lay2.step,
           lowMotion: this.lowMotion,
         }),
       );
+      if (!this.cued.check) {
+        this.cued.check = true;
+        this.audio.play("check");
+        tap([26, 40, 26]);
+      }
       this.boardLayer.position.set(0, 0);
     }
 
@@ -309,11 +363,30 @@ export class BoardScene {
     let sealAt = null;
     if (points.length) {
       // The seal marks the decisive stone, not the middle of the line: the winning move is
-      // the one worth pointing at afterwards.
+      // the one worth pointing at afterwards. It is nudged just past that stone, because a
+      // stamp centred on a stone hides the very piece it is celebrating.
       const lastIndex = snapshot.lastMove?.to;
       const winIndexes = snapshot.winLine || [];
       const at = winIndexes.indexOf(lastIndex);
-      sealAt = at >= 0 ? points[at] : points[points.length - 1];
+      const anchor = at >= 0 ? points[at] : points[points.length - 1];
+      const prev = at > 0 ? points[at - 1] : points.length > 1 ? points[0] : null;
+      let dx = 0;
+      let dy = -1;
+      if (prev) {
+        const vx = anchor.x - prev.x;
+        const vy = anchor.y - prev.y;
+        const len = Math.hypot(vx, vy) || 1;
+        dx = vx / len;
+        dy = vy / len;
+      }
+      const push = lay.step * 0.78;
+      // Clamped inside the board: a win on the last rank would otherwise push the stamp
+      // half off the paper.
+      const margin = lay.step * 0.5;
+      sealAt = {
+        x: Math.min(Math.max(anchor.x + dx * push, lay.originX + margin), lay.originX + lay.boardWidth - margin),
+        y: Math.min(Math.max(anchor.y + dy * push, lay.originY + margin), lay.originY + lay.boardHeight - margin),
+      };
     } else {
       // Xiangqi: stamp the losing general's square.
       for (let i = 0; i < cells.length; i++) {
@@ -323,109 +396,73 @@ export class BoardScene {
         }
       }
     }
-    this.effects.push(new WinEffect({ points, sealAt, lowMotion: this.lowMotion }));
+    this.effects.push(
+      new WinEffect({
+        points,
+        sealAt,
+        step: lay.step,
+        lowMotion: this.lowMotion,
+        // 连五 for five-in-a-row, 胜 for a decided chess game: the block should say what
+        // actually happened, not just "someone won".
+        sealGlyph: this.game === "gomoku" ? "五" : "胜",
+      }),
+    );
+    if (!this.cued.win) {
+      this.cued.win = true;
+      this.audio.play("win");
+      tap([18, 60, 40]);
+    }
   }
 
-  /** Draws every piece and stone from a cell array. */
-  drawPieces(cells) {
-    this.clearPieces();
-    const lay = this.lay;
-    // Pieces must not touch on xiangqi's tighter grid; 0.36 of the gap reads as a proper
-    // set with a visible gap between neighbouring discs.
-    const radius = lay.step * (this.game === "xiangqi" ? 0.355 : 0.4);
-
-    for (let i = 0; i < cells.length; i++) {
-      const code = cells[i] || 0;
-      if (!code) continue;
-      const point = cellCenter(lay, i);
-      const view = new Container();
-      view.position.set(point.x, point.y);
-
-      const disc = new Graphics();
-      if (this.game === "xiangqi") {
-        disc.circle(0, 0, radius).fill({ color: 0xf6efdd, alpha: 1 });
-        disc.circle(0, 0, radius).stroke({ width: 2, color: code > 0 ? PALETTE.red : PALETTE.black, alpha: 0.9 });
-        disc.circle(0, 0, radius * 0.84).stroke({ width: 1, color: code > 0 ? PALETTE.red : PALETTE.black, alpha: 0.45 });
-      } else {
-        // Gomoku encodes stones as 1 (black) and 2 (white) rather than by sign, because
-        // both colours are positive piece codes in the engine. Reading the sign here would
-        // paint every white stone black.
-        const stone = code === 2 ? 0xfbf8f1 : PALETTE.black;
-        // A white stone on pale paper needs a defined edge and a soft inner shade, or it
-        // reads as a hole in the board.
-        disc.circle(0, 0, radius).fill({ color: stone, alpha: 1 });
-        disc.circle(0, 0, radius).stroke({ width: 1.6, color: 0x6f6555, alpha: 0.85 });
-        disc.circle(0, 0, radius * 0.72).stroke({ width: 1, color: 0x8b8272, alpha: 0.35 });
-      }
-      view.addChild(disc);
-
-      if (this.game === "xiangqi") {
-        const glyph = glyphFor(code);
-        if (glyph) {
-          const text = new Text({
-            text: glyph,
-            style: new TextStyle({
-              fontFamily: "Songti SC, SimSun, STSong, serif",
-              fontSize: radius * 1.24,
-              fontWeight: "600",
-              fill: code > 0 ? PALETTE.red : PALETTE.black,
-            }),
-          });
-          text.anchor.set(0.5);
-          text.position.set(0, radius * 0.04);
-          view.addChild(text);
-        }
-      }
-
-      // Selection ring for the piece the local player picked up.
-      if (i === this.selected) {
-        const ring = new Graphics();
-        ring.circle(0, 0, radius * 1.2).stroke({ width: 2.6, color: PALETTE.gold, alpha: 0.95 });
-        view.addChild(ring);
-      }
-
-      this.pieceLayer.addChild(view);
-      this.pieceViews.push(view);
-    }
+  /**
+   * Hands the authoritative cell array to the piece layer.
+   *
+   * The layer keeps its views alive and animates a recognised move; it reports back the
+   * moves it played so the ink can be anchored to the same event. The old implementation
+   * destroyed and rebuilt every piece here, which is why nothing on the board ever moved.
+   */
+  drawPieces(cells, snapshot = {}) {
+    const moves = this.pieces.sync(cells, this.lay, { animate: true });
+    this.lastMoves = moves;
+    return moves;
   }
 
   /** Draws legal destination hints for the selected piece. */
   showHints(indexes) {
-    if (!this.hintLayer) {
-      this.hintLayer = new Container();
-      this.effectLayer.addChild(this.hintLayer);
-    }
-    this.hintLayer.removeChildren().forEach((child) => child.destroy({ children: true }));
-    const lay = this.lay;
-    for (const index of indexes || []) {
-      if (index < 0 || index >= lay.cells) continue;
-      const point = cellCenter(lay, index);
-      const dot = new Graphics();
-      dot.circle(point.x, point.y, lay.step * 0.11).fill({ color: PALETTE.gold, alpha: 0.72 });
-      dot.circle(point.x, point.y, lay.step * 0.42).stroke({ width: 1.6, color: PALETTE.gold, alpha: 0.34 });
-      this.hintLayer.addChild(dot);
-    }
+    if (!this.lay) return;
+    this.pieces.showHints(this.lay, indexes);
   }
 
   /** Selects a piece locally and asks the host for its legal destinations. */
   select(index) {
     this.selected = index;
-    if (this.lastCells) this.drawPieces(this.lastCells);
+    this.pieces.setSelected(index);
     this.callbacks.onSelect?.(index);
   }
 
   clearSelection() {
     this.selected = -1;
+    this.pieces.setSelected(-1);
     this.showHints([]);
-    if (this.lastCells) this.drawPieces(this.lastCells);
   }
 
   onPointer(event) {
     if (!this.lay) return;
+    // The first pointer contact is the only reliable moment to open an AudioContext.
+    this.audio.unlock();
     const point = event.getLocalPosition(this.app.stage);
     const index = cellAt(this.lay, point.x, point.y);
     if (index < 0) return;
     this.callbacks.onCell?.(index);
+  }
+
+  /** Queues a callback to run after `delay` seconds of scene time. */
+  schedule(delay, fn) {
+    if (delay <= 0) {
+      fn();
+      return;
+    }
+    this.pending.push({ at: delay, fn });
   }
 
   /** Advances all live effects. */
@@ -433,6 +470,21 @@ export class BoardScene {
     if (this.destroyed) return;
     // Cap dt so a background tab returning to focus cannot fast-forward every effect.
     const step = Math.min(dt, 0.05);
+    this.pieces.update(step);
+
+    // Fire due cues. Iterate a copy because a callback may push effects, not cues.
+    if (this.pending.length) {
+      const due = [];
+      for (let i = this.pending.length - 1; i >= 0; i--) {
+        const item = this.pending[i];
+        item.at -= step;
+        if (item.at <= 0) {
+          due.push(item);
+          this.pending.splice(i, 1);
+        }
+      }
+      for (const item of due) item.fn();
+    }
     for (const effect of this.effects) effect.update(step);
 
     // Camera shake is owned by the check effect and applied to the board as a whole.
@@ -447,11 +499,17 @@ export class BoardScene {
     if (this.pieceLayer) this.pieceLayer.position.set(shake.x, shake.y);
     if (this.effectLayer) this.effectLayer.position.set(shake.x, shake.y);
     if (this.underLayer) this.underLayer.position.set(shake.x, shake.y);
+    if (this.overlayLayer) this.overlayLayer.position.set(shake.x, shake.y);
 
     for (const effect of this.effects) {
       if (effect.view && !effect.view.parent) {
         const target = effect.under ? this.underLayer : this.effectLayer;
         if (target) target.addChild(effect.view);
+      }
+      // Some effects split across layers: the win stroke sits under the stones while its
+      // seal lands on top of them, so it carries a second container that always goes above.
+      if (effect.overlayView && !effect.overlayView.parent && this.overlayLayer) {
+        this.overlayLayer.addChild(effect.overlayView);
       }
     }
 
@@ -465,15 +523,18 @@ export class BoardScene {
 
   /** Clears transient ink, used when navigating a replay or undoing. */
   clearEffects() {
+    this.pending.length = 0;
     clearTransient(this.effects);
     if (this.boardLayer) this.boardLayer.position.set(0, 0);
     if (this.pieceLayer) this.pieceLayer.position.set(0, 0);
     if (this.effectLayer) this.effectLayer.position.set(0, 0);
+    if (this.overlayLayer) this.overlayLayer.position.set(0, 0);
   }
 
   destroy() {
     this.destroyed = true;
     this.clearEffects();
+    this.audio.destroy();
     if (this.app) {
       this.app.destroy(true, { children: true });
       this.app = null;

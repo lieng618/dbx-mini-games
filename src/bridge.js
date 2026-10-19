@@ -123,6 +123,52 @@ function createLocalBridge() {
     ],
   };
 
+  // Scenario fixtures, copied from the sidecar so the preview and the real host agree.
+  const SCENARIO_FIXTURES = {
+    xiangqi: {
+      opening: [
+        { from: 7 * 9 + 1, to: 7 * 9 + 4 },
+        { from: 0 * 9 + 1, to: 2 * 9 + 2 },
+      ],
+      capture: [
+        { from: 70, to: 7 },
+        { from: 19, to: 10 },
+        { from: 64, to: 1 },
+      ],
+      check: [
+        { from: 82, to: 65 },
+        { from: 8, to: 17 },
+        { from: 62, to: 53 },
+        { from: 19, to: 55 },
+        { from: 70, to: 68 },
+        { from: 2, to: 22 },
+        { from: 83, to: 67 },
+        { from: 55, to: 58 },
+      ],
+    },
+    gomoku: {
+      opening: [
+        { from: -1, to: 7 * 15 + 7 },
+        { from: -1, to: 7 * 15 + 8 },
+        { from: -1, to: 8 * 15 + 8 },
+        { from: -1, to: 6 * 15 + 6 },
+        { from: -1, to: 8 * 15 + 7 },
+        { from: -1, to: 6 * 15 + 8 },
+      ],
+      win: [
+        { from: -1, to: 7 * 15 + 3 },
+        { from: -1, to: 8 * 15 + 0 },
+        { from: -1, to: 7 * 15 + 4 },
+        { from: -1, to: 8 * 15 + 2 },
+        { from: -1, to: 7 * 15 + 5 },
+        { from: -1, to: 8 * 15 + 4 },
+        { from: -1, to: 7 * 15 + 6 },
+        { from: -1, to: 8 * 15 + 6 },
+        { from: -1, to: 7 * 15 + 7 },
+      ],
+    },
+  };
+
   // The winning fixture mirrors the sidecar's gomoku/win scenario.
   const gomokuWinLine = () => [
     { from: -1, to: 7 * 15 + 3 },
@@ -210,10 +256,12 @@ function createLocalBridge() {
           resetBoard();
           return snapshot();
         case "dev.scenario": {
-          // Apply the same fixtures the sidecar exposes, directly onto the preview board.
-          const name = params.name;
-          const line = name === "win" ? (scripts.gomokuWin || []) : (scripts[state.game] || []);
-          const lineToUse = name === "win" ? gomokuWinLine() : line;
+          // Mirrors backend/internal/app/scenarios.go, because a preview that plays the same
+          // line for every scenario cannot be used to review the effects those scenarios exist
+          // to show.
+          const fixtures = SCENARIO_FIXTURES[state.game] || {};
+          const lineToUse = fixtures[params.name];
+          if (!lineToUse) throw new Error(`未知场景 ${params.name}`);
           const board = state.game === "xiangqi" ? xiangqiOpening() : gomokuOpening();
           for (let i = 0; i < lineToUse.length; i++) {
             const mv = lineToUse[i];
@@ -227,6 +275,10 @@ function createLocalBridge() {
           state.cells = board;
           state.lastMove = lineToUse.length ? lineToUse[lineToUse.length - 1] : null;
           state.phase = "practice";
+          state.inCheck = params.name === "check";
+          state.checkFocus = state.inCheck ? 4 : null;
+          state.result = params.name === "win" ? { finished: true, outcome: 1, reason: "five in a row" } : null;
+          state.winLine = params.name === "win" ? [7 * 15 + 3, 7 * 15 + 4, 7 * 15 + 5, 7 * 15 + 6, 7 * 15 + 7] : [];
           return snapshot();
         }
         case "room.practice.start":

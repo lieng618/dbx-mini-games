@@ -7,3 +7,6 @@
 # Added after the workflow scope is granted; the release pipeline needs `workflow` scope
 # on the pushing token, which a plain `repo` token does not have.
 /.github/workflows/plugin-release.yml
+
+# Screenshot frames produced by the verification scripts: evidence, not source.
+/scripts/out/
