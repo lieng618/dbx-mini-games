@@ -242,6 +242,32 @@ function createLocalBridge() {
           state.phase = "lobby";
           resetBoard();
           return snapshot();
+        case "replay.state": {
+          // The preview replays its scripted line by rebuilding the opening and applying
+          // the first N entries, mirroring what the sidecar does.
+          const line = scripts[state.game] || [];
+          const ply = Math.max(0, Math.min(line.length, Number(params.ply ?? line.length)));
+          const board = state.game === "xiangqi" ? xiangqiOpening() : gomokuOpening();
+          for (let i = 0; i < ply; i++) {
+            const mv = line[i];
+            if (state.game === "xiangqi") {
+              board[mv.to] = board[mv.from];
+              board[mv.from] = 0;
+            } else {
+              board[mv.to] = i % 2 === 0 ? 1 : 2;
+            }
+          }
+          const last = ply > 0 ? line[ply - 1] : null;
+          return {
+            ply,
+            total: line.length,
+            cells: board,
+            turnSeat: ply % 2,
+            notation: line.slice(0, ply).map((_, i) => `第 ${i + 1} 手`),
+            lastMove: last,
+            result: ply >= line.length ? state.result : null,
+          };
+        }
         case "replay.notation":
           return { notation: (scripts[state.game] || []).slice(0, scriptIndex).map((_, i) => `第 ${i + 1} 手`) };
         case "room.seat":

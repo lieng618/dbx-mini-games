@@ -337,9 +337,12 @@ export class BoardScene {
         disc.circle(0, 0, radius).stroke({ width: 2, color: code > 0 ? PALETTE.red : PALETTE.black, alpha: 0.9 });
         disc.circle(0, 0, radius * 0.84).stroke({ width: 1, color: code > 0 ? PALETTE.red : PALETTE.black, alpha: 0.45 });
       } else {
-        const stone = code > 0 ? PALETTE.black : 0xf4efe4;
+        // Gomoku encodes stones as 1 (black) and 2 (white) rather than by sign, because
+        // both colours are positive piece codes in the engine. Reading the sign here would
+        // paint every white stone black.
+        const stone = code === 2 ? 0xf7f2e6 : PALETTE.black;
         disc.circle(0, 0, radius).fill({ color: stone, alpha: 1 });
-        disc.circle(0, 0, radius).stroke({ width: 1, color: 0x8f8578, alpha: 0.5 });
+        disc.circle(0, 0, radius).stroke({ width: 1, color: 0x8f8578, alpha: 0.55 });
       }
       view.addChild(disc);
 

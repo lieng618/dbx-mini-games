@@ -104,6 +104,8 @@ func (a *App) Call(method string, params map[string]any) (any, error) {
 		return a.replayRecord()
 	case "replay.notation":
 		return a.replayNotation()
+	case "replay.state":
+		return a.replayState(params)
 	default:
 		return nil, fmt.Errorf("unknown method %q", method)
 	}
@@ -556,6 +558,45 @@ func (a *App) boardViewLocked() map[string]any {
 		}
 	}
 	return view
+}
+
+// replayState returns the position at a given ply of the recorded match.
+//
+// The client drives a scrubber, so each request is stateless: it rebuilds the position by
+// replaying the prefix. That keeps the sidecar free of per-viewer cursor state.
+func (a *App) replayState(params map[string]any) (map[string]any, error) {
+	a.mu.RLock()
+	roomRef := a.room
+	a.mu.RUnlock()
+	if roomRef == nil {
+		return nil, errors.New("not hosting a room")
+	}
+	rec, ok := roomRef.Replay()
+	if !ok {
+		return nil, errors.New("no match has been played yet")
+	}
+	ply := 0
+	if v, ok := params["ply"].(float64); ok {
+		ply = int(v)
+	}
+	rp, err := replay.New(rec)
+	if err != nil {
+		return nil, err
+	}
+	if err := rp.Seek(ply); err != nil {
+		return nil, err
+	}
+	state := rp.State()
+	notes, _ := rp.Notation()
+	return map[string]any{
+		"ply":      state.Cursor,
+		"total":    state.Total,
+		"cells":    state.Cells,
+		"turnSeat": int(state.Seat),
+		"notation": notes,
+		"lastMove": state.LastMove,
+		"result":   state.Result,
+	}, nil
 }
 
 // snapshotLocked renders a snapshot while the caller already holds the lock.

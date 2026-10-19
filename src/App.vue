@@ -41,6 +41,9 @@ const winLine = ref([]);
 const clock = ref(null);
 const record = ref(null);
 const notation = ref([]);
+const replayPly = ref(0);
+const replayTotal = ref(0);
+const replaying = ref(false);
 
 const inputName = ref("我的棋室");
 const inputPassword = ref("");
@@ -248,6 +251,7 @@ async function onCell(index) {
     if (selected >= 0) {
       scene?.clearSelection();
       await call("game.move", { from: selected, to: index });
+      await loadNotation();
     }
     return;
   }
@@ -255,11 +259,69 @@ async function onCell(index) {
   // Gomoku: one click is one move.
   if (code) return;
   await call("game.move", { to: index });
+  await loadNotation();
 }
 
 async function loadNotation() {
   const reply = await call("replay.notation");
   if (reply && Array.isArray(reply.notation)) notation.value = reply.notation;
+  const rec = record.value;
+  replayTotal.value = rec?.moves?.length ?? notation.value.length;
+  replayPly.value = replayTotal.value;
+}
+
+/** Shows the board at a given ply. The sidecar rebuilds the position, so this is stateless. */
+async function seekPly(ply) {
+  const target = Math.max(0, Math.min(replayTotal.value, ply));
+  try {
+    const state = await bridge.invoke("replay.state", { ply: target });
+    if (!state) return;
+    replayPly.value = state.ply;
+    replaying.value = true;
+    scene?.clearEffects();
+    cells.value = { ...cells.value, board: state.cells, turnSeat: state.turnSeat };
+    lastMove.value = state.lastMove || null;
+    result.value = state.ply >= state.total ? state.result : null;
+    if (Array.isArray(state.notation)) notation.value = state.notation;
+    paint();
+  } catch (e) {
+    error.value = describeError(e?.message || e);
+  }
+}
+
+function replayFirst() { seekPly(0); }
+function replayPrev() { seekPly(replayPly.value - 1); }
+function replayNext() { seekPly(replayPly.value + 1); }
+function replayLast() { seekPly(replayTotal.value); }
+
+/** Leaves replay and returns to the live position. */
+async function exitReplay() {
+  replaying.value = false;
+  await call("room.snapshot");
+  paint();
+}
+
+/** Exports the recorded game as plain text: a header plus one ply per line. */
+function exportRecord() {
+  const rec = record.value;
+  if (!rec || !rec.moves) return;
+  const lines = [
+    `棋牌桌对局记录`,
+    `棋种: ${rec.game === "xiangqi" ? "中国象棋" : "五子棋"}`,
+    `手数: ${rec.moves.length}`,
+    rec.outcome ? `结果: ${outcomeText(rec.outcome)}${rec.reason ? `（${rec.reason}）` : ""}` : "结果: 未分胜负",
+    "",
+    ...(notation.value.length
+      ? notation.value.map((n, i) => `${String(i + 1).padStart(3, " ")}. ${n}`)
+      : rec.moves.map((m, i) => `${String(i + 1).padStart(3, " ")}. ${m.from} -> ${m.to}`)),
+  ];
+  const blob = new Blob([lines.join("\n")], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${rec.game}-${Date.now()}.txt`;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 function formatClock(ms) {
@@ -277,8 +339,23 @@ function outcomeText(outcome) {
 }
 
 watch(phase, (next) => {
-  if (next === "finished") loadNotation();
+  if (next === "finished" || next === "practice" || next === "playing") loadNotation();
 });
+
+// A move changes the record length, so keep the scrubber in step with the live board
+// unless the player is deliberately reviewing an earlier position.
+watch(
+  () => cells.value.board?.length,
+  () => {
+    if (replaying.value) return;
+    const moves = record.value?.moves?.length ?? 0;
+    if (moves > replayTotal.value) {
+      replayTotal.value = moves;
+      replayPly.value = moves;
+      if (!notation.value.length) loadNotation();
+    }
+  },
+);
 
 onMounted(async () => {
   await whenReady();
@@ -436,6 +513,7 @@ watch(game, (next) => {
       </div>
 
       <footer class="controls">
+        <div class="controls-top">
         <div class="status">
           <span v-if="phase === 'practice'">练习模式 · 不计胜负，可自由走子</span>
           <span v-else-if="phase === 'playing'">
@@ -446,10 +524,36 @@ watch(game, (next) => {
           <span v-if="inCheck" class="check-flag">将军</span>
         </div>
 
+        <div v-if="replayTotal > 0" class="replay-bar">
+          <button class="ghost tiny" title="复盘到开局" @click="replayFirst">⏮</button>
+          <button class="ghost tiny" title="上一手" @click="replayPrev">◀</button>
+          <input
+            class="scrubber"
+            type="range"
+            min="0"
+            :max="replayTotal"
+            :value="replayPly"
+            @input="seekPly(Number($event.target.value))"
+          />
+          <button class="ghost tiny" title="下一手" @click="replayNext">▶</button>
+          <button class="ghost tiny" title="复盘到最后一手" @click="replayLast">⏭</button>
+          <span class="ply-count">{{ replayPly }} / {{ replayTotal }}</span>
+          <button v-if="replaying" class="ghost tiny" @click="exitReplay">回到实时</button>
+          <button class="ghost tiny" title="导出棋谱" @click="exportRecord">导出</button>
+        </div>
+        </div>
+
         <div v-if="notation.length" class="notation">
-          <span v-for="(n, i) in notation.slice(-12)" :key="i" class="ply">
+          <button
+            v-for="(n, i) in notation"
+            :key="i"
+            class="ply"
+            :class="{ active: i + 1 === replayPly }"
+            :title="`跳到第 ${i + 1} 手`"
+            @click="seekPly(i + 1)"
+          >
             <em>{{ i + 1 }}</em>{{ n }}
-          </span>
+          </button>
         </div>
       </footer>
     </main>
@@ -690,12 +794,19 @@ hr { border: 0; border-top: 1px dashed var(--line); margin: 6px 0; }
 
 .controls {
   display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 20px 12px;
+  border-top: 1px solid var(--line);
+  background: rgba(255, 252, 245, 0.82);
+}
+
+.controls-top {
+  display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  padding: 12px 22px;
-  border-top: 1px solid var(--line);
-  background: rgba(255, 252, 245, 0.72);
+  gap: 14px;
+  flex-wrap: wrap;
 }
 
 .status { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--muted); }
@@ -716,9 +827,56 @@ hr { border: 0; border-top: 1px dashed var(--line); margin: 6px 0; }
   50% { opacity: 0.55; }
 }
 
-.notation { display: flex; flex-wrap: wrap; gap: 4px 10px; justify-content: flex-end; max-width: 62%; }
+.replay-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.66);
+}
 
-.ply { font-size: 11px; color: #5c5344; font-variant-numeric: tabular-nums; }
+.ghost.tiny {
+  padding: 4px 9px;
+  min-width: 30px;
+  font-size: 12px;
+  line-height: 1.3;
+  white-space: nowrap;
+}
+
+.scrubber {
+  flex: 1;
+  min-width: 120px;
+  max-width: 260px;
+  accent-color: var(--wood);
+  cursor: pointer;
+}
+
+.ply-count { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+.notation {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  max-height: 54px;
+  overflow-y: auto;
+}
+
+.ply {
+  font-size: 11px;
+  color: #5c5344;
+  font-variant-numeric: tabular-nums;
+  padding: 2px 7px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.ply:hover { background: rgba(138, 106, 60, 0.12); }
+.ply.active { border-color: var(--wood); background: rgba(138, 106, 60, 0.16); color: var(--ink); }
 .ply em { font-style: normal; margin-right: 4px; color: var(--muted); opacity: 0.6; }
 
 @media (max-width: 900px) {
