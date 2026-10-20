@@ -55,9 +55,11 @@ const tapCell = async (cell) => {
 };
 
 // 走一手红兵（下方座位）
-await tapCell(54);
+// Central squares: a piece at the board edge gets its shadow cropped by the paper margin,
+// which tells you nothing about whether the shape reads.
+await tapCell(64);
 await page.waitForTimeout(200);
-await tapCell(45);
+await tapCell(46);
 
 let side = null;
 let peakShot = false;
@@ -81,10 +83,9 @@ const frozen = await fr.evaluate(() => {
   const cur = s.hand.cursor;
   // Put the hand at the moment of the grip: fully arrived, fingers closed.
   cur.age = Math.max(cur.lead, cur.age);
-  cur.view.alpha = 1;
-  cur.setGrip(1);
   const node = s.hand.node;
   cur.view.position.set(node.container.x, node.container.y);
+  cur.view.alpha = cur.restAlpha * 1.5;
   s.app.render();
   return { ok: true, x: cur.view.x, y: cur.view.y, alpha: cur.view.alpha, w: s.app.screen.width };
 });

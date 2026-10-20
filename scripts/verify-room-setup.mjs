@@ -91,7 +91,9 @@ const report = {
     snap?.clock?.perMove === 30000 &&
     panelCount === 2 &&
     handSeen &&
-    maxAlpha > 0.5,
+    // The hand is a shadow now, so its opacity is meant to be low; this only checks that it
+    // is actually being drawn rather than left at zero.
+    maxAlpha > 0.15,
 };
 console.log(JSON.stringify(report, null, 2));
 writeFileSync(`${OUT}/report.json`, JSON.stringify(report, null, 2));

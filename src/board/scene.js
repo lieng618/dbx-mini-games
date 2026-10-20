@@ -20,7 +20,7 @@ import {
   WinEffect,
   clearTransient,
 } from "./effects.js";
-import { HandCursor } from "./hand.js";
+import { HandShadow } from "./hand.js";
 import { BoardAudio, tap } from "./sound.js";
 import { PieceLayer } from "./pieces.js";
 
@@ -579,8 +579,10 @@ export class BoardScene {
       ? this.boardBounds.top + this.boardBounds.height / 2
       : pos.y;
     const side = move && move.from && move.from.y < centerY ? "far" : "near";
-    const cursor = new HandCursor({ x: pos.x, y: pos.y, radius: node.radius, side });
-    this.effectLayer.addChild(cursor.view);
+    const cursor = new HandShadow({ x: pos.x, y: pos.y, radius: node.radius, side });
+    // Under the pieces, on the board itself: a shadow falls on the surface, so the piece
+    // that is being carried has to stay legible on top of it.
+    this.underLayer.addChild(cursor.view);
     this.hand = { cursor, node, remaining: travel };
   }
 
