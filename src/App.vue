@@ -97,10 +97,18 @@ function applySnapshot(snapshot) {
     };
   }
   if (snapshot.lastMove !== undefined) lastMove.value = snapshot.lastMove;
-  if (typeof snapshot.inCheck === "boolean") inCheck.value = snapshot.inCheck;
-  if (snapshot.checkFocus !== undefined) checkFocus.value = snapshot.checkFocus;
-  if (snapshot.result !== undefined) result.value = snapshot.result;
-  if (snapshot.winLine) winLine.value = snapshot.winLine;
+  // `applySnapshot` folds every reply, not just room snapshots: replay.notation returns
+  // {notation}, profile.get returns a profile, and so on. So the transient effects state is
+  // only recomputed when the reply really is a whole room snapshot — otherwise a notation
+  // fetch right after 将军 would wipe the check it had just raised. Within a real snapshot
+  // absence does mean false, which is what clears a check the move has answered.
+  const isRoomSnapshot = Array.isArray(snapshot.members) && typeof snapshot.phase === "string";
+  if (isRoomSnapshot) {
+    inCheck.value = snapshot.inCheck === true;
+    checkFocus.value = snapshot.checkFocus ?? null;
+    result.value = snapshot.result ?? null;
+    winLine.value = snapshot.winLine ?? [];
+  }
   paint();
 }
 

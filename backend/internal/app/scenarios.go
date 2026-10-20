@@ -10,6 +10,20 @@ import (
 // sequence chosen to reach a specific presentation state.
 func scenarioMoves(gameName, scenario string) ([]game.Move, bool) {
 	switch gameName + "/" + scenario {
+	case "xiangqi/opening":
+		// Both sides develop a horse, red swings a cannon to the centre, and a black pawn
+		// steps out. Chosen because the resulting board reads as a game under way rather
+		// than as scattered pieces, and because no capture fires, so it shows the plain
+		// landing ink. Every move was checked against the engine's legal-move generator.
+		return []game.Move{
+			{From: 82, To: 65},
+			{From: 1, To: 20},
+			{From: 64, To: 46},
+			{From: 7, To: 26},
+			{From: 83, To: 67},
+			{From: 27, To: 36},
+		}, true
+
 	case "xiangqi/capture":
 		// A legal line containing two captures, found by search. It exists so the
 		// ink-dust burst can be reproduced without playing a game to reach a capture.

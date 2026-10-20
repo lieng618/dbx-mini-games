@@ -7,6 +7,7 @@
  */
 
 import { Application, Container, Graphics, Text, TextStyle } from "pixi.js";
+import { ShockwaveFilter } from "pixi-filters/shockwave";
 import { LOGICAL_HEIGHT, LOGICAL_WIDTH, PIECE, cellAt, cellCenter, glyphFor, layout } from "./layout.js";
 import {
   CaptureBurstEffect,
@@ -45,6 +46,10 @@ export class BoardScene {
     // Tracks which one-shot cues have already fired for the current position, so a
     // repeated snapshot cannot re-trigger the check gong or the victory chime.
     this.cued = { check: false, win: false };
+    // The board-wide shockwave is transient: it lives only while settling, then the filter
+    // is detached. Leaving a filter on the root would cost a full render-to-texture every
+    // frame for the rest of the session.
+    this.shock = null;
   }
 
   /** Boots Pixi and mounts the canvas. Throws when the renderer cannot start. */
@@ -325,25 +330,40 @@ export class BoardScene {
     // Check announcement. Only xiangqi has a general to threaten: a gomoku board that
     // carries a stale inCheck flag (a room switched games, a snapshot replayed) must not
     // sprout a 将 glyph over the stones.
+    //
+    // This fires on the rising edge only. Pushing a CheckEffect per snapshot used to stack
+    // a fresh translucent 将 on top of the last one on every update, so a check read as a
+    // muddy blur instead of one decisive slam. The edge also has to be re-armed when check
+    // clears, otherwise only the first check of a session would ever be announced.
     if (snapshot.inCheck && this.boardBounds && this.game === "xiangqi") {
-      const focus = snapshot.checkFocus != null ? cellCenter(lay2, snapshot.checkFocus) : null;
-      this.effects.push(
-        new CheckEffect({
-          boardWidth: this.boardBounds.width,
-          boardHeight: this.boardBounds.height,
-          originX: this.boardBounds.left,
-          originY: this.boardBounds.top,
-          focus,
-          step: lay2.step,
-          lowMotion: this.lowMotion,
-        }),
-      );
       if (!this.cued.check) {
         this.cued.check = true;
+        const focus = snapshot.checkFocus != null ? cellCenter(lay2, snapshot.checkFocus) : null;
+        this.effects.push(
+          new CheckEffect({
+            boardWidth: this.boardBounds.width,
+            boardHeight: this.boardBounds.height,
+            originX: this.boardBounds.left,
+            originY: this.boardBounds.top,
+            focus,
+            step: lay2.step,
+            lowMotion: this.lowMotion,
+          }),
+        );
+        // The glyph says "check"; the shockwave is what makes the board feel hit.
+        this.pulseShock(
+          focus ?? {
+            x: this.boardBounds.left + this.boardBounds.width / 2,
+            y: this.boardBounds.top + this.boardBounds.height / 2,
+          },
+          { amplitude: 34, wavelength: 170, speed: 780, duration: 0.68 },
+        );
         this.audio.play("check");
         tap([26, 40, 26]);
       }
-      this.boardLayer.position.set(0, 0);
+    } else {
+      // Check lifted (or wrong game): re-arm so the next one plays again.
+      this.cued.check = false;
     }
 
     // Terminal result.
@@ -407,6 +427,15 @@ export class BoardScene {
         sealGlyph: this.game === "gomoku" ? "五" : "胜",
       }),
     );
+    // The stamp is the heaviest moment in the whole game, so it gets the strongest wave.
+    // Scheduled to land with the seal rather than at t=0, which would fire it during the
+    // line-drawing phase and be over before the seal arrives.
+    if (sealAt) {
+      const stampAt = this.lowMotion ? 0.3 : 0.85 + 0.35;
+      this.schedule(stampAt, () =>
+        this.pulseShock(sealAt, { amplitude: 42, wavelength: 220, speed: 900, duration: 0.85 }),
+      );
+    }
     if (!this.cued.win) {
       this.cued.win = true;
       this.audio.play("win");
@@ -465,12 +494,55 @@ export class BoardScene {
     this.pending.push({ at: delay, fn });
   }
 
+  /**
+   * Fires a board-wide radial shockwave from `point` (scene coordinates).
+   *
+   * This is the one distortion in the whole effect set: everything else is ink painted on
+   * top of the board, but a shockwave bends the board itself, which is what sells an
+   * impact. It is capped short and detached afterwards because a filter on the root makes
+   * every frame a render-to-texture.
+   */
+  pulseShock(point, { amplitude = 26, wavelength = 150, speed = 700, duration = 0.62 } = {}) {
+    if (this.lowMotion || !this.root) return;
+    if (!point) return;
+    try {
+      const filter = new ShockwaveFilter({
+        center: { x: point.x, y: point.y },
+        amplitude,
+        wavelength,
+        speed,
+        brightness: 1.15,
+        radius: 900,
+        time: 0,
+      });
+      this.root.filters = [filter];
+      this.shock = { filter, age: 0, duration };
+    } catch {
+      // A filter that will not compile costs distortion, not the effect underneath.
+      this.shock = null;
+    }
+  }
+
   /** Advances all live effects. */
   tick(dt) {
     if (this.destroyed) return;
     // Cap dt so a background tab returning to focus cannot fast-forward every effect.
     const step = Math.min(dt, 0.05);
     this.pieces.update(step);
+
+    // Settle the shockwave, then take the filter off the root as soon as it has run.
+    if (this.shock) {
+      this.shock.age += step;
+      const t = this.shock.age / this.shock.duration;
+      if (t >= 1) {
+        this.root.filters = null;
+        this.shock = null;
+      } else {
+        // Ease the amplitude out so the wave dies instead of vanishing mid-ripple.
+        this.shock.filter.time = this.shock.age;
+        this.shock.filter.amplitude = 26 * (1 - t) * (1 - t);
+      }
+    }
 
     // Fire due cues. Iterate a copy because a callback may push effects, not cues.
     if (this.pending.length) {
