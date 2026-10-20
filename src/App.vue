@@ -54,6 +54,11 @@ const replaying = ref(false);
 
 const inputName = ref("我的棋室");
 const inputPassword = ref("");
+// Time control chosen before the table exists. 0 means "no limit" for either field.
+const inputMinutes = ref(10);
+const inputMoveSeconds = ref(0);
+// Which side the host wants. -1 keeps the old "first free seat" behaviour.
+const inputSeat = ref(-1);
 const inputAddress = ref("");
 
 const boardHost = ref(null);
@@ -68,6 +73,25 @@ const isMyTurn = computed(() => {
   const turn = cells.value.turnSeat;
   return isSeated.value && turn === mySeat.value;
 });
+/** What to call whoever sits in a seat, including the partner, which is not a member. */
+function seatLabel(seat) {
+  if (seat === aiSeat.value) return "陪练";
+  const m = seatMembers.value[seat];
+  return m ? m.nickname : "空座";
+}
+
+/** True when the seat is the one currently thinking. */
+function seatActive(seat) {
+  if (!clock.value) return false;
+  return clock.value.running === seat;
+}
+
+/** How a seat is named on the board, which depends on the game. */
+function sideName(seat) {
+  if (game.value === "xiangqi") return seat === 0 ? "红方 · 先手" : "黑方 · 后手";
+  return seat === 0 ? "黑棋 · 先手" : "白棋 · 后手";
+}
+
 /** True while the practice partner holds the turn. */
 const isAiTurn = computed(() => aiSeat.value >= 0 && (cells.value.turnSeat ?? 0) === aiSeat.value);
 
@@ -183,6 +207,9 @@ async function createRoom() {
     name: inputName.value || "我的棋室",
     game: game.value,
     password: inputPassword.value,
+    minutes: Number(inputMinutes.value) || 0,
+    moveSeconds: Number(inputMoveSeconds.value) || 0,
+    seat: Number(inputSeat.value),
   });
 }
 
@@ -437,6 +464,28 @@ watch(
   },
 );
 
+// ── Clock ───────────────────────────────────────────────────────────────────────────
+// The host owns the clock, so the display is refreshed from it rather than kept in step by
+// hand. An earlier version also decremented locally between snapshots; the two writers
+// fought, the local one always won the last word, and the countdown drifted to zero while
+// the host still had nearly three minutes on it. One source, polled, cannot disagree.
+//
+// The poll is also what makes a flag fall: the sidecar checks for a timeout on every call,
+// so a client that only waits still loses on time.
+let syncTimer = null;
+
+function startClockTimers() {
+  if (syncTimer) return;
+  syncTimer = setInterval(() => {
+    if (phase.value === "playing") call("room.snapshot");
+  }, 500);
+}
+
+function stopClockTimers() {
+  if (syncTimer) clearInterval(syncTimer);
+  syncTimer = null;
+}
+
 onMounted(async () => {
   await whenReady();
   ready.value = true;
@@ -450,6 +499,9 @@ onMounted(async () => {
       // an explicit flag so a normal session keeps its scope clean.
       if (typeof window !== "undefined" && window.__DBX_DEBUG_FX) {
         window.__boardScene = scene;
+        // Also expose the clock so a verification script can compare the store with what
+        // the seat panels actually paint; they disagreed once and the DOM was the liar.
+        window.__dbxClock = () => JSON.parse(JSON.stringify(clock.value));
       }
     } catch (e) {
       // A failed renderer must degrade to the text grid rather than a blank workbench.
@@ -466,6 +518,8 @@ onMounted(async () => {
   }
   scene?.audio.setEnabled(soundOn.value);
 
+  startClockTimers();
+
   const snapshot = await call("room.snapshot");
   if (snapshot) applySnapshot(snapshot);
   const profile = await call("profile.get");
@@ -473,6 +527,7 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  stopClockTimers();
   scene?.destroy();
   scene = null;
 });
@@ -506,6 +561,47 @@ watch(game, (next) => {
           <span>密码（可留空）</span>
           <input v-model="inputPassword" type="password" placeholder="不设密码" />
         </label>
+
+        <!-- Time control and side are chosen before the table exists, because both are
+             fixed for the whole match and a guest has to be able to see them on the way in. -->
+        <div class="field">
+          <span>对局限时（分钟，0 为不限）</span>
+          <input v-model.number="inputMinutes" type="number" min="0" max="180" step="1" />
+        </div>
+        <div class="field">
+          <span>每步限时（秒，0 为不限）</span>
+          <input v-model.number="inputMoveSeconds" type="number" min="0" max="600" step="5" />
+        </div>
+        <div class="field">
+          <span>我坐哪边</span>
+          <div class="side-pick">
+            <button
+              type="button"
+              class="pick"
+              :class="{ on: inputSeat === 0 }"
+              @click="inputSeat = 0"
+            >
+              {{ sideName(0) }}
+            </button>
+            <button
+              type="button"
+              class="pick"
+              :class="{ on: inputSeat === 1 }"
+              @click="inputSeat = 1"
+            >
+              {{ sideName(1) }}
+            </button>
+            <button
+              type="button"
+              class="pick"
+              :class="{ on: inputSeat === -1 }"
+              @click="inputSeat = -1"
+            >
+              随便
+            </button>
+          </div>
+        </div>
+
         <button class="primary" @click="createRoom">开桌</button>
 
         <hr />
@@ -571,6 +667,16 @@ watch(game, (next) => {
           </div>
         </div>
 
+        <!-- The per-move limit only exists when the host set one. -->
+        <div
+          v-if="clock && clock.perMove > 0 && clock.moveRemaining >= 0"
+          class="move-clock"
+          :class="{ urgent: clock.moveRemaining <= 10000 }"
+        >
+          <span>本步剩余</span>
+          <strong>{{ formatClock(clock.moveRemaining) }}</strong>
+        </div>
+
         <div class="actions">
           <button v-if="phase === 'lobby' && role === 'host'" class="primary" @click="startMatch">
             开始对局
@@ -631,7 +737,37 @@ watch(game, (next) => {
     </aside>
 
     <main class="stage">
-      <div ref="boardHost" class="canvas-host" :class="{ hidden: canvasFailed }"></div>
+      <!-- Seats flank the board so the players are placed around the table rather than
+           listed away in the sidebar. Each one carries the person, the name and the clock. -->
+      <div class="board-row">
+        <aside
+          v-for="seat in [0, 1]"
+          :key="seat"
+          class="seat-panel"
+          :class="{
+            left: seat === 0,
+            right: seat === 1,
+            active: seatActive(seat),
+            empty: !seatMembers[seat] && seat !== aiSeat,
+            mine: mySeat === seat,
+          }"
+        >
+          <svg class="avatar" viewBox="0 0 64 72" aria-hidden="true">
+            <!-- A robe silhouette: head, shoulders, and a collar V. Kept as three shapes so
+                 it reads at 44px without any asset, which the single-bundle CSP forbids. -->
+            <circle class="avatar-head" cx="32" cy="19" r="10" />
+            <path class="avatar-body" d="M32 31c-12 0-21 9-21 21v14h42V52c0-12-9-21-21-21z" />
+            <path class="avatar-collar" d="M32 31l-7 8 7 5 7-5-7-8z" />
+          </svg>
+          <span class="seat-panel-tag">{{ seat === 0 ? "先手" : "后手" }}</span>
+          <span class="seat-panel-name">{{ seatLabel(seat) }}</span>
+          <span v-if="clock" class="seat-panel-clock" :class="{ low: clock.remaining[seat] <= 30000 }">
+            {{ formatClock(clock.remaining[seat]) }}
+          </span>
+        </aside>
+
+        <div ref="boardHost" class="canvas-host" :class="{ hidden: canvasFailed }"></div>
+      </div>
       <div v-if="canvasFailed" class="fallback">渲染器不可用，已切换到简化视图。</div>
 
       <div v-if="result && result.finished" class="result-banner">
@@ -1051,6 +1187,36 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
 
 .clock { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 
+.move-clock {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 8px;
+  padding: 8px 12px;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  color: var(--muted-text);
+  background: rgba(28, 26, 23, 0.05);
+  border-radius: var(--radius-sm);
+  transition: color var(--dur-fast) var(--ease-standard),
+    background var(--dur-fast) var(--ease-standard);
+}
+
+.move-clock strong {
+  font-family: var(--font-num);
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+
+/* Under ten seconds the move clock has to shout, or it is decoration. */
+.move-clock.urgent {
+  color: var(--red);
+  background: rgba(176, 58, 46, 0.1);
+}
+
+.move-clock.urgent strong { color: var(--red); }
+
 .clock-side {
   display: flex;
   flex-direction: column;
@@ -1155,6 +1321,34 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
 
 .scenario-row { display: flex; flex-wrap: wrap; gap: 8px; }
 
+/* Side picker: three equal chips, sized to stay past the 44px touch floor. */
+.side-pick { display: grid; grid-template-columns: 1fr 1fr 0.8fr; gap: 8px; }
+
+.side-pick .pick {
+  min-height: 44px;
+  padding: 0 12px;
+  font-family: var(--font-ui);
+  font-size: 13px;
+  color: var(--muted-text);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease-standard),
+    border-color var(--dur-fast) var(--ease-standard),
+    background var(--dur-fast) var(--ease-standard);
+}
+
+.side-pick .pick:hover { color: var(--ink); border-color: var(--wood); }
+
+.side-pick .pick.on {
+  color: var(--paper-warm);
+  background: var(--ink);
+  border-color: var(--ink);
+}
+
+.side-pick .pick:focus-visible { outline: 3px solid var(--gold); outline-offset: 2px; }
+
 .address { display: flex; flex-direction: column; gap: 4px; }
 
 .address code {
@@ -1170,8 +1364,94 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
 
 .stage { position: relative; display: flex; flex-direction: column; min-width: 0; }
 
-.canvas-host {
+/* Board plus its two seats. The side columns are fixed so the board never shifts when a
+   name changes length. */
+.board-row {
   flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 112px minmax(0, 1fr) 112px;
+  gap: 16px;
+  align-items: center;
+  padding: 12px 16px;
+}
+
+.seat-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 16px 12px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-1);
+  transition: border-color var(--dur-base) var(--ease-standard),
+    box-shadow var(--dur-base) var(--ease-standard),
+    transform var(--dur-base) var(--ease-standard);
+}
+
+/* The side on the clock leans in slightly, so whose turn it is is readable at a glance. */
+.seat-panel.active {
+  border-color: rgba(176, 58, 46, 0.45);
+  box-shadow: var(--shadow-2);
+  transform: translateY(-2px);
+}
+
+.seat-panel.empty { border-style: dashed; box-shadow: none; background: rgba(255, 253, 248, 0.5); }
+
+.seat-panel.empty .avatar { opacity: 0.32; }
+
+.avatar {
+  width: 48px;
+  height: 54px;
+  fill: var(--muted-text);
+  transition: fill var(--dur-base) var(--ease-standard),
+    opacity var(--dur-base) var(--ease-standard);
+}
+
+.seat-panel.active .avatar { fill: var(--red); }
+.seat-panel.mine .avatar { fill: var(--ink); }
+
+.avatar-collar { fill: var(--surface); opacity: 0.85; }
+
+.seat-panel-tag {
+  font-family: var(--font-ui);
+  font-size: 12px;
+  letter-spacing: 0.16em;
+  color: var(--soft-text);
+}
+
+.seat-panel-name {
+  max-width: 100%;
+  font-family: var(--font-ui);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.seat-panel-clock {
+  font-family: var(--font-num);
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted-text);
+  transition: color var(--dur-fast) var(--ease-standard);
+}
+
+.seat-panel.active .seat-panel-clock { color: var(--ink); }
+.seat-panel-clock.low { color: var(--red); }
+
+/* Below this width the side columns would squeeze the board more than they are worth. */
+@media (max-width: 1100px) {
+  .board-row { grid-template-columns: 96px minmax(0, 1fr) 96px; gap: 12px; padding: 8px 12px; }
+  .avatar { width: 40px; height: 45px; }
+}
+
+.canvas-host {
   min-height: 0;
   display: grid;
   place-items: center;

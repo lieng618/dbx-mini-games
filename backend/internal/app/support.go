@@ -121,19 +121,32 @@ func reachableOnLan(ip net.IP) bool {
 
 // Clock is the host-authoritative match clock. The host alone decides a timeout; guests
 // only render the countdown, so two machines with drifting clocks cannot disagree.
+//
+// Two limits can end a seat's game: a total budget for the whole match, and a per-move
+// limit. Either is optional — a zero duration means that limit is not in play.
 type Clock struct {
-	mu       sync.Mutex
+	mu        sync.Mutex
 	remaining [2]time.Duration
-	running  int // seat whose clock is running, or -1
+	running   int // seat whose clock is running, or -1
+	// since marks the start of the current turn, which is what the per-move limit measures.
+	// consumed marks how far the budget has been deducted; the two cannot be the same field,
+	// or deducting time would also reset the move timer.
 	since    time.Time
+	consumed time.Time
 	budget   time.Duration
+	perMove  time.Duration
 }
 
-// DefaultBudget is the fixed time each seat receives per match.
+// DefaultBudget is the total time each seat receives when the host does not choose one.
 const DefaultBudget = 10 * time.Minute
 
-func newClock() *Clock {
-	return &Clock{remaining: [2]time.Duration{DefaultBudget, DefaultBudget}, running: -1, budget: DefaultBudget}
+func newClock(budget, perMove time.Duration) *Clock {
+	return &Clock{
+		remaining: [2]time.Duration{budget, budget},
+		running:   -1,
+		budget:    budget,
+		perMove:   perMove,
+	}
 }
 
 // reset gives both seats a fresh budget and starts seat zero's clock.
@@ -143,9 +156,10 @@ func (c *Clock) reset(now time.Time) {
 	c.remaining = [2]time.Duration{c.budget, c.budget}
 	c.running = 0
 	c.since = now
+	c.consumed = now
 }
 
-// switchTurn hands the clock to the other seat.
+// switchTurn hands the clock to the other seat, and restarts the per-move limit.
 func (c *Clock) switchTurn(now time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -158,6 +172,7 @@ func (c *Clock) switchTurn(now time.Time) {
 		c.running = 1 - c.running
 	}
 	c.since = now
+	c.consumed = now
 }
 
 // consumeLocked deducts elapsed time from the running seat.
@@ -165,13 +180,25 @@ func (c *Clock) switchTurn(now time.Time) {
 // The index is bounds-checked: a clock that was never reset has running == -1, and an
 // out-of-range value here would panic inside a snapshot rather than degrade.
 func (c *Clock) consumeLocked(now time.Time) {
-	if c.running < 0 || c.running >= len(c.remaining) || c.since.IsZero() {
+	if c.running < 0 || c.running >= len(c.remaining) || c.consumed.IsZero() {
 		return
 	}
-	elapsed := now.Sub(c.since)
-	c.remaining[c.running] -= elapsed
-	if c.remaining[c.running] < 0 {
-		c.remaining[c.running] = 0
+	elapsed := now.Sub(c.consumed)
+	// Advance the deduction cursor. Without this every call re-deducts the whole span since
+	// the turn began, so the clock drains faster the more often anyone looks at it — a
+	// client polling twice a second burned a ten-minute budget in seconds and then lost on
+	// a timeout that never happened.
+	c.consumed = now
+	if elapsed <= 0 {
+		return
+	}
+	// An unlimited budget is not decremented: subtracting from it would turn "no limit"
+	// into "a very large limit" and eventually expire.
+	if c.budget > 0 {
+		c.remaining[c.running] -= elapsed
+		if c.remaining[c.running] < 0 {
+			c.remaining[c.running] = 0
+		}
 	}
 }
 
@@ -179,23 +206,39 @@ func (c *Clock) consumeLocked(now time.Time) {
 func (c *Clock) view() map[string]any {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.consumeLocked(time.Now())
+	now := time.Now()
+	c.consumeLocked(now)
+
+	moveLeft := int64(-1)
+	if c.perMove > 0 && c.running >= 0 && !c.since.IsZero() {
+		moveLeft = int64((c.perMove - now.Sub(c.since)).Milliseconds())
+		if moveLeft < 0 {
+			moveLeft = 0
+		}
+	}
 	return map[string]any{
-		"remaining": [2]int64{int64(c.remaining[0].Milliseconds()), int64(c.remaining[1].Milliseconds())},
-		"running":   c.running,
-		"budget":    int64(c.budget.Milliseconds()),
+		"remaining":     [2]int64{int64(c.remaining[0].Milliseconds()), int64(c.remaining[1].Milliseconds())},
+		"running":       c.running,
+		"budget":        int64(c.budget.Milliseconds()),
+		"perMove":       int64(c.perMove.Milliseconds()),
+		"moveRemaining": moveLeft,
 	}
 }
 
-// TimeoutSeat reports the seat whose clock has expired, or -1.
+// TimeoutSeat reports the seat whose clock has expired, or -1. Either limit can expire.
 func (c *Clock) TimeoutSeat() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.consumeLocked(time.Now())
-	for seat, left := range c.remaining {
-		if left <= 0 {
-			return seat
-		}
+	now := time.Now()
+	c.consumeLocked(now)
+	if c.running < 0 || c.running >= len(c.remaining) {
+		return -1
+	}
+	if c.budget > 0 && c.remaining[c.running] <= 0 {
+		return c.running
+	}
+	if c.perMove > 0 && !c.since.IsZero() && now.Sub(c.since) >= c.perMove {
+		return c.running
 	}
 	return -1
 }

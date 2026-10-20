@@ -373,7 +373,17 @@ export class PieceLayer {
     }
     mover.cell = to;
     mover.startMove(toPt, duration);
-    this.moves.push({ from: fromPt, to: toPt, captured: !!victim, victimColour, duration });
+    // `to` is a point for the effects layer; `toCell` is the index, which is what anything
+    // that needs to find the piece again has to use — nodeAt takes a cell, not a position.
+    this.moves.push({
+      from: fromPt,
+      to: toPt,
+      fromCell: from,
+      toCell: to,
+      captured: !!victim,
+      victimColour,
+      duration,
+    });
   }
 
   applyPlace({ to }, cells, lay) {

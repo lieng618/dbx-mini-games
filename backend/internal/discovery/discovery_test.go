@@ -2,6 +2,7 @@ package discovery
 
 import (
 	"encoding/hex"
+	"encoding/json"
 	"net"
 	"testing"
 
@@ -120,5 +121,28 @@ func TestAtoiAndItoa(t *testing.T) {
 	}
 	if atoi("12x") != 0 {
 		t.Fatal("non-numeric text must parse to zero")
+	}
+}
+
+// TestRoomInfoWireNames pins the JSON keys the UI reads. The Go field names are not the
+// contract: the join list looks up roomId/address/hostKey, and a struct without tags
+// silently produces RoomID/Address instead, which renders a blank row and breaks joining.
+func TestRoomInfoWireNames(t *testing.T) {
+	raw, err := json.Marshal(RoomInfo{
+		RoomID: "r1", Name: "棋室", Game: "xiangqi",
+		HostKey: "abc", Address: "192.168.1.5:5000",
+		Players: 2, Seats: 2, Locked: false, Protocol: 1,
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, key := range []string{"roomId", "name", "game", "hostKey", "address", "players", "seats", "locked", "protocol"} {
+		if _, ok := got[key]; !ok {
+			t.Errorf("wire form is missing %q (got %s)", key, raw)
+		}
 	}
 }

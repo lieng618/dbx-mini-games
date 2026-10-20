@@ -63,8 +63,32 @@ func New(dataDir string, emit EmitFunc) *App {
 	return a
 }
 
+// enforceTimeout ends a match whose clock has run out.
+//
+// The host owns the clock, so this is the only place wall-clock time can end a game — the
+// room itself never reads a clock, which is what keeps a match replayable from its moves.
+// It runs before every call, so a client that is merely polling snapshots still gets the
+// timeout applied; the UI polls once a second while a clock is running.
+func (a *App) enforceTimeout() {
+	a.mu.Lock()
+	ended := false
+	if a.room != nil && a.clock != nil && a.room.Phase() == room.PhasePlaying {
+		if seat := a.clock.TimeoutSeat(); seat >= 0 {
+			if err := a.room.Timeout(seat); err == nil {
+				ended = true
+			}
+		}
+	}
+	a.mu.Unlock()
+	// Broadcasting takes the lock again, so it cannot happen above.
+	if ended {
+		a.pushState()
+	}
+}
+
 // Call dispatches one RPC method.
 func (a *App) Call(method string, params map[string]any) (any, error) {
+	a.enforceTimeout()
 	switch method {
 	case "profile.get":
 		return a.getProfile(), nil
@@ -142,6 +166,12 @@ func (a *App) createRoom(params map[string]any) (map[string]any, error) {
 	name, _ := params["name"].(string)
 	gameName, _ := params["game"].(string)
 	password, _ := params["password"].(string)
+	minutes, _ := params["minutes"].(float64)
+	moveSeconds, _ := params["moveSeconds"].(float64)
+	hostSeat := -1
+	if seat, ok := params["seat"].(float64); ok && (seat == 0 || seat == 1) {
+		hostSeat = int(seat)
+	}
 	if name == "" {
 		name = "我的棋室"
 	}
@@ -149,13 +179,38 @@ func (a *App) createRoom(params map[string]any) (map[string]any, error) {
 		gameName = "xiangqi"
 	}
 
+	// Time control. A negative or absurd value is clamped rather than rejected: the host
+	// is picking a number from a form, and a bad number should not cost them the room.
+	if minutes < 0 {
+		minutes = 0
+	}
+	if minutes > 180 {
+		minutes = 180
+	}
+	if moveSeconds < 0 {
+		moveSeconds = 0
+	}
+	if moveSeconds > 600 {
+		moveSeconds = 600
+	}
+	// Zero means unlimited for both limits; the default total only applies when the caller
+	// did not ask for time control at all.
+	budget := time.Duration(minutes * float64(time.Minute))
+	if _, given := params["minutes"]; !given {
+		budget = DefaultBudget
+	}
+	perMove := time.Duration(moveSeconds * float64(time.Second))
+
 	a.mu.Lock()
 	if a.room != nil || a.server != nil {
 		a.mu.Unlock()
 		return nil, errors.New("already hosting or joined a room")
 	}
 	hostID := randomID()
-	r, err := room.New(room.Options{ID: randomID(), Name: name, Game: gameName, HostID: hostID, Password: password})
+	r, err := room.New(room.Options{
+		ID: randomID(), Name: name, Game: gameName, HostID: hostID,
+		Password: password, HostSeat: hostSeat,
+	})
 	if err != nil {
 		a.mu.Unlock()
 		return nil, err
@@ -177,7 +232,7 @@ func (a *App) createRoom(params map[string]any) (map[string]any, error) {
 
 	a.room, a.server, a.adv = r, srv, adv
 	a.localID = hostID
-	a.clock = newClock()
+	a.clock = newClock(budget, perMove)
 	a.mu.Unlock()
 
 	if advErr != nil {

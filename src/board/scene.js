@@ -20,6 +20,7 @@ import {
   WinEffect,
   clearTransient,
 } from "./effects.js";
+import { HandCursor } from "./hand.js";
 import { BoardAudio, tap } from "./sound.js";
 import { PieceLayer } from "./pieces.js";
 
@@ -52,6 +53,8 @@ export class BoardScene {
     // is detached. Leaving a filter on the root would cost a full render-to-texture every
     // frame for the rest of the session.
     this.shock = null;
+    // The hand that carries the piece the player just moved, or null.
+    this.hand = null;
   }
 
   /** Boots Pixi and mounts the canvas. Throws when the renderer cannot start. */
@@ -282,6 +285,12 @@ export class BoardScene {
     const lay2 = lay;
     for (const move of moves) {
       const travel = move.duration || 0;
+      // One hand, on the first move of the update. A scenario replay produces several
+      // moves in one snapshot, and a hand per move would look like a crowd at the table.
+      if (!this.lowMotion && !this.hand && travel > 0) {
+        const carrier = this.pieces.nodeAt(move.toCell);
+        if (carrier) this.startHand(carrier, travel);
+      }
       // Landing ink fires as the piece touches down; a capture fires a beat earlier so the
       // burst and the knock-back overlap instead of queueing.
       this.schedule(travel, () => {
@@ -532,6 +541,34 @@ export class BoardScene {
     this.callbacks.onCell?.(index);
   }
 
+  /**
+   * Puts a hand on the moving piece.
+   *
+   * The piece itself still animates from the tween — the hand is a second, larger body that
+   * tracks the same node, so the two can never disagree about where the piece is.
+   */
+  startHand(node, travel) {
+    const pos = node.container.position;
+    const cursor = new HandCursor({ x: pos.x, y: pos.y, radius: node.radius });
+    this.effectLayer.addChild(cursor.view);
+    this.hand = { cursor, node, remaining: travel };
+  }
+
+  updateHand(step) {
+    const hand = this.hand;
+    if (!hand) return;
+    hand.remaining -= step;
+    if (hand.remaining <= 0) hand.cursor.release();
+    hand.cursor.update(step, {
+      x: hand.node.container.x,
+      y: hand.node.container.y,
+    });
+    if (hand.cursor.done) {
+      hand.cursor.destroy();
+      this.hand = null;
+    }
+  }
+
   /** Queues a callback to run after `delay` seconds of scene time. */
   schedule(delay, fn) {
     if (delay <= 0) {
@@ -578,6 +615,7 @@ export class BoardScene {
     // Cap dt so a background tab returning to focus cannot fast-forward every effect.
     const step = Math.min(dt, 0.05);
     this.pieces.update(step);
+    this.updateHand(step);
 
     // Settle the shockwave, then take the filter off the root as soon as it has run.
     if (this.shock) {
@@ -643,7 +681,17 @@ export class BoardScene {
   }
 
   /** Clears transient ink, used when navigating a replay or undoing. */
+  /** Drops the hand without waiting for it to withdraw. */
+  clearHand() {
+    if (!this.hand) return;
+    this.hand.cursor.destroy();
+    this.hand = null;
+  }
+
   clearEffects() {
+    // A hand is anchored to a piece node; if the board is rebuilt that node is gone and the
+    // hand would be left pointing at nothing.
+    this.clearHand();
     this.pending.length = 0;
     clearTransient(this.effects);
     if (this.boardLayer) this.boardLayer.position.set(0, 0);

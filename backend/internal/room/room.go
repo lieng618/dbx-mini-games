@@ -95,6 +95,10 @@ type Room struct {
 	hostID   string
 	password string
 
+	// hostSeat is the side the host asked for when creating the table, or -1 for "first
+	// free". It is consumed when the host joins and has no effect afterwards.
+	hostSeat int
+
 	// aiSeat is the seat the practice partner controls, or -1 when no partner is sitting
 	// in. It only exists on a practice board: a real match is always two humans.
 	aiSeat int
@@ -115,6 +119,9 @@ type Options struct {
 	Game     string
 	HostID   string
 	Password string
+	// HostSeat lets the host choose which side to play before anyone sits down. -1 means
+	// "wherever is free", which is the old arrival-order behaviour.
+	HostSeat int
 }
 
 // New creates an empty Room with its host not yet joined.
@@ -131,6 +138,7 @@ func New(opts Options) (*Room, error) {
 		members:  map[string]*Member{},
 		phase:    PhaseLobby,
 		aiSeat:   -1,
+		hostSeat: opts.HostSeat,
 	}, nil
 }
 
@@ -195,11 +203,18 @@ func (r *Room) Join(id, nickname string) (Member, error) {
 	// Lobby arrivals fill open seats. Mid-match arrivals always spectate, because
 	// dropping a new player into a live board would change the position being played.
 	if r.phase == PhaseLobby {
-		for seat := 0; seat < SeatCount; seat++ {
-			if r.seats[seat] == "" {
-				r.seats[seat] = id
-				m.Seat = seat
-				break
+		// The host may have reserved a side at creation time. Honour it first, then fall
+		// back to "first free" for everyone else.
+		if m.IsHost && r.hostSeat >= 0 && r.hostSeat < SeatCount && r.seats[r.hostSeat] == "" {
+			r.seats[r.hostSeat] = id
+			m.Seat = r.hostSeat
+		} else {
+			for seat := 0; seat < SeatCount; seat++ {
+				if r.seats[seat] == "" {
+					r.seats[seat] = id
+					m.Seat = seat
+					break
+				}
 			}
 		}
 	}
@@ -601,6 +616,27 @@ func (r *Room) Resign(id string) error {
 		outcome = game.OutcomeSeatTwoWin
 	}
 	r.finishLocked(game.Result{Finished: true, Outcome: outcome, Reason: "resign"})
+	return nil
+}
+
+// Timeout ends the match because a seat ran out of time. It is called by the host, which
+// owns the clock: the room will not consult a clock itself, because a rule machine that
+// reads the wall clock cannot be replayed.
+func (r *Room) Timeout(seat int) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.phase != PhasePlaying || r.match == nil {
+		return ErrMatchInProgress
+	}
+	if seat < 0 || seat >= SeatCount {
+		return ErrInvalidSeat
+	}
+	outcome := game.OutcomeSeatOneWin
+	if seat == 0 {
+		outcome = game.OutcomeSeatTwoWin
+	}
+	r.finishLocked(game.Result{Finished: true, Outcome: outcome, Reason: "timeout"})
 	return nil
 }
 

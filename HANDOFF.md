@@ -96,6 +96,21 @@ dbx-plugin package .                        # 产出 dist/*.dbxp
 - `reveal` 交错入场、`--ease-spring` 弹性曲线、按钮 hover 位移 + 双层阴影
 - `check_ui.py audit` → **0 项违规**
 
+### 1c. 时间控制 / 选边 / 座位形象 / 大手（已完成）
+
+**建房时可设**：对局限时（分钟，0=不限）、每步限时（秒，0=不限）、房主坐哪边（先手/后手/随便）。
+`room.create` 收 `minutes` / `moveSeconds` / `seat`；`Room.Options.HostSeat` 在房主入座时消费一次。
+
+**时钟**（`internal/app/support.go`）：`budget` + `perMove` 双重限时，任一到期即判负
+（`Room.Timeout(seat)`，理由 `timeout`）。前端不再本地递减，改为 500ms 轮询主机——
+单一数据源。之前有「本地递减 + 服务器校正」双写，两者打架，本地永远说最后一句话。
+
+**棋盘两侧座位形象**：席位面板（SVG 人物剪影 + 名字 + 时钟），走的哪边会微微抬起。
+
+**大手**：`src/board/hand.js`，纯矢量（CSP 禁外部资源），袖子 + 手掌 + 四指 + 拇指，
+从上方落下抓住棋子，跟着补间移动，落点松开再抽走。手追的是同一个 `PieceNode`，
+所以永远不会和棋子的位置打架。
+
 ### 1b. 陪练（启发式对手）—— 已完成
 
 `backend/internal/ai`：象棋做两層材料搜索（一層会白送车，这是最招人烦的弱对手），

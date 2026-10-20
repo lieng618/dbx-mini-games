@@ -130,7 +130,7 @@ func TestUnknownMethodErrors(t *testing.T) {
 }
 
 func TestClockResetsAndCountsDown(t *testing.T) {
-	c := newClock()
+	c := newClock(DefaultBudget, 0)
 	now := time.Now()
 	c.reset(now)
 	v := c.view()
@@ -150,7 +150,7 @@ func TestClockResetsAndCountsDown(t *testing.T) {
 }
 
 func TestClockTimeoutDetection(t *testing.T) {
-	c := newClock()
+	c := newClock(DefaultBudget, 0)
 	c.reset(time.Now())
 	c.mu.Lock()
 	c.remaining[0] = 0
@@ -161,10 +161,12 @@ func TestClockTimeoutDetection(t *testing.T) {
 }
 
 func TestClockDoesNotGoNegative(t *testing.T) {
-	c := newClock()
+	c := newClock(DefaultBudget, 0)
 	c.mu.Lock()
 	c.running = 0
-	c.since = time.Now().Add(-time.Hour)
+	// consumed is the deduction cursor; since marks the start of the turn and is what the
+	// per-move limit measures. Draining the budget is driven by consumed.
+	c.consumed = time.Now().Add(-time.Hour)
 	c.remaining[0] = 10 * time.Millisecond
 	c.mu.Unlock()
 	v := c.view()

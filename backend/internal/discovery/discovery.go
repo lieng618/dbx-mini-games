@@ -26,13 +26,13 @@ const localDomain = "local."
 
 // TXT record keys.
 const (
-	txtRoomID    = "id"
-	txtHostKey   = "key"
-	txtGame      = "game"
-	txtPlayers   = "players"
-	txtSeats     = "seats"
-	txtLocked    = "locked"
-	txtProtocol  = "proto"
+	txtRoomID   = "id"
+	txtHostKey  = "key"
+	txtGame     = "game"
+	txtPlayers  = "players"
+	txtSeats    = "seats"
+	txtLocked   = "locked"
+	txtProtocol = "proto"
 )
 
 // ErrAdvertise wraps a registration failure.
@@ -40,15 +40,19 @@ var ErrAdvertise = errors.New("could not advertise the room")
 
 // RoomInfo is what a resolver learns about a room.
 type RoomInfo struct {
-	RoomID   string
-	Name     string
-	Game     string
-	HostKey  string
-	Address  string
-	Players  int
-	Seats    int
-	Locked   bool
-	Protocol int
+	// These tags are part of the wire contract with the UI, which reads roomId/address and
+	// friends by their lower-camel names. Without them Go emits the Go field names and every
+	// field on the join list is undefined — the row renders blank and joining fails with
+	// "an address is required".
+	RoomID   string `json:"roomId"`
+	Name     string `json:"name"`
+	Game     string `json:"game"`
+	HostKey  string `json:"hostKey"`
+	Address  string `json:"address"`
+	Players  int    `json:"players"`
+	Seats    int    `json:"seats"`
+	Locked   bool   `json:"locked"`
+	Protocol int    `json:"protocol"`
 }
 
 // Advertisement is a live mDNS registration. Close it when the room ends.
