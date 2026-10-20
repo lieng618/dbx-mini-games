@@ -42,6 +42,10 @@ const checkFocus = ref(null);
 const result = ref(null);
 const winLine = ref([]);
 const clock = ref(null);
+// The practice partner's seat, or -1. Kept separate from `seats` because the partner is
+// not a member: it has a seat but no id, no nickname and no connection.
+const aiSeat = ref(-1);
+const aiThinking = ref(false);
 const record = ref(null);
 const notation = ref([]);
 const replayPly = ref(0);
@@ -64,6 +68,9 @@ const isMyTurn = computed(() => {
   const turn = cells.value.turnSeat;
   return isSeated.value && turn === mySeat.value;
 });
+/** True while the practice partner holds the turn. */
+const isAiTurn = computed(() => aiSeat.value >= 0 && (cells.value.turnSeat ?? 0) === aiSeat.value);
+
 const seatMembers = computed(() =>
   seats.value.map((id) => members.value.find((m) => m.id === id) || null),
 );
@@ -104,6 +111,7 @@ function applySnapshot(snapshot) {
   // absence does mean false, which is what clears a check the move has answered.
   const isRoomSnapshot = Array.isArray(snapshot.members) && typeof snapshot.phase === "string";
   if (isRoomSnapshot) {
+    aiSeat.value = typeof snapshot.aiSeat === "number" ? snapshot.aiSeat : -1;
     inCheck.value = snapshot.inCheck === true;
     checkFocus.value = snapshot.checkFocus ?? null;
     result.value = snapshot.result ?? null;
@@ -136,6 +144,7 @@ function describeError(raw) {
     // "Not enough players" is the opposite of "full". These two used to share one error,
     // so a lone host pressing 开始对局 was told the room was full.
     ["both seats must be filled", "还差一位对手才能开始，等朋友加入，或先摆一摆"],
+    ["both seats are already taken by players", "两个座位都坐着真人，陪练没位置了"],
     ["no seated player to start practice", "没有人在座位上，无法开始练习"],
     ["seat already occupied", "这个座位已经有人了"],
     ["that seat does not exist", "没有这个座位"],
@@ -224,6 +233,33 @@ async function endPractice() {
  * This is a practice-board convenience, not a game feature: it never runs during a real
  * match, which the sidecar also enforces.
  */
+/** Starts a practice board with the partner holding the other seat. */
+async function startPartner() {
+  scene?.clearEffects();
+  await call("room.ai.start");
+}
+
+/**
+ * Gives the partner its turn.
+ *
+ * The reply is a separate host call on purpose. Applying both moves inside one snapshot
+ * makes the piece diff read as a rebuild, and the pair would teleport instead of animating.
+ */
+async function partnerReply() {
+  if (phase.value !== "practice" || aiSeat.value < 0) return;
+  if ((cells.value.turnSeat ?? 0) !== aiSeat.value) return;
+  aiThinking.value = true;
+  try {
+    // A beat before answering: replying inside the landing animation reads as a glitch
+    // rather than as someone considering a move.
+    await new Promise((resolve) => setTimeout(resolve, 420));
+    await call("room.ai.move");
+    await loadNotation();
+  } finally {
+    aiThinking.value = false;
+  }
+}
+
 async function runScenario(name) {
   scene?.clearEffects();
   const reply = await call("dev.scenario", { name });
@@ -273,6 +309,9 @@ function toggleSound() {
 async function onCell(index) {
   const canMove = (phase.value === "playing" && isMyTurn.value) || phase.value === "practice";
   if (!canMove || !isSeated.value) return;
+  // While the partner owns the turn the board is read-only: otherwise the player could
+  // move twice, and the partner's own move would then be rejected as out of turn.
+  if (aiThinking.value || isAiTurn.value) return;
   const board = cells.value.board || [];
   const code = board[index] || 0;
 
@@ -291,6 +330,7 @@ async function onCell(index) {
       scene?.clearSelection();
       await call("game.move", { from: selected, to: index });
       await loadNotation();
+      await partnerReply();
     }
     return;
   }
@@ -299,6 +339,7 @@ async function onCell(index) {
   if (code) return;
   await call("game.move", { to: index });
   await loadNotation();
+  await partnerReply();
 }
 
 async function loadNotation() {
@@ -502,9 +543,15 @@ watch(game, (next) => {
         </p>
 
         <div class="seat-row">
-          <div v-for="(m, i) in seatMembers" :key="i" class="seat" :class="{ empty: !m }">
+          <div
+            v-for="(m, i) in seatMembers"
+            :key="i"
+            class="seat"
+            :class="{ empty: !m && i !== aiSeat, partner: i === aiSeat }"
+          >
             <span class="seat-tag">{{ i === 0 ? "先手" : "后手" }}</span>
-            <span class="seat-name">{{ m ? m.nickname : "空座" }}</span>
+            <!-- The partner holds a seat without being a member, so it has no nickname. -->
+            <span class="seat-name">{{ i === aiSeat ? "陪练" : m ? m.nickname : "空座" }}</span>
           </div>
         </div>
 
@@ -527,6 +574,14 @@ watch(game, (next) => {
         <div class="actions">
           <button v-if="phase === 'lobby' && role === 'host'" class="primary" @click="startMatch">
             开始对局
+          </button>
+          <button
+            v-if="phase === 'lobby' && role === 'host'"
+            class="primary"
+            title="和启发式陪练下一局：不记胜负，可以随时重来"
+            @click="startPartner"
+          >
+            和陪练下
           </button>
           <button
             v-if="phase === 'lobby' && role === 'host'"
@@ -587,7 +642,10 @@ watch(game, (next) => {
       <footer class="controls">
         <div class="controls-top">
         <div class="status">
-          <span v-if="phase === 'practice'">练习模式 · 不计胜负，可自由走子</span>
+          <span v-if="phase === 'practice' && aiSeat >= 0">
+            {{ aiThinking || isAiTurn ? "陪练正在想…" : "轮到你走 · 陪练模式" }}
+          </span>
+          <span v-else-if="phase === 'practice'">练习模式 · 不计胜负，可自由走子</span>
           <span v-else-if="phase === 'playing'">
             {{ isMyTurn ? "轮到你走" : isSeated ? "等对方走" : "观战中" }}
           </span>
@@ -945,6 +1003,13 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
 }
 
 .seat.empty { background: rgba(255, 253, 248, 0.5); border-style: dashed; box-shadow: none; }
+
+/* The partner is a fixture, not a guest: it gets the accent rail rather than a new colour,
+   so it reads as "occupied by something that lives here". */
+.seat.partner {
+  border-color: rgba(176, 58, 46, 0.34);
+  background: linear-gradient(180deg, rgba(176, 58, 46, 0.06), transparent 70%), var(--surface);
+}
 
 .seat-tag {
   font-size: 12px;

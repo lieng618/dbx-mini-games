@@ -32,7 +32,9 @@ var (
 	// It is the opposite of "full", so it must never be reported as such.
 	ErrNotEnoughPlayers = errors.New("both seats must be filled before the match can start")
 	// ErrNoSeatedPlayer covers practice, which needs one occupant rather than two.
-	ErrNoSeatedPlayer  = errors.New("no seated player to start practice")
+	ErrNoSeatedPlayer = errors.New("no seated player to start practice")
+	// ErrBothSeatsTaken blocks a partner joining a table where two humans already sit.
+	ErrBothSeatsTaken  = errors.New("both seats are already taken by players")
 	ErrSeatOccupied    = errors.New("seat already occupied")
 	ErrMatchInProgress = errors.New("a match is already in progress")
 	ErrNotSeated       = errors.New("only seated players may do that")
@@ -58,12 +60,12 @@ const (
 
 // Member is one connected participant.
 type Member struct {
-	ID        string    `json:"id"`
-	Nickname  string    `json:"nickname"`
-	Seat      int       `json:"seat"` // -1 for a spectator
-	Connected bool      `json:"connected"`
-	IsHost    bool      `json:"isHost"`
-	JoinedSeq int       `json:"joinedSeq"`
+	ID        string `json:"id"`
+	Nickname  string `json:"nickname"`
+	Seat      int    `json:"seat"` // -1 for a spectator
+	Connected bool   `json:"connected"`
+	IsHost    bool   `json:"isHost"`
+	JoinedSeq int    `json:"joinedSeq"`
 }
 
 // IsSeated reports whether the member holds a seat.
@@ -92,6 +94,10 @@ type Room struct {
 	gameName string
 	hostID   string
 	password string
+
+	// aiSeat is the seat the practice partner controls, or -1 when no partner is sitting
+	// in. It only exists on a practice board: a real match is always two humans.
+	aiSeat int
 
 	members map[string]*Member
 	order   []string // join order, for "first to arrive sits"
@@ -124,6 +130,7 @@ func New(opts Options) (*Room, error) {
 		password: opts.Password,
 		members:  map[string]*Member{},
 		phase:    PhaseLobby,
+		aiSeat:   -1,
 	}, nil
 }
 
@@ -323,6 +330,34 @@ func (r *Room) Start(now int64) error {
 // StartPractice opens a solo board for the host. It requires exactly one seated player,
 // and it never produces a result.
 func (r *Room) StartPractice(now int64) error {
+	return r.startPractice(now, -1)
+}
+
+// StartPracticeVsAI opens a practice board with the partner holding the seat the player
+// does not occupy. The board is still a practice board: no result is ever recorded and the
+// player may reset at any time, which is what makes it a safe place to try things.
+func (r *Room) StartPracticeVsAI(now int64) error {
+	r.mu.Lock()
+	human := -1
+	for seat, id := range r.seats {
+		if id != "" {
+			if human != -1 {
+				r.mu.Unlock()
+				// Two humans are already sitting down; a partner would be a third party.
+				return ErrBothSeatsTaken
+			}
+			human = seat
+		}
+	}
+	r.mu.Unlock()
+	if human < 0 {
+		return ErrNoSeatedPlayer
+	}
+	// The player always takes the seat they already hold; the partner takes the other.
+	return r.startPractice(now, 1-human)
+}
+
+func (r *Room) startPractice(now int64, aiSeat int) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -343,6 +378,53 @@ func (r *Room) StartPractice(now int64) error {
 		StartedAt: now,
 	}
 	r.phase = PhasePractice
+	r.aiSeat = aiSeat
+	return nil
+}
+
+// EngineForThinking returns an independent copy of the current position for a caller that
+// wants to search it. A clone, not the live engine: the partner must never be able to
+// mutate room state by accident, and the room holds the only authority over the board.
+func (r *Room) EngineForThinking() game.Engine {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.match == nil || r.match.Engine == nil {
+		return nil
+	}
+	return r.match.Engine.Clone()
+}
+
+// AISeat reports the seat the practice partner controls, or -1 when there is no partner.
+func (r *Room) AISeat() int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.phase != PhasePractice {
+		return -1
+	}
+	return r.aiSeat
+}
+
+// AIMove applies the partner's move. It is separate from PracticeMove so that authority
+// stays in the room: the player cannot quietly move for the partner, and the partner
+// cannot move out of turn.
+func (r *Room) AIMove(m game.Move) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.phase != PhasePractice || r.match == nil {
+		return ErrMatchInProgress
+	}
+	if r.aiSeat < 0 {
+		return ErrNoSeatedPlayer
+	}
+	if game.Seat(r.aiSeat) != r.match.Engine.Turn() {
+		return ErrNotYourTurn
+	}
+	if err := r.match.Engine.Apply(m); err != nil {
+		return err
+	}
+	r.match.Record.Moves = append(r.match.Record.Moves, m)
+	r.match.Revision++
 	return nil
 }
 
@@ -369,6 +451,11 @@ func (r *Room) PracticeMove(id string, m game.Move) error {
 	if member.Seat < 0 {
 		return ErrNotSeated
 	}
+	// With a partner seated, the solo board stops being a two-sided sandbox: the player
+	// may only move their own side, or they could simply play the partner's moves for it.
+	if r.aiSeat >= 0 && game.Seat(r.aiSeat) == r.match.Engine.Turn() {
+		return ErrNotYourTurn
+	}
 	if err := r.match.Engine.Apply(m); err != nil {
 		return err
 	}
@@ -389,6 +476,7 @@ func (r *Room) EndPractice() {
 	r.phase = PhaseLobby
 	r.match = nil
 	r.replay = nil
+	r.aiSeat = -1
 }
 
 // Move applies a move for the given member. Only the seat holder on turn may move,

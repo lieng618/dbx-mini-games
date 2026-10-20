@@ -96,6 +96,22 @@ dbx-plugin package .                        # 产出 dist/*.dbxp
 - `reveal` 交错入场、`--ease-spring` 弹性曲线、按钮 hover 位移 + 双层阴影
 - `check_ui.py audit` → **0 项违规**
 
+### 1b. 陪练（启发式对手）—— 已完成
+
+`backend/internal/ai`：象棋做两層材料搜索（一層会白送车，这是最招人烦的弱对手），
+五子棋走线型评分（活四 / 冲四 / 活三 / 眠三 / 活二），开局有轻微随机同分选择。
+
+- `room.ai.start` 开一局对陪练：玩家占自己已坐的座位，陪练坐另一个，仍然是练习局
+  （不记胜负、可随时重来）
+- `room.ai.move` 由**主机**算并落子，独立一次调用。两次走子合进一个快照会被 diff 判成
+  rebuild，两颗子会瞬移——这正是之前吃子特效消失的同一个坑
+- 陪练坐进来之后，练习盘不再是双面沙盒：`PracticeMove` 拒绝玩家替陪练走子
+- `EngineForThinking()` 返回引擎**克隆**，陪练永远拿不到活引擎
+- 换局/结束练习会清掉 `aiSeat`，否则大厅会一直显示陪练在位
+
+快照有三个构造器（`snapshot` / `snapshotForMember` / `snapshotLocked`），字段必须三处
+同步——`aiSeat` 一开始只加了两处，UI 只有在第一次动作后才看得到陪练。已有契约测试锁住。
+
 ### 1a. 第一轮（同日前半段）
 
 六项都做了，在真实 `dbx-plugin dev` 宿主里逐项抓帧验过（见 `docs/VALIDATION.md`

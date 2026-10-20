@@ -5,14 +5,15 @@ package app
 
 import (
 	"crypto/ed25519"
-	"encoding/json"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
 	"sync"
 	"time"
 
+	"github.com/southernMortals/dbx-board-games/backend/internal/ai"
 	"github.com/southernMortals/dbx-board-games/backend/internal/discovery"
 	"github.com/southernMortals/dbx-board-games/backend/internal/lan"
 	"github.com/southernMortals/dbx-board-games/backend/internal/replay"
@@ -26,18 +27,18 @@ type EmitFunc func(method string, params any)
 
 // App is the process-wide plugin session.
 type App struct {
-	mu       sync.RWMutex
-	emit     EmitFunc
-	dataDir  string
-	profile  Profile
-	room     *room.Room
-	server   *lan.Server
-	adv      *discovery.Advertisement
-	client   *lan.Client
-	ticket   string
+	mu      sync.RWMutex
+	emit    EmitFunc
+	dataDir string
+	profile Profile
+	room    *room.Room
+	server  *lan.Server
+	adv     *discovery.Advertisement
+	client  *lan.Client
+	ticket  string
 	// localID is this machine's member id inside the room it hosts or joined.
-	localID  string
-	clock    *Clock
+	localID   string
+	clock     *Clock
 	lowMotion bool
 }
 
@@ -78,6 +79,7 @@ func (a *App) Call(method string, params map[string]any) (any, error) {
 	case "room.snapshot":
 		return a.snapshot(), nil
 	case "room.start", "room.practice.start", "room.practice.end",
+		"room.ai.start", "room.ai.move",
 		"room.seat", "room.release",
 		"game.move", "game.undo.request", "game.undo.consent", "game.resign", "game.rematch":
 		return a.act(method, params)
@@ -256,15 +258,18 @@ func (a *App) snapshot() map[string]any {
 	defer a.mu.RUnlock()
 	if a.room != nil {
 		view := map[string]any{
-			"role":      "host",
-			"selfId":    a.localID,
-			"roomId":    a.room.ID(),
-			"name":      a.room.Name(),
-			"game":      a.room.GameName(),
-			"phase":     string(a.room.Phase()),
-			"locked":    a.room.Locked(),
-			"seats":     a.room.Seats(),
-			"members":   a.room.Members(),
+			"role":    "host",
+			"selfId":  a.localID,
+			"roomId":  a.room.ID(),
+			"name":    a.room.Name(),
+			"game":    a.room.GameName(),
+			"phase":   string(a.room.Phase()),
+			"locked":  a.room.Locked(),
+			"seats":   a.room.Seats(),
+			"members": a.room.Members(),
+			// The partner's seat. There are three snapshot builders and all three have to
+			// carry it, or the UI only learns about the partner on some code paths.
+			"aiSeat":    a.room.AISeat(),
 			"lowMotion": a.lowMotion,
 		}
 		if a.server != nil {
@@ -293,12 +298,6 @@ func (a *App) snapshot() map[string]any {
 	return map[string]any{"role": "idle", "lowMotion": a.lowMotion, "profile": a.profile}
 }
 
-
-
-
-
-
-
 func (a *App) legalMoves(params map[string]any) (map[string]any, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -324,10 +323,6 @@ func (a *App) legalMoves(params map[string]any) (map[string]any, error) {
 	}
 	return map[string]any{"destinations": engine.LegalFrom(from)}, nil
 }
-
-
-
-
 
 func (a *App) replayRecord() (map[string]any, error) {
 	a.mu.RLock()
@@ -363,7 +358,6 @@ func (a *App) replayNotation() (map[string]any, error) {
 	}
 	return map[string]any{"notation": notes}, nil
 }
-
 
 // boardView renders the authoritative board for a snapshot.
 //
@@ -500,7 +494,6 @@ func (a *App) replayState(params map[string]any) (map[string]any, error) {
 	}, nil
 }
 
-
 // act performs one state-changing action on the authoritative room.
 //
 // A host applies it locally; a guest forwards it to the host and adopts the returned
@@ -538,7 +531,6 @@ func (a *App) act(method string, params map[string]any) (map[string]any, error) 
 
 // nilHelper exists only to keep act's return shape uniform; it always returns nil.
 func nilHelper(any) error { return nil }
-
 
 // applyHostAction mutates the room for one action. The caller holds the lock.
 func (a *App) applyHostAction(method string, params map[string]any) error {
@@ -585,6 +577,27 @@ func (a *App) applyHostAction(method string, params map[string]any) error {
 	case "room.practice.end":
 		a.room.EndPractice()
 		return nil
+	case "room.ai.start":
+		if err := needSeat(); err != nil {
+			return err
+		}
+		return a.room.StartPracticeVsAI(time.Now().UnixMilli())
+	case "room.ai.move":
+		// The partner answers in its own call, not inside the player's move. One snapshot
+		// carrying both moves diffs as a rebuild, and the pair would teleport instead of
+		// animating — the same trap that used to hide capture effects.
+		if a.room.AISeat() < 0 {
+			return room.ErrNoSeatedPlayer
+		}
+		engine := a.room.EngineForThinking()
+		if engine == nil {
+			return room.ErrNoSeatedPlayer
+		}
+		move, ok := ai.BestMove(engine)
+		if !ok {
+			return nil
+		}
+		return a.room.AIMove(move)
 	case "game.move":
 		if err := needSeat(); err != nil {
 			return err
@@ -630,7 +643,6 @@ func (a *App) applyHostAction(method string, params map[string]any) error {
 		return fmt.Errorf("unknown action %q", method)
 	}
 }
-
 
 // serveGuest applies one request that arrived from a guest over the LAN connection.
 //
@@ -685,15 +697,17 @@ func (a *App) snapshotForMember(memberID string) map[string]any {
 		return map[string]any{"role": "guest"}
 	}
 	view := map[string]any{
-		"role":      "guest",
-		"selfId":    memberID,
-		"roomId":    a.room.ID(),
-		"name":      a.room.Name(),
-		"game":      a.room.GameName(),
-		"phase":     string(a.room.Phase()),
-		"locked":    a.room.Locked(),
-		"seats":     a.room.Seats(),
-		"members":   a.room.Members(),
+		"role":    "guest",
+		"selfId":  memberID,
+		"roomId":  a.room.ID(),
+		"name":    a.room.Name(),
+		"game":    a.room.GameName(),
+		"phase":   string(a.room.Phase()),
+		"locked":  a.room.Locked(),
+		"seats":   a.room.Seats(),
+		"members": a.room.Members(),
+		// The partner's seat, so the UI can label it and refuse moves made on its behalf.
+		"aiSeat":    a.room.AISeat(),
 		"lowMotion": a.lowMotion,
 	}
 	if rec, ok := a.room.Replay(); ok {
@@ -708,15 +722,17 @@ func (a *App) snapshotForMember(memberID string) map[string]any {
 // snapshotLocked renders a snapshot while the caller already holds the lock.
 func (a *App) snapshotLocked() map[string]any {
 	view := map[string]any{
-		"role":      "host",
-		"selfId":    a.localID,
-		"roomId":    a.room.ID(),
-		"name":      a.room.Name(),
-		"game":      a.room.GameName(),
-		"phase":     string(a.room.Phase()),
-		"locked":    a.room.Locked(),
-		"seats":     a.room.Seats(),
-		"members":   a.room.Members(),
+		"role":    "host",
+		"selfId":  a.localID,
+		"roomId":  a.room.ID(),
+		"name":    a.room.Name(),
+		"game":    a.room.GameName(),
+		"phase":   string(a.room.Phase()),
+		"locked":  a.room.Locked(),
+		"seats":   a.room.Seats(),
+		"members": a.room.Members(),
+		// The partner's seat, so the UI can label it and refuse moves made on its behalf.
+		"aiSeat":    a.room.AISeat(),
 		"lowMotion": a.lowMotion,
 	}
 	if a.server != nil {
