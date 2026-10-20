@@ -23,10 +23,16 @@ const (
 
 // Errors callers may need to distinguish.
 var (
-	ErrRoomFull        = errors.New("room is full")
-	ErrAlreadyJoined   = errors.New("already in this room")
-	ErrNotMember       = errors.New("not a member of this room")
-	ErrNoSeat          = errors.New("no free seat")
+	ErrRoomFull      = errors.New("room is full")
+	ErrAlreadyJoined = errors.New("already in this room")
+	ErrNotMember     = errors.New("not a member of this room")
+	// ErrInvalidSeat is an out-of-range seat index, never a taken seat.
+	ErrInvalidSeat = errors.New("that seat does not exist")
+	// ErrNotEnoughPlayers means a seat is empty and there is nobody to challenge yet.
+	// It is the opposite of "full", so it must never be reported as such.
+	ErrNotEnoughPlayers = errors.New("both seats must be filled before the match can start")
+	// ErrNoSeatedPlayer covers practice, which needs one occupant rather than two.
+	ErrNoSeatedPlayer  = errors.New("no seated player to start practice")
 	ErrSeatOccupied    = errors.New("seat already occupied")
 	ErrMatchInProgress = errors.New("a match is already in progress")
 	ErrNotSeated       = errors.New("only seated players may do that")
@@ -248,7 +254,7 @@ func (r *Room) TakeSeat(id string, seat int) error {
 	defer r.mu.Unlock()
 
 	if seat < 0 || seat >= SeatCount {
-		return ErrNoSeat
+		return ErrInvalidSeat
 	}
 	m, ok := r.members[id]
 	if !ok {
@@ -298,7 +304,7 @@ func (r *Room) Start(now int64) error {
 		return ErrMatchInProgress
 	}
 	if r.seats[0] == "" || r.seats[1] == "" {
-		return ErrNoSeat
+		return ErrNotEnoughPlayers
 	}
 	engine, err := replay.NewEngine(r.gameName)
 	if err != nil {
@@ -324,7 +330,7 @@ func (r *Room) StartPractice(now int64) error {
 		return ErrMatchInProgress
 	}
 	if r.seats[0] == "" && r.seats[1] == "" {
-		return ErrNoSeat
+		return ErrNoSeatedPlayer
 	}
 	engine, err := replay.NewEngine(r.gameName)
 	if err != nil {

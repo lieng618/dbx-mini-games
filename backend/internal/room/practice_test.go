@@ -22,7 +22,7 @@ func TestPracticeStartsWithOneSeatedPlayer(t *testing.T) {
 
 func TestPracticeRequiresASeat(t *testing.T) {
 	r := newRoom(t, "gomoku")
-	if err := r.StartPractice(1); err != ErrNoSeat {
+	if err := r.StartPractice(1); err != ErrNoSeatedPlayer {
 		t.Fatalf("practice without a seat must be refused, got %v", err)
 	}
 }

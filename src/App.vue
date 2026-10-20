@@ -125,7 +125,12 @@ function paint() {
 function describeError(raw) {
   const text = String(raw ?? "");
   const table = [
-    ["no free seat", "两个座位都满了，可以让一位朋友先离座"],
+    // "Not enough players" is the opposite of "full". These two used to share one error,
+    // so a lone host pressing 开始对局 was told the room was full.
+    ["both seats must be filled", "还差一位对手才能开始，等朋友加入，或先摆一摆"],
+    ["no seated player to start practice", "没有人在座位上，无法开始练习"],
+    ["seat already occupied", "这个座位已经有人了"],
+    ["that seat does not exist", "没有这个座位"],
     ["a match is already in progress", "对局正在进行中，无法调整座位"],
     ["room is full", "房间人数已满（8 人）"],
     ["not your turn", "还没轮到你走棋"],

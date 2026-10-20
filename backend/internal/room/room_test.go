@@ -100,8 +100,9 @@ func mustJoin(t *testing.T, r *Room, ids ...string) {
 func TestStartRequiresBothSeats(t *testing.T) {
 	r := newRoom(t, "gomoku")
 	mustJoin(t, r, "host")
-	if err := r.Start(1); err != ErrNoSeat {
-		t.Fatalf("expected ErrNoSeat with one player, got %v", err)
+	// A lone host must be told a seat is empty, not that the room is full.
+	if err := r.Start(1); err != ErrNotEnoughPlayers {
+		t.Fatalf("expected ErrNotEnoughPlayers with one player, got %v", err)
 	}
 	mustJoin(t, r, "a")
 	if err := r.Start(1); err != nil {
