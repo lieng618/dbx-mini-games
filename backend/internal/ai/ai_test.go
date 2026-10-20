@@ -171,3 +171,71 @@ func TestXiangqiDoesNotHangItsRook(t *testing.T) {
 		t.Fatalf("partner walked into losing a rook (swing %d)", worst)
 	}
 }
+
+// emptyXiangqiBoard is a 90-point board with nothing on it.
+func emptyXiangqiBoard() []int8 { return make([]int8, 90) }
+
+// TestPressureRewardsProximity: a rook sitting on the enemy general is worth more pressure
+// than the same rook parked on its own back rank. Without this the partner has no reason to
+// ever come forward.
+func TestPressureRewardsProximity(t *testing.T) {
+	const blackKing = 4 // rank 0, file 4
+	const nearRook = 3  // rank 0, file 3 — right next to the general
+	const farRook = 76  // rank 8, file 4 — its own back rank
+
+	near := emptyXiangqiBoard()
+	near[blackKing] = -1
+	near[nearRook] = 5
+
+	far := emptyXiangqiBoard()
+	far[blackKing] = -1
+	far[farRook] = 5
+
+	nearScore := pressure(near, game.SeatOne)
+	farScore := pressure(far, game.SeatOne)
+	if nearScore <= farScore {
+		t.Fatalf("a rook beside the general must press harder: near=%d far=%d", nearScore, farScore)
+	}
+}
+
+// TestPressureRewardsCrossingTheRiver: a pawn that has crossed counts as pressure, one that
+// has not does not. Crossing is the clearest sign a player has committed.
+func TestPressureRewardsCrossingTheRiver(t *testing.T) {
+	const blackKing = 4
+
+	crossed := emptyXiangqiBoard()
+	crossed[blackKing] = -1
+	crossed[27] = 7 // red pawn on rank 3, across the river
+
+	home := emptyXiangqiBoard()
+	home[blackKing] = -1
+	home[63] = 7 // red pawn on rank 7, still home
+
+	if pressure(crossed, game.SeatOne) <= pressure(home, game.SeatOne) {
+		t.Fatalf("a crossed pawn must add pressure: crossed=%d home=%d",
+			pressure(crossed, game.SeatOne), pressure(home, game.SeatOne))
+	}
+}
+
+// TestGomokuBuildsItsOwnFourRatherThanOnlyBlocking is the behaviour change that makes the
+// partner feel aggressive: with both sides holding an open three, it should complete its own
+// four and force the answer, not trade blocks.
+func TestGomokuBuildsItsOwnFourRatherThanOnlyBlocking(t *testing.T) {
+	e := playGomoku(t,
+		at(7, 3), at(3, 3),
+		at(7, 4), at(3, 4),
+		at(7, 5), at(3, 5),
+	)
+	// Black to move: three stones each, both open at both ends. Black moves first, so black
+	// can make an open four rather than defend.
+	move, ok := BestMove(e)
+	if !ok {
+		t.Fatal("no move returned")
+	}
+	// at(file, rank) puts the three on a vertical line at file 7, ranks 3..5, so the open
+	// four is the square just above or below it.
+	file, rank := move.To%gomokuSize, move.To/gomokuSize
+	if file != 7 || (rank != 2 && rank != 6) {
+		t.Fatalf("expected black to extend its own three into an open four, got (file %d, rank %d)", file, rank)
+	}
+}

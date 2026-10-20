@@ -94,8 +94,8 @@ func material(cells []int8, seat game.Seat) int {
 // pawnAdvance rewards pushing pawns toward the enemy back rank.
 //
 // Without it the partner shuffles its advisors forever: material is level, so every quiet
-// move ties, and the first on the list wins. A small positional term breaks those ties in
-// the direction a human would actually choose.
+// move ties. Scored per side rather than "add both, then subtract" — the old form mixed the
+// two seats' signs and was one edit away from rewarding the opponent.
 func pawnAdvance(cells []int8, seat game.Seat) int {
 	score := 0
 	for index, code := range cells {
@@ -106,33 +106,125 @@ func pawnAdvance(cells []int8, seat game.Seat) int {
 		if kind < 0 {
 			kind = -kind
 		}
-		if kind != 7 { // pawn
+		if kind != 7 {
 			continue
 		}
 		rank := index / 9
+		progress := rank
 		if code > 0 {
-			// Red sits at rank 9 and advances toward rank 0.
-			score += (9 - rank) * 6
-			if seat == game.SeatTwo {
-				score -= 2 * (9 - rank) * 6
-			}
+			progress = 9 - rank // red advances toward rank 0
+		}
+		if (code > 0) == (seat == game.SeatOne) {
+			score += progress * 6
 		} else {
-			score += rank * 6
-			if seat == game.SeatTwo {
-				score -= 2 * rank * 6
+			score -= progress * 6
+		}
+	}
+	return score
+}
+
+// aggression decides how much pressure is worth relative to material.
+//
+// At 0 this is the old opponent: correct, and completely passive, because with material
+// level every quiet move ties and the first one in the list wins. Pressure is what makes
+// it come at you instead of shuffling. It stays under a rook on purpose, so "attacking"
+// never turns into "sacrificing": the two-ply material term still dominates a real blunder.
+const aggression = 14 // per 10
+
+func absInt(v int) int {
+	if v < 0 {
+		return -v
+	}
+	return v
+}
+
+// crossedRiver reports whether a pawn has left its own half.
+func crossedRiver(rank int, red bool) bool {
+	if red {
+		return rank <= 4 // red starts at rank 9 and advances upward
+	}
+	return rank >= 5
+}
+
+// kingSquare finds a side's general, or -1.
+func kingSquare(cells []int8, seat game.Seat) int {
+	want := int8(1)
+	if seat == game.SeatTwo {
+		want = -1
+	}
+	for index, code := range cells {
+		if code == want {
+			return index
+		}
+	}
+	return -1
+}
+
+// pressure scores how hard the given seat is leaning on the enemy general.
+//
+// Each attacking piece is worth more the closer it sits, and a pawn across the river counts
+// outright: crossing is the clearest signal that a player has committed to an attack rather
+// than to a tidy position.
+func pressure(cells []int8, seat game.Seat) int {
+	enemyKing := kingSquare(cells, seat.Other())
+	if enemyKing < 0 {
+		return 0
+	}
+	kingFile := enemyKing % 9
+	kingRank := enemyKing / 9
+
+	score := 0
+	for index, code := range cells {
+		if code == 0 {
+			continue
+		}
+		mine := code > 0
+		if mine != (seat == game.SeatOne) {
+			continue
+		}
+		kind := code
+		if kind < 0 {
+			kind = -kind
+		}
+		file := index % 9
+		rank := index / 9
+		switch kind {
+		case 1:
+			// The general does not attack; it only has to survive.
+		case 7:
+			if crossedRiver(rank, mine) {
+				score += 70
+			}
+		default:
+			distance := absInt(file-kingFile) + absInt(rank-kingRank)
+			if value := 110 - distance*7; value > 0 {
+				score += value
 			}
 		}
 	}
 	return score
 }
 
-// evaluate returns the position score from the moving seat's point of view.
-func evaluate(e game.Engine) int {
-	seat := e.Turn()
-	return material(e.Cells(), seat) + pawnAdvance(e.Cells(), seat)
+// evaluateFor scores the position from one specific seat's point of view.
+func evaluateFor(e game.Engine, seat game.Seat) int {
+	cells := e.Cells()
+	return material(cells, seat) +
+		pawnAdvance(cells, seat) +
+		aggression*pressure(cells, seat)/10
+}
+
+// givesCheck reports whether the side now to move is in check, which is worth something on
+// its own: it forces a reply and keeps the initiative.
+func givesCheck(e game.Engine) bool {
+	reporter, ok := e.(game.CheckReporter)
+	if !ok {
+		return false
+	}
+	return reporter.InCheck(e.Turn())
 }
 
 func bestXiangqi(e game.Engine) (game.Move, bool) {
+	seat := e.Turn()
 	candidates := legalMoves(e)
 	if len(candidates) == 0 {
 		return game.Move{}, false
@@ -159,20 +251,35 @@ func bestXiangqi(e game.Engine) (game.Move, bool) {
 			return m, true
 		}
 
-		// Second ply: let the opponent take their single best material swing. Anything
-		// worse than this leaves pieces hanging and reads as a broken opponent rather
-		// than an easy one.
-		worstReply := 0
+		// Everything below is scored from OUR seat. After our own move it is the opponent's
+		// turn, so reading the position with "whoever is to move" would silently evaluate
+		// the opponent's advantage and prefer the moves that help them.
+		ourScore := evaluateFor(after, seat)
+
+		// Second ply: the opponent takes their single best reply. Anything less leaves
+		// pieces hanging and reads as a broken opponent rather than a beatable one.
+		worst := math.MaxInt
 		for _, reply := range legalMoves(after) {
 			twoPly := after.Clone()
 			if err := twoPly.Apply(reply); err != nil {
 				continue
 			}
-			if swing := evaluate(twoPly); swing < worstReply || worstReply == 0 {
-				worstReply = swing
+			if value := evaluateFor(twoPly, seat); value < worst {
+				worst = value
 			}
 		}
-		ranked = append(ranked, scored{m, evaluate(after) + worstReply/2})
+		if worst == math.MaxInt {
+			worst = ourScore
+		}
+
+		score := ourScore + worst/2
+		// A check forces a reply and keeps the initiative, so it is worth something even
+		// when it wins no material — this is what makes the partner keep coming at you
+		// instead of trading down into a quiet endgame.
+		if givesCheck(after) {
+			score += 120
+		}
+		ranked = append(ranked, scored{m, score})
 	}
 
 	if len(ranked) == 0 {
@@ -198,6 +305,13 @@ func bestXiangqi(e game.Engine) (game.Move, bool) {
 }
 
 const gomokuSize = 15
+
+// Attack versus defence, per ten. Raising the first or lowering the second makes the
+// partner more aggressive; the values are tuned so that a forced loss is still answered.
+const (
+	gomokuAttack  = 13
+	gomokuDefence = 8
+)
 
 var gomokuDirections = [4][2]int{{1, 0}, {0, 1}, {1, 1}, {1, -1}}
 
@@ -286,11 +400,16 @@ func bestGomoku(e game.Engine) (game.Move, bool) {
 		}
 
 		attack := lineScore(board, file, rank, mine)
-		// Defence is weighted just under attack so the partner prefers completing its own
-		// five over blocking yours when both are available — that is the correct greedy
-		// behaviour, and it is also what a human does.
 		defence := lineScore(board, file, rank, theirs)
-		ranked = append(ranked, scored{game.Move{From: -1, To: index}, attack + defence*9/10})
+		// Attack outweighs defence by roughly three to two. The ladder is steep enough that
+		// this never becomes reckless: stopping an open four is worth 120k before weighting,
+		// while building a three is worth 6k, so a lethal threat is still answered. What
+		// changes is the middle of the board — with both sides on an open three, the partner
+		// now makes its own open four and forces the answer, instead of trading blocks.
+		ranked = append(ranked, scored{
+			game.Move{From: -1, To: index},
+			attack*gomokuAttack/10 + defence*gomokuDefence/10,
+		})
 	}
 
 	if len(ranked) == 0 {

@@ -107,6 +107,8 @@ dbx-plugin package .                        # 产出 dist/*.dbxp
   rebuild，两颗子会瞬移——这正是之前吃子特效消失的同一个坑
 - 陪练坐进来之后，练习盘不再是双面沙盒：`PracticeMove` 拒绝玩家替陪练走子
 - `EngineForThinking()` 返回引擎**克隆**，陪练永远拿不到活引擎
+- 棋风开关在 `internal/ai/ai.go` 顶部：象棋 `aggression`（进攻项权重，默认 14/10）、
+  五子棋 `gomokuAttack` / `gomokuDefence`（默认 13/8）。调高就更爱压上，调低就变保守
 - 换局/结束练习会清掉 `aiSeat`，否则大厅会一直显示陪练在位
 
 快照有三个构造器（`snapshot` / `snapshotForMember` / `snapshotLocked`），字段必须三处
