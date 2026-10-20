@@ -205,24 +205,57 @@ dbx-plugin package .                        # 产出 dist/*.dbxp
 
 ## 签名与发布
 
-仓库签名密钥（**私钥不在仓库里**）：
+密钥与工具**都放在持久位置**，不再依赖 `/tmp`（第一把私钥就是放在那里被系统清理、
+全盘无备份而丢失的，直接导致 0.2.0 换了签名身份）。
 
-- Key ID：`southernMortals-plugins.release`
-- 公钥：`niyPPbiaadjs6VIRE6NU51gBBaNULahIKN+9eZQxsws=`
-- 公钥文件：`dbx-plugins/keys/southernMortals-plugins.release.pub`
+| 东西 | 位置 | 说明 |
+| --- | --- | --- |
+| 私钥 | `./.dbx-repository-signing-key.env` | 在项目根，**已被 `.gitignore` 忽略**，`git status` 里看不到 |
+| 私钥备份 | `~/.dbx-signing/southernMortals-plugins.release-2.env` | 家目录，同样 600 |
+| packager | `~/.dbx-signing/bin/dbx-plugin-packager` | Rust 编译产物，1.3 MB |
 
-签名流程（官方 packager，需 Rust）：
+**当前密钥**：`southernMortals-plugins.release-2`
+**公钥**：`G8pxP5U/fwwR1j1ahwAOpEMHa/hb724qiNz0/wjU7EE=`
+
+已作废但**仍需信任**的旧密钥：`southernMortals-plugins.release`
+（`niyPPbiaadjs6VIRE6NU51gBBaNULahIKN+9eZQxsws=`，签过 0.1.0 / 0.1.1；私钥已丢失，不可复用该 ID 配新公钥）
+
+### 一条命令签名
 
 ```bash
-cd /tmp/packager_db/plugins/sdk/packager      # 官方 dbx 仓库的 packager
-source /tmp/repo-signing2.env                 # 私钥环境文件，仅本机
-cargo run --release --quiet -- sign \
-  <候选包>.dbxp <签名包>.dbxp \
-  --key-id "$DBX_PLUGIN_SIGNING_KEY_ID" \
-  --artifact-metadata <元数据>.json \
-  --target darwin-x64 \
-  --artifact-url <发布后的 HTTPS 地址>
+scripts/sign.sh <版本号>          # 例：scripts/sign.sh 0.2.1
 ```
 
-若 `/tmp/repo-signing2.env` 已丢失，需重新 `dbx-plugin keygen` 生成新密钥并换新
-Key ID（**不可复用旧 Key ID 配新公钥**），同时更新 catalog 与公钥文档。
+脚本会自己找私钥和 packager，签名后打印 artifact 元数据与 sha256。找不到任一者时，
+它会直接打印**重建步骤**（packager 来自 `github.com/t8y2/dbx` 的 `plugins/sdk/packager`，
+稀疏克隆 + `cargo build --release`）。
+
+完整发布步骤：
+
+```bash
+# 1. 升版本（两处必须一致，有测试守着）
+#    manifest.json 与 backend/main.go 的 const version
+npm run build && dbx-plugin package .
+scripts/sign.sh <版本>
+
+# 2. 目录仓
+cp dist/<id>-<ver>-darwin-x64.signed.dbxp ../dbx-plugins/releases/<ver>/<id>-<ver>-darwin-x64.dbxp
+cp dist/<id>-<ver>-darwin-x64.artifact.json ../dbx-plugins/releases/<ver>/
+# 更新 ../dbx-plugins/catalog/index.json：插入版本条目（artifacts 里的 signingKeyId
+# 要写对）、latestVersion；补 CHANGELOG
+git -C ../dbx-plugins commit -am "release: <ver> …" && git -C ../dbx-plugins push southernmortals main
+
+# 3. 源码仓打 tag
+git tag v<ver> && git push origin main v<ver>
+```
+
+### 换新密钥时
+
+`dbx-plugin keygen <新ID> --output .dbx-repository-signing-key.env --force`，然后：
+
+1. 新公钥写进 `../dbx-plugins/keys/<新ID>.pub`，并更新 `keys/README.md` 的表格
+2. catalog 里新版本的 `signingKeyId` 用新 ID，**老版本条目不要改**
+3. 本机信任库 `~/Library/Application Support/com.dbx.app/plugins/.trust/keys.json`
+   两把都留着，否则已装的老版本会验签失败
+
+**新私钥生成后立刻复制一份到 `~/.dbx-signing/`**，不要只留一份。
