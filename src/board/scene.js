@@ -289,7 +289,7 @@ export class BoardScene {
       // moves in one snapshot, and a hand per move would look like a crowd at the table.
       if (!this.lowMotion && !this.hand && travel > 0) {
         const carrier = this.pieces.nodeAt(move.toCell);
-        if (carrier) this.startHand(carrier, travel);
+        if (carrier) this.startHand(carrier, travel, move);
       }
       // Landing ink fires as the piece touches down; a capture fires a beat earlier so the
       // burst and the knock-back overlap instead of queueing.
@@ -310,6 +310,30 @@ export class BoardScene {
           pitch: (move.to.x + move.to.y) % 2 < 1 ? 1.02 : 0.97,
         });
         tap(6);
+
+        // The piece is set down, so the board answers it. A short, tight wave at the square
+        // the piece landed on, plus the faintest lift in brightness — enough that a quiet
+        // move still lands with weight, without competing with a capture or a check.
+        this.pulseShock(move.to, {
+          amplitude: 18,
+          wavelength: 90,
+          speed: 760,
+          duration: 0.42,
+        });
+        if (this.boardBounds && !this.lowMotion) {
+          this.effects.push(
+            new FlashEffect({
+              x: this.boardBounds.left,
+              y: this.boardBounds.top,
+              width: this.boardBounds.width,
+              height: this.boardBounds.height,
+              colour: 0xfff4e2,
+              peak: 0.14,
+              duration: 0.26,
+              lowMotion: false,
+            }),
+          );
+        }
       });
 
       if (move.captured) {
@@ -547,9 +571,15 @@ export class BoardScene {
    * The piece itself still animates from the tween — the hand is a second, larger body that
    * tracks the same node, so the two can never disagree about where the piece is.
    */
-  startHand(node, travel) {
+  startHand(node, travel, move) {
     const pos = node.container.position;
-    const cursor = new HandCursor({ x: pos.x, y: pos.y, radius: node.radius });
+    // The arm reaches in from the side the piece came from: near seat for a piece that
+    // started in the lower half of the board, far seat for the upper half.
+    const centerY = this.boardBounds
+      ? this.boardBounds.top + this.boardBounds.height / 2
+      : pos.y;
+    const side = move && move.from && move.from.y < centerY ? "far" : "near";
+    const cursor = new HandCursor({ x: pos.x, y: pos.y, radius: node.radius, side });
     this.effectLayer.addChild(cursor.view);
     this.hand = { cursor, node, remaining: travel };
   }

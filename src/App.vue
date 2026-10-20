@@ -739,18 +739,22 @@ watch(game, (next) => {
     <main class="stage">
       <!-- Seats flank the board so the players are placed around the table rather than
            listed away in the sidebar. Each one carries the person, the name and the clock. -->
-      <div class="board-row">
+      <div class="board-col">
+        <!-- Seats sit across the table, not beside it: seat one is the far side, seat zero
+             is the side nearest the viewer. Reading down the screen is then the same as
+             looking across a real board. -->
         <aside
           v-for="seat in [0, 1]"
           :key="seat"
-          class="seat-panel"
-          :class="{
-            left: seat === 0,
-            right: seat === 1,
-            active: seatActive(seat),
-            empty: !seatMembers[seat] && seat !== aiSeat,
-            mine: mySeat === seat,
-          }"
+          class="seat-strip"
+          :class="[
+            seat === 0 ? 'near' : 'far',
+            {
+              active: seatActive(seat),
+              empty: !seatMembers[seat] && seat !== aiSeat,
+              mine: mySeat === seat,
+            },
+          ]"
         >
           <svg class="avatar" viewBox="0 0 64 72" aria-hidden="true">
             <!-- A robe silhouette: head, shoulders, and a collar V. Kept as three shapes so
@@ -761,7 +765,7 @@ watch(game, (next) => {
           </svg>
           <span class="seat-panel-tag">{{ seat === 0 ? "先手" : "后手" }}</span>
           <span class="seat-panel-name">{{ seatLabel(seat) }}</span>
-          <span v-if="clock" class="seat-panel-clock" :class="{ low: clock.remaining[seat] <= 30000 }">
+          <span v-if="clock" class="seat-strip-clock" :class="{ low: clock.remaining[seat] <= 30000 }">
             {{ formatClock(clock.remaining[seat]) }}
           </span>
         </aside>
@@ -1364,112 +1368,93 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
 
 .stage { position: relative; display: flex; flex-direction: column; min-width: 0; }
 
-/* Board plus its two seats. The side columns are fixed so the board never shifts when a
-   name changes length. */
-.board-row {
+/* Board with its two seats stacked across the table: the far side on top, the viewer's
+   side underneath. Placed by named areas rather than source order, because both seats come
+   from one v-for and would otherwise sit next to each other. */
+.board-col {
   flex: 1;
   min-height: 0;
   display: grid;
-  /* Named areas, not source order: the two seats are produced by one v-for and therefore
-     land next to each other, which would push the board into the third column. */
-  grid-template-areas: "left board right";
-  grid-template-columns: 112px minmax(0, 1fr) 112px;
-  gap: 16px;
-  /* Stretch, not center: the canvas fills its cell with width/height 100%, so a container
-     that only sized to its content collapsed to zero and the board disappeared entirely. */
-  align-items: stretch;
+  grid-template-areas: "far" "board" "near";
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  justify-items: center;
+  gap: 8px;
   padding: 12px 16px;
 }
 
-.seat-panel.left { grid-area: left; }
-.seat-panel.right { grid-area: right; }
-
-.seat-panel {
+.seat-strip {
+  grid-area: far;
   display: flex;
-  flex-direction: column;
   align-items: center;
-  /* The row is stretched so the board can fill it; the seats sit in the middle of their
-     own cells rather than growing to full height. */
-  align-self: center;
-  gap: 8px;
-  padding: 16px 12px;
+  gap: 12px;
+  padding: 8px 16px;
   background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: var(--radius-card);
+  border-radius: var(--radius-pill, 999px);
   box-shadow: var(--shadow-1);
   transition: border-color var(--dur-base) var(--ease-standard),
     box-shadow var(--dur-base) var(--ease-standard),
     transform var(--dur-base) var(--ease-standard);
 }
 
-/* The side on the clock leans in slightly, so whose turn it is is readable at a glance. */
-.seat-panel.active {
+/* seat zero is the near side. */
+.seat-strip.near { grid-area: near; }
+.seat-strip.far { grid-area: far; }
+
+.seat-strip.active {
   border-color: rgba(176, 58, 46, 0.45);
   box-shadow: var(--shadow-2);
-  transform: translateY(-2px);
+  transform: translateY(-1px);
 }
 
-.seat-panel.empty { border-style: dashed; box-shadow: none; background: rgba(255, 253, 248, 0.5); }
-
-.seat-panel.empty .avatar { opacity: 0.32; }
+.seat-strip.empty { border-style: dashed; box-shadow: none; background: rgba(255, 253, 248, 0.5); }
+.seat-strip.empty .avatar { opacity: 0.3; }
 
 .avatar {
-  width: 48px;
-  height: 54px;
+  width: 24px;
+  height: 28px;
   fill: var(--muted-text);
   transition: fill var(--dur-base) var(--ease-standard),
     opacity var(--dur-base) var(--ease-standard);
 }
 
-.seat-panel.active .avatar { fill: var(--red); }
-.seat-panel.mine .avatar { fill: var(--ink); }
-
+.seat-strip.active .avatar { fill: var(--red); }
+.seat-strip.mine .avatar { fill: var(--ink); }
 .avatar-collar { fill: var(--surface); opacity: 0.85; }
 
 .seat-panel-tag {
   font-family: var(--font-ui);
   font-size: 12px;
-  letter-spacing: 0.16em;
+  letter-spacing: 0.14em;
   color: var(--soft-text);
 }
 
 .seat-panel-name {
-  max-width: 100%;
   font-family: var(--font-ui);
   font-size: 14px;
   font-weight: 600;
   color: var(--ink);
-  text-align: center;
+  max-width: 180px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.seat-panel-clock {
+.seat-strip-clock {
   font-family: var(--font-num);
   font-size: 15px;
   font-variant-numeric: tabular-nums;
   color: var(--muted-text);
-  transition: color var(--dur-fast) var(--ease-standard);
+  padding-left: 4px;
 }
 
-.seat-panel.active .seat-panel-clock { color: var(--ink); }
-.seat-panel-clock.low { color: var(--red); }
-
-/* Below this width the side columns would squeeze the board more than they are worth. */
-@media (max-width: 1100px) {
-  .board-row {
-    grid-template-areas: "left board right";
-    grid-template-columns: 96px minmax(0, 1fr) 96px;
-    gap: 12px;
-    padding: 8px 12px;
-  }
-  .avatar { width: 40px; height: 45px; }
-}
+.seat-strip.active .seat-strip-clock { color: var(--ink); }
+.seat-strip-clock.low { color: var(--red); }
 
 .canvas-host {
   grid-area: board;
   min-height: 0;
+  width: 100%;
   display: grid;
   place-items: center;
   padding: 12px;

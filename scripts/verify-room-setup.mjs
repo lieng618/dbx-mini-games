@@ -38,7 +38,7 @@ await page.waitForTimeout(1200);
 
 const fr = page.frames().find((f) => f !== page.mainFrame());
 const snap = await fr.evaluate(() => window.dbxPlugin.invoke("room.snapshot", {}));
-const panelCount = await frame.locator(".seat-panel").count();
+const panelCount = await frame.locator(".seat-strip").count();
 const seatTexts = await frame.locator(".seat-panel-name").allInnerTexts();
 await page.screenshot({ path: `${OUT}/01-room.png` });
 
