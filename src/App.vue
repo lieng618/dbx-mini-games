@@ -73,6 +73,20 @@ const isMyTurn = computed(() => {
   const turn = cells.value.turnSeat;
   return isSeated.value && turn === mySeat.value;
 });
+/**
+ * The complete invitation: address, room id and host public key.
+ *
+ * Joining needs all three. Discovery supplies the last two, so a room that mDNS cannot see
+ * was previously impossible to join by hand — pasting the address alone always failed with
+ * "a valid host key is required". One pasteable string fixes that.
+ */
+const inviteLink = computed(() => {
+  if (role.value !== "host") return "";
+  const address = addresses.value[0];
+  if (!address || !roomId.value || !hostKey.value) return "";
+  return `${address}#${roomId.value}#${hostKey.value}`;
+});
+
 /** What to call whoever sits in a seat, including the partner, which is not a member. */
 function seatLabel(seat) {
   if (seat === aiSeat.value) return "陪练";
@@ -180,7 +194,10 @@ function describeError(raw) {
     ["not hosting a room", "当前没有房间，请先开桌"],
     ["already hosting or joined a room", "你已经在一个房间里了"],
     ["wrong room password", "房间密码不正确"],
-    ["a valid host key is required", "缺少房主公钥，请用房间列表加入"],
+    [
+      "a valid host key is required",
+      "地址不完整：请让房主把「邀请串」整串发你（地址#房间号#公钥），或改用搜索局域网房间",
+    ],
     ["an address is required", "请填写房间地址"],
     // Network failures used to surface as raw Go: "dial tcp 192.168.1.116:52525: connect:
     // no route to host". Each of these means something different and only one of them is
@@ -234,8 +251,12 @@ async function joinRoom(room) {
 
 async function joinByAddress() {
   if (!inputAddress.value) return;
-  const [address, roomIdPart] = inputAddress.value.split("#");
-  await call("room.join", { address, roomId: roomIdPart || "", hostKey: hostKey.value });
+  const [address, roomIdPart, keyPart] = inputAddress.value.trim().split("#");
+  await call("room.join", {
+    address: address.trim(),
+    roomId: (roomIdPart || "").trim(),
+    hostKey: (keyPart || hostKey.value).trim(),
+  });
 }
 
 async function scan() {
@@ -742,6 +763,10 @@ watch(game, (next) => {
           <code v-for="(a, i) in addresses" :key="a">
             {{ a }}<span v-if="i === 0" class="addr-tag">推荐</span>
           </code>
+          <span v-if="inviteLink" class="hint">
+            网络里搜不到时，把这一整串发给朋友，粘到「手动地址」里：
+          </span>
+          <code v-if="inviteLink" class="invite">{{ inviteLink }}</code>
         </div>
       </section>
 
@@ -1368,6 +1393,12 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
 .side-pick .pick:focus-visible { outline: 3px solid var(--gold); outline-offset: 2px; }
 
 .address { display: flex; flex-direction: column; gap: 4px; }
+
+.invite {
+  word-break: break-all;
+  line-height: 1.5;
+  font-size: 12px;
+}
 
 .addr-tag {
   margin-left: 8px;
