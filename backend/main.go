@@ -87,4 +87,4 @@ func main() {
 }
 
 // version is stamped by the packaging script; the manifest remains the source of truth.
-const version = "0.1.1"
+const version = "0.2.0"
