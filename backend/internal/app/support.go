@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 )
@@ -71,27 +72,108 @@ func randomID() string {
 // VPN or proxy client typically creates a tunnelled interface with a synthetic address
 // (Clash uses 198.18.0.0/15, for example); advertising that address means a peer copies it
 // and never connects.
-func localAddresses(port int) []string {
-	var out []string
-	addrs, err := net.InterfaceAddrs()
+// addressCandidate is one advertised address plus the reasons it might be the right one.
+type addressCandidate struct {
+	addr string
+	// score orders the list: 0 is the address a neighbour on the same WiFi should use.
+	score int
+}
+
+// outboundIPv4 reports the address the kernel would use to reach the internet.
+//
+// Dialing UDP sends no packets, so this is a free way to ask the routing table which local
+// address is actually on the default route. That address is the best guess for "the network
+// my colleagues are on": a machine with a corporate 10.x adapter and a 192.168.x WiFi
+// adapter answers here with the WiFi one, because that is where its default route points.
+func outboundIPv4() net.IP {
+	conn, err := net.Dial("udp", "203.0.113.1:53") // TEST-NET-3
 	if err != nil {
-		return out
+		return nil
 	}
-	for _, addr := range addrs {
-		ipNet, ok := addr.(*net.IPNet)
-		if !ok {
-			continue
-		}
-		v4 := ipNet.IP.To4()
-		if v4 == nil {
-			continue
-		}
-		if !reachableOnLan(v4) {
-			continue
-		}
-		out = append(out, fmt.Sprintf("%s:%d", v4.String(), port))
+	defer conn.Close()
+	if addr, ok := conn.LocalAddr().(*net.UDPAddr); ok {
+		return addr.IP.To4()
 	}
+	return nil
+}
+
+// orderAddresses ranks candidates so the first entry is the one most likely to work for
+// someone on the same WiFi. Addresses are never dropped: a peer on the corporate network
+// still needs the 10.x one, and hiding it would strand them.
+func orderAddresses(candidates []addressCandidate) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(candidates))
+	for _, c := range candidates {
+		if seen[c.addr] {
+			continue
+		}
+		seen[c.addr] = true
+		out = append(out, c.addr)
+	}
+	// Stable sort by score, preserving interface order within a tier.
+	sort.SliceStable(out, func(i, j int) bool {
+		return scoreOf(candidates, out[i]) < scoreOf(candidates, out[j])
+	})
 	return out
+}
+
+func scoreOf(candidates []addressCandidate, addr string) int {
+	for _, c := range candidates {
+		if c.addr == addr {
+			return c.score
+		}
+	}
+	return 9
+}
+
+// localAddresses lists the addresses a neighbour could dial, best first.
+func localAddresses(port int) []string {
+	preferred := outboundIPv4()
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+
+	var candidates []addressCandidate
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		// A point-to-point interface is a tunnel. Its address is reachable from the other
+		// end of the tunnel and nowhere else, which is exactly how a room ends up handing
+		// out a 10.x address nobody on the WiFi can dial.
+		tunnel := iface.Flags&net.FlagPointToPoint != 0
+		for _, addr := range addrs {
+			ipNet, ok := addr.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			v4 := ipNet.IP.To4()
+			if v4 == nil || !reachableOnLan(v4) {
+				continue
+			}
+			score := 3
+			switch {
+			case tunnel:
+				score = 6
+			case preferred != nil && v4.Equal(preferred):
+				score = 0
+			case v4[0] == 192 && v4[1] == 168:
+				score = 1
+			case v4[0] == 172 && v4[1] >= 16 && v4[1] < 32:
+				score = 2
+			}
+			candidates = append(candidates, addressCandidate{
+				addr:  fmt.Sprintf("%s:%d", v4.String(), port),
+				score: score,
+			})
+		}
+	}
+	return orderAddresses(candidates)
 }
 
 // lanBlocks are ranges that never identify a host reachable by a neighbour: loopback,

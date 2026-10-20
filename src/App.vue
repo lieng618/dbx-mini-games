@@ -182,6 +182,16 @@ function describeError(raw) {
     ["wrong room password", "房间密码不正确"],
     ["a valid host key is required", "缺少房主公钥，请用房间列表加入"],
     ["an address is required", "请填写房间地址"],
+    // Network failures used to surface as raw Go: "dial tcp 192.168.1.116:52525: connect:
+    // no route to host". Each of these means something different and only one of them is
+    // the player's fault, so they get their own words.
+    [
+      "no route to host",
+      "连不上这个地址：确认用的是对方 WiFi 那个地址（不是 VPN/公司网那个），且两台机器在同一个 WiFi",
+    ],
+    ["connection refused", "这个地址没有房间在等：对方可能已经结束了房间，地址是旧的"],
+    ["i/o timeout", "连接超时：两台机器可能不在同一个网络，或被防火墙拦住了"],
+    ["operation not permitted", "系统拦住了局域网访问：请在「系统设置 → 隐私与安全性 → 本地网络」里允许 DBX"],
     ["join rejected", "加入被拒绝，请确认地址与密码"],
   ];
   for (const [needle, message] of table) {
@@ -727,7 +737,11 @@ watch(game, (next) => {
 
         <div v-if="role === 'host' && addresses.length" class="address">
           <span class="hint">让朋友用这个地址加入：</span>
-          <code v-for="a in addresses" :key="a">{{ a }}</code>
+          <!-- The first entry is ranked by reachability, so a machine on both WiFi and a
+               corporate VPN does not hand out the address nobody can dial. -->
+          <code v-for="(a, i) in addresses" :key="a">
+            {{ a }}<span v-if="i === 0" class="addr-tag">推荐</span>
+          </code>
         </div>
       </section>
 
@@ -1354,6 +1368,15 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
 .side-pick .pick:focus-visible { outline: 3px solid var(--gold); outline-offset: 2px; }
 
 .address { display: flex; flex-direction: column; gap: 4px; }
+
+.addr-tag {
+  margin-left: 8px;
+  padding: 0 8px;
+  font-size: 12px;
+  color: var(--muted-text);
+  background: rgba(28, 26, 23, 0.07);
+  border-radius: 999px;
+}
 
 .address code {
   padding: 8px 12px;

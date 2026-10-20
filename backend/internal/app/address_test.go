@@ -33,3 +33,35 @@ func TestReachableOnLanRejectsTunnelAddresses(t *testing.T) {
 		}
 	}
 }
+
+// TestOrderAddressesPutsTheReachableOneFirst: a machine with both a WiFi address and a
+// corporate one must advertise the WiFi address first. Handing a colleague the 10.x address
+// is how "same WiFi but no route to host" happens.
+func TestOrderAddressesPutsTheReachableOneFirst(t *testing.T) {
+	got := orderAddresses([]addressCandidate{
+		{addr: "10.251.1.1:5000", score: 3},
+		{addr: "192.168.1.116:5000", score: 0},
+		{addr: "192.168.1.116:5000", score: 0}, // duplicate from a second interface
+	})
+	if len(got) != 2 {
+		t.Fatalf("expected duplicates to collapse, got %v", got)
+	}
+	if got[0] != "192.168.1.116:5000" {
+		t.Fatalf("the reachable address must come first, got %v", got)
+	}
+}
+
+// TestOrderAddressesKeepsTunnelAddresses: a peer on the corporate network needs the 10.x
+// address, so ranking must reorder without discarding.
+func TestOrderAddressesKeepsTunnelAddresses(t *testing.T) {
+	got := orderAddresses([]addressCandidate{
+		{addr: "192.168.1.116:5000", score: 0},
+		{addr: "10.251.1.1:5000", score: 6},
+	})
+	if len(got) != 2 {
+		t.Fatalf("a tunnel address must still be offered, got %v", got)
+	}
+	if got[1] != "10.251.1.1:5000" {
+		t.Fatalf("the tunnel address belongs last, got %v", got)
+	}
+}
