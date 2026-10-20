@@ -12,9 +12,11 @@ import { LOGICAL_HEIGHT, LOGICAL_WIDTH, PIECE, cellAt, cellCenter, glyphFor, lay
 import {
   CaptureBurstEffect,
   CheckEffect,
+  FlashEffect,
   LastMoveEffect,
   PALETTE,
   RippleEffect,
+  ShatterEffect,
   WinEffect,
   clearTransient,
 } from "./effects.js";
@@ -303,15 +305,46 @@ export class BoardScene {
 
       if (move.captured) {
         this.schedule(Math.max(0, travel - 0.06), () => {
+          // The victim's own colour, so a capture looks like that piece breaking.
+          const broken = move.victimColour ?? (this.game === "xiangqi" ? PALETTE.red : PALETTE.ink);
           this.effects.push(
+            // The disc comes apart first; the dust trails it.
+            new ShatterEffect({
+              x: move.to.x,
+              y: move.to.y,
+              radius: lay2.step * 0.44,
+              colour: broken,
+              lowMotion: this.lowMotion,
+            }),
             new CaptureBurstEffect({
               x: move.to.x,
               y: move.to.y,
               radius: lay2.step * 0.36,
-              colour: this.game === "xiangqi" ? PALETTE.red : PALETTE.ink,
+              colour: broken,
               lowMotion: this.lowMotion,
             }),
           );
+          if (this.boardBounds) {
+            this.effects.push(
+              new FlashEffect({
+                x: this.boardBounds.left,
+                y: this.boardBounds.top,
+                width: this.boardBounds.width,
+                height: this.boardBounds.height,
+                colour: 0xfff1d0,
+                peak: 0.3,
+                duration: 0.38,
+                lowMotion: this.lowMotion,
+              }),
+            );
+          }
+          // A short, tight wave on the struck square: the board takes the hit locally.
+          this.pulseShock(move.to, {
+            amplitude: 26,
+            wavelength: 120,
+            speed: 900,
+            duration: 0.5,
+          });
           this.audio.play("capture");
           tap([10, 24, 14]);
         });
@@ -356,7 +389,7 @@ export class BoardScene {
             x: this.boardBounds.left + this.boardBounds.width / 2,
             y: this.boardBounds.top + this.boardBounds.height / 2,
           },
-          { amplitude: 34, wavelength: 170, speed: 780, duration: 0.68 },
+          { amplitude: 52, wavelength: 200, speed: 820, duration: 0.78 },
         );
         this.audio.play("check");
         tap([26, 40, 26]);
@@ -433,7 +466,21 @@ export class BoardScene {
     if (sealAt) {
       const stampAt = this.lowMotion ? 0.3 : 0.85 + 0.35;
       this.schedule(stampAt, () =>
-        this.pulseShock(sealAt, { amplitude: 42, wavelength: 220, speed: 900, duration: 0.85 }),
+        this.pulseShock(sealAt, { amplitude: 60, wavelength: 260, speed: 940, duration: 0.95 }),
+      );
+    }
+    if (this.boardBounds) {
+      this.effects.push(
+        new FlashEffect({
+          x: this.boardBounds.left,
+          y: this.boardBounds.top,
+          width: this.boardBounds.width,
+          height: this.boardBounds.height,
+          colour: 0xfff3d8,
+          peak: 0.34,
+          duration: 0.5,
+          lowMotion: this.lowMotion,
+        }),
       );
     }
     if (!this.cued.win) {
@@ -516,7 +563,9 @@ export class BoardScene {
         time: 0,
       });
       this.root.filters = [filter];
-      this.shock = { filter, age: 0, duration };
+      // Keep the requested amplitude: the decay in tick() scales from it, and a hardcoded
+      // base silently clamped every stronger wave back to the same thin ripple.
+      this.shock = { filter, age: 0, duration, amplitude };
     } catch {
       // A filter that will not compile costs distortion, not the effect underneath.
       this.shock = null;
@@ -540,7 +589,7 @@ export class BoardScene {
       } else {
         // Ease the amplitude out so the wave dies instead of vanishing mid-ripple.
         this.shock.filter.time = this.shock.age;
-        this.shock.filter.amplitude = 26 * (1 - t) * (1 - t);
+        this.shock.filter.amplitude = this.shock.amplitude * (1 - t) * (1 - t);
       }
     }
 

@@ -374,6 +374,166 @@ export class CaptureBurstEffect {
 }
 
 /**
+ * Breaks the captured piece itself into rim wedges and chips.
+ *
+ * The burst alone reads as a puff of dust next to a piece that politely shrinks. Shattering
+ * the disc means the thing you were hunting visibly comes apart, which is the part players
+ * actually feel. Wedges are cut from the piece's own ring so the fragments keep its colour
+ * and its curvature instead of turning into generic confetti.
+ */
+export class ShatterEffect {
+  constructor({ x, y, radius, colour = PALETTE.ink, lowMotion = false, seed }) {
+    this.lowMotion = lowMotion;
+    this.age = 0;
+    this.duration = lowMotion ? 0.26 : 0.72;
+    this.done = false;
+    this.view = new Container();
+    this.view.position.set(x, y);
+    this.ink = new Graphics();
+    this.view.addChild(this.ink);
+
+    this.radius = radius;
+    this.colour = colour;
+    this.scratch = [];
+
+    const rand = mulberry32(seed ?? nextSeed());
+    const wedgeCount = lowMotion ? 0 : 11;
+    this.wedges = [];
+    const sector = (Math.PI * 2) / wedgeCount;
+    for (let i = 0; i < wedgeCount; i++) {
+      const start = sector * i;
+      // A little gap between wedges: a closed ring only looks like a shrinking donut.
+      const span = sector * (0.52 + rand() * 0.3);
+      const mid = start + span / 2;
+      const speed = radius * (1.5 + rand() * 2.6);
+      this.wedges.push({
+        start,
+        span,
+        inner: radius * (0.5 + rand() * 0.14),
+        outer: radius * (0.9 + rand() * 0.08),
+        x: 0,
+        y: 0,
+        vx: Math.cos(mid) * speed,
+        vy: Math.sin(mid) * speed - radius * 0.9,
+        rot: 0,
+        spin: (rand() - 0.5) * 10,
+        life: 0.6 + rand() * 0.4,
+      });
+    }
+
+    const chipCount = lowMotion ? 0 : 16;
+    this.chips = [];
+    for (let i = 0; i < chipCount; i++) {
+      const angle = rand() * Math.PI * 2;
+      const speed = radius * (2 + rand() * 4);
+      this.chips.push({
+        x: 0,
+        y: 0,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed - radius * 1.4,
+        size: radius * (0.05 + rand() * 0.09),
+        radii: blobRadii(rand, 6 + Math.round(rand() * 3), 0.3),
+        unit: null,
+        life: 0.45 + rand() * 0.4,
+      });
+    }
+  }
+
+  update(dt) {
+    this.age += dt;
+    const t = Math.min(1, this.age / this.duration);
+    this.ink.clear();
+
+    for (const w of this.wedges) {
+      const local = Math.min(1, this.age / (this.duration * w.life));
+      if (local >= 1) continue;
+      w.vx *= Math.pow(0.34, dt);
+      w.vy *= Math.pow(0.34, dt);
+      w.vy += this.radius * 5.2 * dt;
+      w.x += w.vx * dt;
+      w.y += w.vy * dt;
+      w.rot += w.spin * dt;
+
+      const alpha = Math.pow(1 - local, 1.2);
+      if (alpha < 0.02) continue;
+
+      // Cut each wedge from its own arc so the fragment keeps the piece's curvature.
+      const pts = this.scratch;
+      pts.length = 0;
+      const steps = 4;
+      for (let k = 0; k <= steps; k++) {
+        const a = w.start + w.rot + (w.span * k) / steps;
+        pts.push(w.x + Math.cos(a) * w.outer, w.y + Math.sin(a) * w.outer);
+      }
+      for (let k = steps; k >= 0; k--) {
+        const a = w.start + w.rot + (w.span * k) / steps;
+        pts.push(w.x + Math.cos(a) * w.inner, w.y + Math.sin(a) * w.inner);
+      }
+      this.ink.poly(pts, true).fill({ color: this.colour, alpha: alpha * 0.92 });
+    }
+
+    for (const c of this.chips) {
+      const local = Math.min(1, this.age / (this.duration * c.life));
+      if (local >= 1) continue;
+      c.vx *= Math.pow(0.4, dt);
+      c.vy *= Math.pow(0.4, dt);
+      c.vy += this.radius * 6 * dt;
+      c.x += c.vx * dt;
+      c.y += c.vy * dt;
+      const alpha = Math.pow(1 - local, 1.4) * 0.9;
+      if (alpha < 0.02) continue;
+      if (!c.unit) c.unit = radiiToPoints(c.radii, 1, 1, 0, 0);
+      const pts = this.scratch;
+      pts.length = 0;
+      for (let i = 0; i < c.unit.length; i += 2) {
+        pts.push(c.x + c.unit[i] * c.size, c.y + c.unit[i + 1] * c.size);
+      }
+      this.ink.poly(pts, true).fill({ color: this.colour, alpha });
+    }
+
+    if (t >= 1) this.done = true;
+  }
+
+  destroy() {
+    this.view.destroy({ children: true });
+  }
+}
+
+/**
+ * A single wash of light across the board.
+ *
+ * Every other effect is ink added on top; this is the only one that changes the exposure of
+ * what is already there, which makes an impact register even when the player is not looking
+ * at the square that changed.
+ */
+export class FlashEffect {
+  constructor({ x, y, width, height, colour = 0xfff3d8, peak = 0.34, duration = 0.42, lowMotion = false }) {
+    this.lowMotion = lowMotion;
+    this.age = 0;
+    this.duration = lowMotion ? 0.18 : duration;
+    this.peak = lowMotion ? peak * 0.35 : peak;
+    this.done = false;
+    this.view = new Container();
+    this.sheet = new Graphics();
+    this.sheet.rect(x, y, width, height).fill({ color: colour });
+    this.view.addChild(this.sheet);
+    this.view.alpha = this.peak;
+  }
+
+  update(dt) {
+    this.age += dt;
+    const t = Math.min(1, this.age / this.duration);
+    // Squared falloff: an even fade reads as a slow dim, not as a flash.
+    this.view.alpha = this.peak * (1 - t) * (1 - t);
+    if (t >= 1) this.done = true;
+  }
+
+  destroy() {
+    this.view.destroy({ children: true });
+  }
+}
+
+/**
  * CheckEffect announces check: a red rim breathing around the board, a short camera shake,
  * a spray of ink behind the threatened general, and a calligraphic character that bursts in
  * and settles.

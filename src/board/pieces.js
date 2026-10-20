@@ -29,6 +29,12 @@ const RED = 0xb03a2e;
 const GOLD = 0xd4a24a;
 const PAPER = 0xf6efdd;
 
+/** Maps a piece code to the ink it is drawn in, for effects that outlive the piece. */
+function pieceColour(code, game) {
+  if (game === "gomoku") return code === 2 ? PAPER : INK;
+  return code > 0 ? RED : INK;
+}
+
 /**
  * Piece travel timing.
  *
@@ -150,7 +156,7 @@ class PieceNode {
 
   /** A captured piece is knocked back and shrinks; it is not faded like a UI element. */
   startCapture() {
-    this.tween = { kind: "capture", duration: 0.28, age: 0 };
+    this.tween = { kind: "capture", duration: 0.16, age: 0 };
   }
 
   update(dt) {
@@ -172,12 +178,15 @@ class PieceNode {
       this.lift.scale.set(Math.max(0.001, s));
       this.lift.alpha = Math.min(1, t * 2.6);
     } else if (tw.kind === "capture") {
-      // Knock-back plus shrink: the piece leaves the board in the direction it was struck.
+      // Collapse fast. The old version politely shrank over 0.28s, which read as the piece
+      // being tidied away rather than struck; the shatter fragments now carry the moment,
+      // so the disc itself only has to register the hit and get out of their way.
       const e = easeOutCubic(t);
-      this.lift.scale.set(1 - e * 0.5);
-      this.lift.alpha = 1 - e * e;
-      this.lift.y = -e * this.radius * 0.55;
-      this.lift.rotation = e * 0.5;
+      const pop = 1 + Math.sin(Math.min(1, t * 3.4) * Math.PI) * 0.18;
+      this.lift.scale.set(Math.max(0.001, pop * (1 - e)));
+      this.lift.alpha = 1 - e;
+      this.lift.y = -e * this.radius * 0.3;
+      this.lift.rotation = e * 0.7;
     }
 
     if (t >= 1) {
@@ -299,29 +308,32 @@ export class PieceLayer {
   /** Classifies the change between the drawn cells and the incoming ones. */
   diffCells(cells) {
     const drawn = this.cellsOf();
-    const vacated = [];
-    const filled = [];
+    // A capture touches two squares: the origin empties, and the destination changes owner
+    // without ever being empty in between. The destination therefore belongs in `arrived`,
+    // not in `prised` — folding it into both used to make vacated.length 2 and push every
+    // capture down the rebuild path, so captures never animated at all.
+    const prised = [];
+    const arrived = [];
     let changed = 0;
     for (let i = 0; i < cells.length; i++) {
       const a = drawn[i] || 0;
       const b = cells[i] || 0;
       if (a === b) continue;
       changed++;
-      if (a !== 0 && b === 0) vacated.push(i);
-      else if (a === 0 && b !== 0) filled.push(i);
-      else if (a !== 0 && b !== 0) {
-        // One square changed owner without emptying: a capture that landed in place.
-        vacated.push(i);
-        filled.push(i);
-      }
+      if (a !== 0 && b === 0) prised.push(i);
+      else if (b !== 0) arrived.push(i);
     }
     if (changed === 0) return { kind: "none" };
-    if (vacated.length === 1 && filled.length === 1 && vacated[0] !== filled[0]) {
-      return { kind: "move", from: vacated[0], to: filled[0], captured: this.nodeAt(filled[0]) !== null };
+    if (prised.length === 1 && arrived.length === 1 && prised[0] !== arrived[0]) {
+      const from = prised[0];
+      const to = arrived[0];
+      // The piece that landed must be the piece that left. Anything else (an undo, a
+      // scenario replayed from the opening, a different game) is a rebuild.
+      if ((drawn[to] || 0) !== 0 && cells[to] !== drawn[from]) return { kind: "rebuild" };
+      return { kind: "move", from, to, captured: (drawn[to] || 0) !== 0 };
     }
-    // Gomoku: a stone appears and nothing empties. Also covers a capture that landed on its
-    // own origin square, which is not a thing either game can do but should not crash.
-    if (vacated.length === 0 && filled.length === 1) return { kind: "place", to: filled[0] };
+    // Gomoku: a stone appears and nothing empties.
+    if (prised.length === 0 && arrived.length === 1) return { kind: "place", to: arrived[0] };
     return { kind: "rebuild" };
   }
 
@@ -351,13 +363,17 @@ export class PieceLayer {
     const distance = Math.hypot(toPt.x - fromPt.x, toPt.y - fromPt.y);
     const duration = Math.min(MAX_TRAVEL, Math.max(MIN_TRAVEL, distance / TRAVEL_SPEED));
 
+    let victimColour = null;
     if (victim) {
+      // Read the colour off the victim before detaching: the shatter has to fly in the
+      // colour of the piece that broke, not in the mover's.
+      victimColour = pieceColour(victim.code, lay.game);
       victim.startCapture();
       this.detach(victim);
     }
     mover.cell = to;
     mover.startMove(toPt, duration);
-    this.moves.push({ from: fromPt, to: toPt, captured: !!victim, duration });
+    this.moves.push({ from: fromPt, to: toPt, captured: !!victim, victimColour, duration });
   }
 
   applyPlace({ to }, cells, lay) {
