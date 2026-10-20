@@ -1370,16 +1370,27 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
   flex: 1;
   min-height: 0;
   display: grid;
+  /* Named areas, not source order: the two seats are produced by one v-for and therefore
+     land next to each other, which would push the board into the third column. */
+  grid-template-areas: "left board right";
   grid-template-columns: 112px minmax(0, 1fr) 112px;
   gap: 16px;
-  align-items: center;
+  /* Stretch, not center: the canvas fills its cell with width/height 100%, so a container
+     that only sized to its content collapsed to zero and the board disappeared entirely. */
+  align-items: stretch;
   padding: 12px 16px;
 }
+
+.seat-panel.left { grid-area: left; }
+.seat-panel.right { grid-area: right; }
 
 .seat-panel {
   display: flex;
   flex-direction: column;
   align-items: center;
+  /* The row is stretched so the board can fill it; the seats sit in the middle of their
+     own cells rather than growing to full height. */
+  align-self: center;
   gap: 8px;
   padding: 16px 12px;
   background: var(--surface);
@@ -1447,11 +1458,17 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
 
 /* Below this width the side columns would squeeze the board more than they are worth. */
 @media (max-width: 1100px) {
-  .board-row { grid-template-columns: 96px minmax(0, 1fr) 96px; gap: 12px; padding: 8px 12px; }
+  .board-row {
+    grid-template-areas: "left board right";
+    grid-template-columns: 96px minmax(0, 1fr) 96px;
+    gap: 12px;
+    padding: 8px 12px;
+  }
   .avatar { width: 40px; height: 45px; }
 }
 
 .canvas-host {
+  grid-area: board;
   min-height: 0;
   display: grid;
   place-items: center;
