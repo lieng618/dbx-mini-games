@@ -481,6 +481,10 @@ function outcomeText(outcome) {
 // happened. Titles key off the engine's own reason string, so the wording can never drift
 // from why the match actually ended.
 const mvpDismissed = ref(false);
+// 结算特效要先把连线画完、印章落下（WinEffect 的 draw 0.85 + hold 0.35 + stamp 0.7，
+// 后面还有一记冲击波），面板等它演完再登场，否则一结束就把棋盘盖住了。
+const mvpReady = ref(false);
+let mvpTimer = null;
 
 const MVP_TITLES = {
   "five in a row": "五连绝世",
@@ -496,7 +500,7 @@ const MVP_TITLES = {
 
 const mvp = computed(() => {
   const res = result.value;
-  if (!res || !res.finished || mvpDismissed.value) return null;
+  if (!res || !res.finished || mvpDismissed.value || !mvpReady.value) return null;
 
   const draw = res.outcome === 3;
   const winnerSeat = res.outcome === 1 ? 0 : res.outcome === 2 ? 1 : -1;
@@ -528,9 +532,19 @@ const mvp = computed(() => {
   };
 });
 
-// A fresh result means a fresh match, so the panel may appear again.
-watch(result, () => {
+// A fresh result means a fresh match, so the panel may appear again — after the board has
+// finished its own celebration. Low-motion shortens the whole effect to well under a second.
+watch(result, (next) => {
   mvpDismissed.value = false;
+  mvpReady.value = false;
+  if (mvpTimer) clearTimeout(mvpTimer);
+  mvpTimer = null;
+  if (next && next.finished) {
+    mvpTimer = setTimeout(() => {
+      mvpReady.value = true;
+      mvpTimer = null;
+    }, lowMotion.value ? 1000 : 2300);
+  }
 });
 
 function dismissMvp() {
@@ -668,6 +682,8 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  if (mvpTimer) clearTimeout(mvpTimer);
+  mvpTimer = null;
   stopEventListening();
   stopClockTimers();
   scene?.destroy();
@@ -936,11 +952,14 @@ watch(mySeat, (seat) => {
         <span>{{ result.reason }}</span>
       </div>
 
-      <!-- 结算整活。低动效模式只留淡入：不撒彩带、不旋转，符合本项目的降级约定。 -->
+      <!-- 结算整活。低动效模式只留淡入：不撒彩带、不旋转，符合本项目的降级约定。
+           彩带整窗飘但只是细条，不压暗也不拦截点击；面板自己固定在左侧栏，
+           把棋盘和它上面的连线、印章等结算特效完整让出来。 -->
+      <div v-if="mvp && !lowMotion" class="mvp-confetti" aria-hidden="true">
+        <i v-for="n in 26" :key="n" :style="confettiStyle(n)"></i>
+      </div>
+
       <div v-if="mvp" class="mvp" :class="{ calm: lowMotion, draw: mvp.draw }">
-        <div v-if="!lowMotion" class="mvp-confetti" aria-hidden="true">
-          <i v-for="n in 26" :key="n" :style="confettiStyle(n)"></i>
-        </div>
         <div class="mvp-card">
           <p class="mvp-eyebrow">本 局 最 有 价 值</p>
           <h2 class="mvp-badge">MVP</h2>
@@ -1719,18 +1738,28 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
    whichever ancestor happens to be positioned. */
 .mvp {
   position: fixed;
-  inset: 0;
+  left: 0;
+  top: 0;
+  bottom: 0;
   z-index: 60;
-  display: grid;
-  place-items: center;
-  overflow: hidden;
-  background: radial-gradient(circle at 50% 42%, rgba(28, 26, 23, 0.52), rgba(28, 26, 23, 0.84));
+  width: 336px;
+  max-width: 100vw;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  /* 结算后的展示层，不该挡住棋盘：只有卡片本身接收点击，其余区域留给棋盘。 */
+  pointer-events: none;
+  background: linear-gradient(180deg, #fffdf8, #f2e8d5);
+  border-right: 1px solid var(--line);
   animation: mvp-fade 320ms ease both;
 }
 
 .mvp-confetti {
-  position: absolute;
+  position: fixed;
   inset: 0;
+  z-index: 61;
+  overflow: hidden;
   pointer-events: none;
 }
 
@@ -1755,8 +1784,9 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
 .mvp-card {
   position: relative;
   z-index: 1;
-  width: min(460px, 86vw);
-  padding: 34px 40px 30px;
+  width: 100%;
+  padding: 26px 20px 22px;
+  pointer-events: auto;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -1789,9 +1819,9 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
 .mvp-badge {
   margin: 2px 0 0;
   font-family: var(--font-display);
-  font-size: 62px;
+  font-size: 44px;
   line-height: 1;
-  letter-spacing: 0.14em;
+  letter-spacing: 0.12em;
   text-indent: 0.14em;
   background: linear-gradient(180deg, #f6dc93 0%, #d4a24a 42%, #9c6f1f 100%);
   -webkit-background-clip: text;
@@ -1814,18 +1844,19 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
 .mvp-name {
   margin: 4px 0 0;
   font-family: var(--font-display);
-  font-size: 26px;
-  letter-spacing: 0.08em;
+  font-size: 20px;
+  letter-spacing: 0.06em;
   color: var(--ink);
 }
 
 .mvp-title {
   margin: 0;
-  padding: 4px 16px;
+  padding: 3px 12px;
   border-radius: 999px;
   border: 1px solid rgba(143, 47, 40, 0.28);
   background: rgba(143, 47, 40, 0.1);
-  font-size: 13px;
+  font-size: 11px;
+  text-align: center;
   letter-spacing: 0.16em;
   color: #8f2f28;
 }
@@ -1847,19 +1878,19 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
 
 .mvp-stats {
   width: 100%;
-  margin: 12px 0 2px;
+  margin: 10px 0 2px;
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
-  gap: 8px;
+  grid-template-columns: 1fr;
+  gap: 6px;
 }
 
 .mvp-stats > div {
   display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
-  padding: 9px 6px;
-  border-radius: 12px;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 12px;
+  border-radius: 10px;
   background: rgba(28, 26, 23, 0.05);
 }
 
@@ -1872,7 +1903,7 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
 .mvp-stats dd {
   margin: 0;
   font-family: var(--font-display);
-  font-size: 19px;
+  font-size: 17px;
   color: var(--ink);
 }
 
@@ -1884,9 +1915,11 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
 }
 
 .mvp-actions {
-  margin-top: 14px;
+  margin-top: 12px;
   display: flex;
-  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
 }
 
 @keyframes mvp-fade {

@@ -83,7 +83,13 @@ for (const [fr, to] of script) {
   await invoke(fr, "game.move", { from: -1, to });
   await hostPage.waitForTimeout(320);
 }
-await hostPage.waitForTimeout(2200);
+// 终局后立刻检查：棋盘还在演连线与印章，面板必须还没出来。
+await hostPage.waitForTimeout(400);
+const mvpBeforeDelay = await hostFr.evaluate(() => !!document.querySelector(".mvp"));
+step("mvpBeforeDelay", mvpBeforeDelay);
+
+// 等特效演完（约 2.15s），面板才登场。
+await hostPage.waitForTimeout(2600);
 
 const panelOf = (fr) =>
   fr.evaluate(() => {
@@ -98,7 +104,8 @@ const panelOf = (fr) =>
         label: d.querySelector("dt")?.textContent.trim() ?? "",
         value: d.querySelector("dd")?.textContent.trim() ?? "",
       })),
-      ribbons: root.querySelectorAll(".mvp-confetti i").length,
+      // 彩带是面板的兄弟节点（整窗飘），不在面板内部。
+      ribbons: document.querySelectorAll(".mvp-confetti i").length,
     };
   });
 
@@ -107,6 +114,20 @@ const guestMvp = await panelOf(guestFr);
 step("hostMvp", hostMvp);
 step("guestMvp", guestMvp);
 
+// 面板必须待在左侧栏里，不能盖住棋盘——棋盘上有连线与印章等结算特效。
+const geometry = await hostFr.evaluate(() => {
+  const mvp = document.querySelector(".mvp");
+  const canvas = document.querySelector("canvas");
+  if (!mvp || !canvas) return null;
+  const m = mvp.getBoundingClientRect();
+  const c = canvas.getBoundingClientRect();
+  return {
+    mvp: { left: Math.round(m.left), right: Math.round(m.right), width: Math.round(m.width) },
+    canvas: { left: Math.round(c.left), right: Math.round(c.right), width: Math.round(c.width) },
+    overlapsBoard: m.right > c.left + 1,
+  };
+});
+step("geometry", geometry);
 await hostPage.screenshot({ path: `${OUT}/01-host-mvp.png` });
 await guestPage.screenshot({ path: `${OUT}/02-guest-mvp.png` });
 
@@ -126,6 +147,8 @@ report.ok =
   hostMvp.title.length > 0 &&
   hostMvp.stats.length >= 2 &&
   hostMvp.ribbons > 0 &&
+  !!geometry && !geometry.overlapsBoard && geometry.mvp.width <= 340 &&
+  mvpBeforeDelay === false &&
   guestMvp.badge === "MVP" &&
   bannerAfterDismiss.length > 0;
 

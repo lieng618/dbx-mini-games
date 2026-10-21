@@ -10,3 +10,6 @@
 
 # Screenshot frames produced by the verification scripts: evidence, not source.
 /scripts/out/
+
+# Dependencies are installed from package-lock.json, never committed.
+/node_modules/
