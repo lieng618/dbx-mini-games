@@ -229,6 +229,10 @@ func (a *App) createRoom(params map[string]any) (map[string]any, error) {
 	srv.SetRequestHandler(func(memberID, method string, params json.RawMessage) (any, error) {
 		return a.serveGuest(memberID, method, params)
 	})
+	// A guest joining or leaving changes the seats. The lobby only offers "start" once it
+	// sees both seats filled, so without this push the host stares at an empty table while
+	// a challenger who already sat down waits for a match that never opens.
+	srv.SetMembershipHandler(a.notifyMembershipChanged)
 
 	a.room, a.server, a.adv = r, srv, adv
 	a.localID = hostID
@@ -281,6 +285,13 @@ func (a *App) joinRoom(params map[string]any) (map[string]any, error) {
 	a.ticket = client.Ticket()
 	a.localID = profile.ID
 	a.mu.Unlock()
+
+	// The host pushes state on every change. Forward each push to this window: a guest that
+	// is not itself acting — waiting for the host to start, or for the opponent to move —
+	// would otherwise never repaint, because a guest never polls.
+	client.OnState(func(map[string]any) {
+		a.emitSafe("room.state", map[string]any{"reason": "push"})
+	})
 	return a.snapshot(), nil
 }
 
@@ -455,7 +466,11 @@ func (a *App) boardViewLocked() map[string]any {
 			}
 		}
 	}
-	if a.room.Phase() == room.PhasePlaying || a.room.Phase() == room.PhasePractice {
+	// A finished match still reports its result. The phase moves to finished inside the very
+	// move that ends the match, so gating on "playing or practice" hid the win screen while
+	// dragging the replay cursor — which reads the result from the record — still showed it.
+	// Only the lobby has nothing to report.
+	if a.room.Phase() != room.PhaseLobby {
 		if res := engine.Result(); res.Finished {
 			view["result"] = map[string]any{
 				"finished": true,
@@ -744,6 +759,17 @@ func (a *App) pushState() {
 	})
 }
 
+// notifyMembershipChanged refreshes both sides after somebody joins or leaves.
+//
+// Guests are told through a state push; the host's own window is told through an event,
+// because it only folds snapshots that come back from its own calls. Seat occupancy is
+// the one room fact that changes with no local action to ride along with, so it needs an
+// explicit wake-up on both pathways.
+func (a *App) notifyMembershipChanged() {
+	a.pushState()
+	a.emitSafe("room.members", map[string]any{"reason": "membership"})
+}
+
 // snapshotForMember renders the room view as seen by one participant.
 func (a *App) snapshotForMember(memberID string) map[string]any {
 	a.mu.RLock()
@@ -767,6 +793,11 @@ func (a *App) snapshotForMember(memberID string) map[string]any {
 	}
 	if rec, ok := a.room.Replay(); ok {
 		view["record"] = rec
+	}
+	// Guests see the same countdown the host does. Without it the seat clocks never tick on
+	// their side and their win panel has no clock to report.
+	if a.clock != nil {
+		view["clock"] = a.clock.view()
 	}
 	for k, v := range a.boardViewLocked() {
 		view[k] = v

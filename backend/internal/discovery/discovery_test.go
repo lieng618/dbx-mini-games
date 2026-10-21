@@ -4,7 +4,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/grandcat/zeroconf"
 )
@@ -144,5 +146,94 @@ func TestRoomInfoWireNames(t *testing.T) {
 		if _, ok := got[key]; !ok {
 			t.Errorf("wire form is missing %q (got %s)", key, raw)
 		}
+	}
+}
+
+// TestParsePrefersTXTNameOverInstance covers the join list showing a room id instead of a
+// name. The mDNS instance has to stay unique, so it carries the id; the human name is
+// advertised in TXT and must win when both are present.
+func TestParsePrefersTXTNameOverInstance(t *testing.T) {
+	e := entry("room-1", 51123, []string{
+		"id=room-1",
+		"name=老张的棋桌",
+		"key=" + validKey,
+		"game=xiangqi",
+	}, "192.168.1.20")
+
+	info, ok := parse(e)
+	if !ok {
+		t.Fatal("a record carrying a name must parse")
+	}
+	if info.Name != "老张的棋桌" {
+		t.Fatalf("expected the advertised name, got %q", info.Name)
+	}
+}
+
+// TestParseFallsBackToInstanceWhenNameMissing keeps rooms advertised by older builds
+// joinable: they carry no name field, and the instance is all the resolver has.
+func TestParseFallsBackToInstanceWhenNameMissing(t *testing.T) {
+	e := entry("房间甲", 51123, []string{
+		"id=room-1",
+		"key=" + validKey,
+		"game=xiangqi",
+	}, "192.168.1.20")
+
+	info, ok := parse(e)
+	if !ok {
+		t.Fatal("a record without a name must still parse")
+	}
+	if info.Name != "房间甲" {
+		t.Fatalf("expected the instance fallback, got %q", info.Name)
+	}
+}
+
+// TestClipTXTKeepsRecordLegal guards the registration: an over-long TXT string makes the
+// whole advertisement fail, which would drop the room off the network entirely.
+func TestClipTXTKeepsRecordLegal(t *testing.T) {
+	long := strings.Repeat("棋", 200)
+	clipped := clipTXT(long)
+	if len(clipped) > maxTXTValue {
+		t.Fatalf("clipped value is %d bytes, over the %d limit", len(clipped), maxTXTValue)
+	}
+	if !utf8.ValidString(clipped) {
+		t.Fatal("clipping cut a multi-byte character in half")
+	}
+	if got := clipTXT("短名字"); got != "短名字" {
+		t.Fatalf("a short name must pass through untouched, got %q", got)
+	}
+}
+
+// TestUnescapeTXTDecodesUTF8 covers the shape the DNS library actually hands back: every
+// non-ASCII byte arrives as \DDD. Left undecoded, a Chinese room name reaches the join list
+// as "\232\128\129..." — corruption, not a name.
+func TestUnescapeTXTDecodesUTF8(t *testing.T) {
+	escaped := `\232\128\129\229\188\160\231\154\132\230\163\139\230\161\140`
+	if got := unescapeTXT(escaped); got != "老张的棋桌" {
+		t.Fatalf("expected 老张的棋桌, got %q", got)
+	}
+	if got := unescapeTXT("my room"); got != "my room" {
+		t.Fatalf("plain ascii must pass through, got %q", got)
+	}
+	if got := unescapeTXT(`a\\b`); got != `a\b` {
+		t.Fatalf("an escaped backslash must not swallow the next byte, got %q", got)
+	}
+}
+
+// TestParseDecodesEscapedRoomName is the end-to-end shape of the same bug: a record whose
+// name field is escaped must still surface as the readable name.
+func TestParseDecodesEscapedRoomName(t *testing.T) {
+	e := entry("room-1", 51123, []string{
+		"id=room-1",
+		`name=\232\128\129\229\188\160\231\154\132\230\163\139\230\161\140`,
+		"key=" + validKey,
+		"game=xiangqi",
+	}, "192.168.1.20")
+
+	info, ok := parse(e)
+	if !ok {
+		t.Fatal("a record with an escaped name must parse")
+	}
+	if info.Name != "老张的棋桌" {
+		t.Fatalf("expected the decoded name, got %q", info.Name)
 	}
 }

@@ -62,6 +62,10 @@ type Server struct {
 	mu      sync.Mutex
 	peers   map[string]*hostConn
 	handler RequestHandler
+	// onChange fires after a peer joins or leaves. Seating is decided inside Room.Join, so
+	// the host's own view is stale until it re-reads the room; without this the lobby never
+	// learns that a challenger arrived and the match cannot be started.
+	onChange func()
 	// broadcasts keeps every live connection so state changes reach all guests.
 	broadcasts map[string]*hostConn
 }
@@ -71,6 +75,26 @@ func (s *Server) SetRequestHandler(handler RequestHandler) {
 	s.mu.Lock()
 	s.handler = handler
 	s.mu.Unlock()
+}
+
+// SetMembershipHandler installs the callback fired when a peer joins or leaves.
+//
+// It is called without the server lock held, so the handler may broadcast or take the app
+// lock. A nil handler simply means membership changes stay silent.
+func (s *Server) SetMembershipHandler(handler func()) {
+	s.mu.Lock()
+	s.onChange = handler
+	s.mu.Unlock()
+}
+
+// notifyMembership fires the membership callback, if one is installed.
+func (s *Server) notifyMembership() {
+	s.mu.Lock()
+	handler := s.onChange
+	s.mu.Unlock()
+	if handler != nil {
+		handler()
+	}
 }
 
 // Broadcast sends the current snapshot to every connected guest.
@@ -212,6 +236,10 @@ func (s *Server) handle(conn net.Conn) {
 		return
 	}
 
+	// The guest is seated and has its opening snapshot. Tell the host: the lobby only
+	// offers "start" once it sees both seats filled, so this is what unblocks the match.
+	s.notifyMembership()
+
 	// Serve requests until the peer disconnects. A guest holds no authority, so every
 	// message it sends is a request for the host to act.
 	for {
@@ -221,6 +249,8 @@ func (s *Server) handle(conn net.Conn) {
 			delete(s.peers, ticket)
 			s.mu.Unlock()
 			_ = s.room.Leave(member.ID)
+			// Leaving vacates a seat, which can reopen the lobby or hand the turn over.
+			s.notifyMembership()
 			return
 		}
 		if message.Type != "request" || message.Method == "" {

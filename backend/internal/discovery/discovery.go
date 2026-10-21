@@ -12,8 +12,10 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/grandcat/zeroconf"
 )
@@ -27,6 +29,7 @@ const localDomain = "local."
 // TXT record keys.
 const (
 	txtRoomID   = "id"
+	txtName     = "name"
 	txtHostKey  = "key"
 	txtGame     = "game"
 	txtPlayers  = "players"
@@ -34,6 +37,11 @@ const (
 	txtLocked   = "locked"
 	txtProtocol = "proto"
 )
+
+// maxTXTValue is the longest value one mDNS TXT string can carry. A longer entry makes the
+// whole registration fail, so a long room name is clipped rather than allowed to drop the
+// room off the network.
+const maxTXTValue = 200
 
 // ErrAdvertise wraps a registration failure.
 var ErrAdvertise = errors.New("could not advertise the room")
@@ -71,6 +79,10 @@ func Advertise(instanceID, roomName, game string, port int, hostKey []byte, play
 	}
 	txt := []string{
 		txtRoomID + "=" + instanceID,
+		// The mDNS instance name has to stay unique, so it carries the room id; the human
+		// name rides in TXT instead. Without this the join list shows the id, which is the
+		// one thing a player cannot recognise.
+		txtName + "=" + clipTXT(roomName),
 		txtHostKey + "=" + hex.EncodeToString(hostKey),
 		txtGame + "=" + game,
 		txtPlayers + "=" + itoa(players),
@@ -207,7 +219,7 @@ func parse(entry *zeroconf.ServiceEntry) (RoomInfo, bool) {
 	}
 	info := RoomInfo{
 		RoomID:  values[txtRoomID],
-		Name:    entry.Instance,
+		Name:    roomNameFrom(values, entry),
 		Game:    values[txtGame],
 		HostKey: values[txtHostKey],
 		Players: atoi(values[txtPlayers]),
@@ -232,6 +244,60 @@ func parse(entry *zeroconf.ServiceEntry) (RoomInfo, bool) {
 		return RoomInfo{}, false
 	}
 	return info, true
+}
+
+// roomNameFrom picks the name a player should see. A newer room advertises it in TXT
+// because the mDNS instance has to stay a unique id; a room advertised by an older build
+// has no such field, so its instance — the id — is the best available fallback.
+func roomNameFrom(values map[string]string, entry *zeroconf.ServiceEntry) string {
+	if name := values[txtName]; name != "" {
+		return unescapeTXT(name)
+	}
+	return unescapeTXT(entry.Instance)
+}
+
+// unescapeTXT reverses the escaping the DNS library applies when it unpacks a TXT string:
+// every byte outside printable ASCII comes back as \DDD (three decimal digits). A Chinese
+// room name is entirely outside that range, so without this the join list shows
+// "\232\128\129..." instead of 老 — which is worse than showing an id, because it looks
+// like corruption rather than a missing name.
+func unescapeTXT(s string) string {
+	if !strings.Contains(s, `\`) {
+		return s
+	}
+	out := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] != '\\' || i+1 >= len(s) {
+			out = append(out, s[i])
+			continue
+		}
+		// \DDD — one byte written as three decimal digits.
+		if i+3 < len(s) && isDecimal(s[i+1]) && isDecimal(s[i+2]) && isDecimal(s[i+3]) {
+			out = append(out, byte((s[i+1]-'0')*100+(s[i+2]-'0')*10+(s[i+3]-'0')))
+			i += 3
+			continue
+		}
+		// \c — an escaped backslash or quote.
+		out = append(out, s[i+1])
+		i++
+	}
+	return string(out)
+}
+
+func isDecimal(b byte) bool { return b >= '0' && b <= '9' }
+
+// clipTXT shortens a value so the TXT entry stays within the mDNS string limit. The cut
+// lands on a rune boundary: a half-written UTF-8 sequence would make the record malformed
+// rather than merely shorter, and a malformed record drops the room entirely.
+func clipTXT(s string) string {
+	if len(s) <= maxTXTValue {
+		return s
+	}
+	cut := maxTXTValue
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }
 
 func itoa(n int) string {
