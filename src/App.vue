@@ -476,6 +476,78 @@ function outcomeText(outcome) {
   return "对局结束";
 }
 
+// ── MVP panel ───────────────────────────────────────────────────────────────────────
+// The win screen is theatre on purpose: a bare "先手胜" says who won but not that anything
+// happened. Titles key off the engine's own reason string, so the wording can never drift
+// from why the match actually ended.
+const mvpDismissed = ref(false);
+
+const MVP_TITLES = {
+  "five in a row": "五连绝世",
+  checkmate: "一击必杀",
+  stalemate: "困毙流大师",
+  resign: "不战而屈人之兵",
+  timeout: "时间管理大师",
+  forfeit: "人走茶凉",
+  "sixty-move rule": "六十回合拉锯王",
+  repetition: "复读机",
+  "board full": "满盘和棋",
+};
+
+const mvp = computed(() => {
+  const res = result.value;
+  if (!res || !res.finished || mvpDismissed.value) return null;
+
+  const draw = res.outcome === 3;
+  const winnerSeat = res.outcome === 1 ? 0 : res.outcome === 2 ? 1 : -1;
+  const moves = record.value?.moves?.length ?? 0;
+
+  let title = MVP_TITLES[res.reason] || "本局最佳";
+  if (!draw && moves > 0) {
+    if (moves <= 9) title = `闪电${title}`;
+    else if (moves >= 60) title = `马拉松${title}`;
+  }
+
+  const stats = [{ label: "总手数", value: moves }];
+  const remaining = clock.value?.remaining;
+  if (Array.isArray(remaining) && remaining.length === 2) {
+    const pairs = draw
+      ? [["先手余时", 0], ["后手余时", 1]]
+      : [["胜者余时", winnerSeat], ["对手余时", winnerSeat === 0 ? 1 : 0]];
+    for (const [label, seat] of pairs) {
+      stats.push({ label, value: formatClock(remaining[seat] ?? 0) });
+    }
+  }
+
+  return {
+    name: draw ? "两位棋手" : seatLabel(winnerSeat),
+    title,
+    reason: res.reason || "",
+    draw,
+    stats,
+  };
+});
+
+// A fresh result means a fresh match, so the panel may appear again.
+watch(result, () => {
+  mvpDismissed.value = false;
+});
+
+function dismissMvp() {
+  mvpDismissed.value = true;
+}
+
+// Fixed pseudo-random placement: the ribbons must not jump around when the panel re-renders.
+function confettiStyle(n) {
+  const colors = ["#c8a24a", "#8f2f28", "#4a6b52", "#2f2a24", "#d9c48a"];
+  return {
+    left: `${(n * 37) % 100}%`,
+    animationDelay: `${((n * 13) % 30) / 10}s`,
+    animationDuration: `${2.6 + ((n * 7) % 20) / 10}s`,
+    background: colors[n % colors.length],
+  };
+}
+
 watch(phase, (next) => {
   if (next === "finished" || next === "practice" || next === "playing") loadNotation();
 });
@@ -517,6 +589,40 @@ function stopClockTimers() {
   syncTimer = null;
 }
 
+// ── Pushed changes ──────────────────────────────────────────────────────────────────
+// Two things change with no local action to ride along with: a challenger taking the
+// second seat, and the host pushing state after the opponent moves. The lobby does not
+// poll and a guest never polls, so without a listener the table sits still until somebody
+// clicks something — which is exactly the "joined but the match never started" freeze.
+let stopEvents = null;
+let refreshInFlight = false;
+
+async function refreshFromEvent() {
+  // A burst of pushes collapses into one read; the snapshot is authoritative either way.
+  if (refreshInFlight) return;
+  refreshInFlight = true;
+  try {
+    await call("room.snapshot");
+  } finally {
+    refreshInFlight = false;
+  }
+}
+
+function startEvents() {
+  if (stopEvents) return;
+  stopEvents = bridge.on((event) => {
+    const method = event?.method;
+    // room.members: seat occupancy changed. room.state: the host pushed a new snapshot.
+    if (method !== "room.members" && method !== "room.state") return;
+    void refreshFromEvent();
+  });
+}
+
+function stopEventListening() {
+  if (typeof stopEvents === "function") stopEvents();
+  stopEvents = null;
+}
+
 onMounted(async () => {
   await whenReady();
   ready.value = true;
@@ -525,6 +631,9 @@ onMounted(async () => {
     try {
       scene = new BoardScene({ onCell });
       await scene.init(boardHost.value, game.value);
+      // Seat two looks at the board from the far side of the table, so the pieces they
+      // command sit along the near edge the way a real board faces each player.
+      scene.setFlipped(mySeat.value === 1);
       // A debug handle for the verification scripts: sampling piece positions needs to see
       // the running scene, and a screenshot is too slow to resolve a 200 ms tween. Gated on
       // an explicit flag so a normal session keeps its scope clean.
@@ -550,6 +659,7 @@ onMounted(async () => {
   scene?.audio.setEnabled(soundOn.value);
 
   startClockTimers();
+  startEvents();
 
   const snapshot = await call("room.snapshot");
   if (snapshot) applySnapshot(snapshot);
@@ -558,6 +668,7 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  stopEventListening();
   stopClockTimers();
   scene?.destroy();
   scene = null;
@@ -565,6 +676,12 @@ onBeforeUnmount(() => {
 
 watch(game, (next) => {
   scene?.setGame(next);
+});
+
+// Seating can settle after the board is already mounted: a guest joins, a seat is released,
+// or a spectator sits down. Re-orient whenever the viewer's own side changes.
+watch(mySeat, (seat) => {
+  scene?.setFlipped(seat === 1);
 });
 </script>
 
@@ -813,9 +930,34 @@ watch(game, (next) => {
       </div>
       <div v-if="canvasFailed" class="fallback">渲染器不可用，已切换到简化视图。</div>
 
-      <div v-if="result && result.finished" class="result-banner">
+      <!-- MVP 面板显示时让出横幅，关掉面板后横幅接回，免得同一句话出现两遍。 -->
+      <div v-if="result && result.finished && !mvp" class="result-banner">
         <strong>{{ outcomeText(result.outcome) }}</strong>
         <span>{{ result.reason }}</span>
+      </div>
+
+      <!-- 结算整活。低动效模式只留淡入：不撒彩带、不旋转，符合本项目的降级约定。 -->
+      <div v-if="mvp" class="mvp" :class="{ calm: lowMotion, draw: mvp.draw }">
+        <div v-if="!lowMotion" class="mvp-confetti" aria-hidden="true">
+          <i v-for="n in 26" :key="n" :style="confettiStyle(n)"></i>
+        </div>
+        <div class="mvp-card">
+          <p class="mvp-eyebrow">本 局 最 有 价 值</p>
+          <h2 class="mvp-badge">MVP</h2>
+          <p class="mvp-name">{{ mvp.name }}</p>
+          <p class="mvp-title">{{ mvp.title }}</p>
+          <dl class="mvp-stats">
+            <div v-for="s in mvp.stats" :key="s.label">
+              <dt>{{ s.label }}</dt>
+              <dd>{{ s.value }}</dd>
+            </div>
+          </dl>
+          <p class="mvp-reason">{{ mvp.reason }}</p>
+          <div class="mvp-actions">
+            <button class="primary" @click="rematch">再来一局</button>
+            <button class="ghost" @click="dismissMvp">看看棋盘</button>
+          </div>
+        </div>
       </div>
 
       <footer class="controls">
@@ -1570,6 +1712,192 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
   from { opacity: 0; transform: translate(-50%, -8px) scale(0.96); }
   to { opacity: 1; transform: translate(-50%, 0) scale(1); }
 }
+
+/* ── MVP panel ──────────────────────────────────────────────────────────── */
+
+/* Fixed rather than absolute: the panel is a full-window flourish and must not depend on
+   whichever ancestor happens to be positioned. */
+.mvp {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  background: radial-gradient(circle at 50% 42%, rgba(28, 26, 23, 0.52), rgba(28, 26, 23, 0.84));
+  animation: mvp-fade 320ms ease both;
+}
+
+.mvp-confetti {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.mvp-confetti i {
+  position: absolute;
+  top: -8vh;
+  width: 7px;
+  height: 13px;
+  border-radius: 1px;
+  opacity: 0;
+  animation-name: mvp-fall;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+}
+
+@keyframes mvp-fall {
+  0%   { transform: translateY(-10vh) rotate(0deg); opacity: 0; }
+  8%   { opacity: 0.95; }
+  100% { transform: translateY(112vh) rotate(680deg); opacity: 0; }
+}
+
+.mvp-card {
+  position: relative;
+  z-index: 1;
+  width: min(460px, 86vw);
+  padding: 34px 40px 30px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  border-radius: 22px;
+  border: 1px solid rgba(212, 162, 74, 0.55);
+  background:
+    radial-gradient(circle at 50% 0%, rgba(212, 162, 74, 0.22), transparent 62%),
+    linear-gradient(180deg, #fdf8ec, #f2e9d6);
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.5) inset,
+    0 26px 70px rgba(28, 26, 23, 0.45);
+  animation: mvp-pop 620ms var(--ease-spring) both;
+}
+
+@keyframes mvp-pop {
+  0%   { opacity: 0; transform: translateY(28px) scale(0.72) rotate(-7deg); }
+  60%  { opacity: 1; transform: translateY(-6px) scale(1.04) rotate(1.5deg); }
+  100% { opacity: 1; transform: translateY(0) scale(1) rotate(0deg); }
+}
+
+.mvp-eyebrow {
+  margin: 0;
+  font-size: 11px;
+  letter-spacing: 0.42em;
+  text-indent: 0.42em;
+  color: rgba(28, 26, 23, 0.5);
+}
+
+.mvp-badge {
+  margin: 2px 0 0;
+  font-family: var(--font-display);
+  font-size: 62px;
+  line-height: 1;
+  letter-spacing: 0.14em;
+  text-indent: 0.14em;
+  background: linear-gradient(180deg, #f6dc93 0%, #d4a24a 42%, #9c6f1f 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: mvp-glow 2.6s ease-in-out 0.6s infinite;
+}
+
+@keyframes mvp-glow {
+  0%, 100% {
+    filter: drop-shadow(0 2px 0 rgba(255, 255, 255, 0.7))
+            drop-shadow(0 10px 22px rgba(212, 162, 74, 0.35));
+  }
+  50% {
+    filter: drop-shadow(0 2px 0 rgba(255, 255, 255, 0.9))
+            drop-shadow(0 14px 34px rgba(212, 162, 74, 0.75));
+  }
+}
+
+.mvp-name {
+  margin: 4px 0 0;
+  font-family: var(--font-display);
+  font-size: 26px;
+  letter-spacing: 0.08em;
+  color: var(--ink);
+}
+
+.mvp-title {
+  margin: 0;
+  padding: 4px 16px;
+  border-radius: 999px;
+  border: 1px solid rgba(143, 47, 40, 0.28);
+  background: rgba(143, 47, 40, 0.1);
+  font-size: 13px;
+  letter-spacing: 0.16em;
+  color: #8f2f28;
+}
+
+/* A draw has no hero, so it gets a quieter palette instead of a "loser" MVP. */
+.mvp.draw .mvp-badge {
+  background: linear-gradient(180deg, #cfd6cc 0%, #8fa295 45%, #566456 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  animation: none;
+  filter: none;
+}
+
+.mvp.draw .mvp-title {
+  border-color: rgba(74, 107, 82, 0.3);
+  background: rgba(74, 107, 82, 0.12);
+  color: #47624f;
+}
+
+.mvp-stats {
+  width: 100%;
+  margin: 12px 0 2px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.mvp-stats > div {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 9px 6px;
+  border-radius: 12px;
+  background: rgba(28, 26, 23, 0.05);
+}
+
+.mvp-stats dt {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  color: rgba(28, 26, 23, 0.52);
+}
+
+.mvp-stats dd {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 19px;
+  color: var(--ink);
+}
+
+.mvp-reason {
+  margin: 2px 0 0;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: rgba(28, 26, 23, 0.42);
+}
+
+.mvp-actions {
+  margin-top: 14px;
+  display: flex;
+  gap: 10px;
+}
+
+@keyframes mvp-fade {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+/* Low-motion: no bounce, no glow pulse, no ribbons — one fade, per the project's rule that
+   every effect needs a calm form. */
+.mvp.calm .mvp-card { animation: mvp-fade 200ms ease both; }
+.mvp.calm .mvp-badge { animation: none; }
 
 /* ── Controls ───────────────────────────────────────────────────────────── */
 

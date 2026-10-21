@@ -3,7 +3,7 @@
   "manifest_version": 1,
   "id": "io.github.southernmortals.board-games",
   "name": "Board Games",
-  "version": "0.2.1",
+  "version": "0.2.4",
   "publisher": "southernMortals",
   "description": "Local-network Chinese chess and five-in-a-row, with spectators and replay.",
   "icon": "assets/plugin.svg",

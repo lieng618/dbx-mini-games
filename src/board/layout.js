@@ -74,7 +74,7 @@ export function glyphFor(code) {
  * Points sit on intersections, so a board with `files` points has `files - 1` gaps. The
  * inset keeps the outermost points clear of the frame on both axes.
  */
-export function layout(game) {
+export function layout(game, flipped = false) {
   const spec = game === "xiangqi" ? XIANGQI : GOMOKU;
   const inset = spec.padding;
   const usableWidth = LOGICAL_WIDTH - inset * 2;
@@ -98,22 +98,39 @@ export function layout(game) {
     boardWidth,
     boardHeight,
     cells: spec.files * spec.ranks,
+    // Turned around for the player who holds seat two. The mapping lives here so drawing,
+    // hit-testing, pieces and effects all read one rule instead of each guessing.
+    flipped: flipped === true,
   };
+}
+
+/**
+ * Maps a board file/rank to the point it is drawn at, turning the whole board 180° when
+ * this viewer sits on seat two. A half-turn (not a mirror) keeps the glyphs upright and
+ * puts the viewer's own pieces along the near edge, the way a real board faces each player.
+ */
+function orient(lay, file, rank) {
+  if (!lay.flipped) return { file, rank };
+  return { file: lay.files - 1 - file, rank: lay.ranks - 1 - rank };
 }
 
 /** Converts a cell index to its centre point in logical pixels. */
 export function cellCenter(lay, index) {
   const file = index % lay.files;
   const rank = Math.floor(index / lay.files);
+  const point = orient(lay, file, rank);
   return {
-    x: lay.originX + file * lay.step,
-    y: lay.originY + rank * lay.step,
+    x: lay.originX + point.file * lay.step,
+    y: lay.originY + point.rank * lay.step,
   };
 }
 
 /**
  * Converts a logical point to a cell index, or -1 when the point is too far from any
  * intersection. The tolerance is generous enough to make touch targets comfortable.
+ *
+ * The tolerance is checked in screen space, before the turn is undone: the point has to be
+ * near a drawn intersection, which is the one the player aimed at.
  */
 export function cellAt(lay, x, y) {
   const file = Math.round((x - lay.originX) / lay.step);
@@ -123,5 +140,6 @@ export function cellAt(lay, x, y) {
   const cy = lay.originY + rank * lay.step;
   const tolerance = lay.step * 0.48;
   if (Math.abs(x - cx) > tolerance || Math.abs(y - cy) > tolerance) return -1;
-  return rank * lay.files + file;
+  const point = orient(lay, file, rank);
+  return point.rank * lay.files + point.file;
 }

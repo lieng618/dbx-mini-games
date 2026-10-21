@@ -35,6 +35,8 @@ export class BoardScene {
     this.app = null;
     this.game = null;
     this.lay = null;
+    // Whether the board is drawn from seat two's side of the table.
+    this.flipped = false;
     this.lowMotion = false;
     this.effects = [];
     this.lastCells = null;
@@ -106,9 +108,31 @@ export class BoardScene {
     this.cued.check = false;
     this.cued.win = false;
     this.game = game;
-    this.lay = layout(game);
+    this.lay = layout(game, this.flipped);
     this.drawBoard();
     this.pieces.reset(game, this.lay);
+  }
+
+  /**
+   * Turns the board around for the player who holds seat two, so their own side sits along
+   * the near edge. Safe at any time: the position is captured and re-laid-out, so the same
+   * stones stay put on the board rather than the board spinning under them.
+   */
+  setFlipped(flipped) {
+    const next = flipped === true;
+    if (this.flipped === next || !this.lay) return;
+    const cells = this.pieces.cellsOf();
+    this.flipped = next;
+    this.lay = layout(this.game, next);
+    this.drawBoard();
+    this.pieces.reset(this.game, this.lay);
+    if (cells && cells.length) this.pieces.sync(cells, this.lay, { animate: false });
+    // Keep the cache in step, or the next update would re-diff against the old orientation
+    // and replay every piece as a move.
+    this.lastCells = cells;
+    // Ink, seals and winning lines were placed with the old mapping; leaving them would put
+    // them on the wrong squares.
+    this.clearEffects();
   }
 
   /** Draws the static board: frame, grid, palace diagonals, river. */
