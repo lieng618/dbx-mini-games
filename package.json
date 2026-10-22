@@ -7,7 +7,8 @@
     "dev": "node scripts/dbx-vite.mjs",
     "build": "node scripts/dbx-vite.mjs build",
     "build:watch": "node scripts/dbx-vite.mjs build --watch",
-    "package:dbx": "npm run build && npx --yes @dbx-app/plugin-cli package ."
+    "package:dbx": "npm run build && npx --yes @dbx-app/plugin-cli@0.1.2 package .",
+    "verify:release": "node scripts/verify-release-assets.mjs"
   },
   "dependencies": {
     "pixi-filters": "^6.1.5",

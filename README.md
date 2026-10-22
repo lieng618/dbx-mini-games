@@ -26,6 +26,23 @@ Source:    https://github.com/lieng618/dbx-mini-games
 - 音效保留并默认开启，插件内不提供音效开关；
 - 服务器只使用内存，不保存账号、用户、房间或棋谱。
 
+## 界面
+
+| 大厅 | 创建房间 |
+| --- | --- |
+| ![公共大厅](screenshots/store-01-lobby.png) | ![创建房间](screenshots/store-02-create-room.png) |
+
+| 五子棋 | 中国象棋 |
+| --- | --- |
+| ![五子棋对局](screenshots/store-06-gomoku-match.png) | ![中国象棋对局](screenshots/store-10-xiangqi-move.png) |
+
+更多商店截图和用途见 [`screenshots/README.md`](screenshots/README.md)。
+隐私和支持说明见 [`PRIVACY.md`](PRIVACY.md)、[`SUPPORT.md`](SUPPORT.md)。
+
+官方商店候选材料、发布前检查和 PR 草稿位于
+[`store-submission/README.md`](store-submission/README.md)。正式源码 Tag 和
+GitHub Release 发布后，才可以使用候选元数据向上游提交 catalog PR。
+
 ## 结构
 
 ```text

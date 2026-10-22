@@ -7,6 +7,23 @@
 > 下文标有 Sidecar、局域网、mDNS 的内容属于旧架构的历史记录，不代表当前安装包行为。
 > 当前部署与入口配置见 `README.md` 和 `config/game-server.env`。
 
+## 官方商店发布准备（2026-10-22）
+
+| 项目 | 结果 |
+| --- | --- |
+| 干净依赖安装 | `npm ci` 通过 |
+| Universal 候选包 | `npm run package:dbx` 通过 |
+| 包内 Manifest 身份 | ID、版本、发布者、权限与源码一致 |
+| 未签名状态 | 包内无 `signature.json`，artifact 无 `signingKeyId` |
+| 包与元数据哈希 | SHA-256 和字节数一致 |
+| 官方 candidate schema | `ajv validate --spec=draft2020` 通过 |
+| 发布工作流 YAML | `yaml-lint` 通过 |
+| DBX HTTPS 长轮询 | `scripts/http-smoke.mjs` 通过 |
+| 浏览器 WebSocket | 三客户端五子棋、观战和终局验收通过 |
+
+商店截图保存在 `screenshots/store-*.png`，覆盖大厅、建房、等待、五子棋、
+中国象棋、对手视角和结算卡。
+
 ## 验证环境
 
 - `dbx-plugin dev --path . --port <PORT> --data-dir /tmp/dbxbg-dev<N>`（官方开发宿主）
