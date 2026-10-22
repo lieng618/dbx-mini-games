@@ -1,10 +1,10 @@
-module github.com/southernMortals/dbx-board-games/backend
+module github.com/lieng618/dbx-mini-games/backend
 
 go 1.22
 
 require (
+	github.com/gorilla/websocket v1.5.3
 	github.com/grandcat/zeroconf v1.0.0
-	github.com/t8y2/dbx/plugins/sdk/go/dbx-plugin-sdk v0.0.0-20261019041224-6a2caa508389
 )
 
 require (

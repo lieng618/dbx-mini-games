@@ -14,7 +14,7 @@ import (
 	"math"
 	"math/rand"
 
-	"github.com/southernMortals/dbx-board-games/backend/internal/game"
+	"github.com/lieng618/dbx-mini-games/backend/internal/game"
 )
 
 // xiangqi piece values, roughly in centipawns. The king is worth more than every other

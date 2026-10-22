@@ -1,372 +1,242 @@
 /**
- * The bridge to the DBX host.
+ * Cloud bridge for the DBX Mini Games workbench.
  *
- * The UI runs inside a sandboxed iframe. Everything it can do goes through
- * `window.dbxPlugin`: invoking the sidecar and receiving events. This module hides that
- * shape and provides a stand-in when the page is opened outside DBX, so the board and its
- * effects can be developed in a plain browser.
+ * The plugin is frontend-only. It talks to the public Go service directly over a compact
+ * JSON WebSocket protocol; no local native sidecar is started by DBX.
  */
 
-/** True when running inside the DBX host bridge. */
+const REQUEST_TIMEOUT_MS = 12_000;
+const CLIENT_ID_KEY = "dbxmg.clientId";
+
+let singleton = null;
+
 export function hasHost() {
-  return typeof window !== "undefined" && !!window.dbxPlugin && typeof window.dbxPlugin.invoke === "function";
+  return typeof window !== "undefined" && !!window.dbxPlugin;
 }
 
-/** Resolves once the host has finished initialising the plugin. */
 export async function whenReady() {
-  if (!hasHost()) return null;
-  try {
-    await window.dbxPlugin.ready;
-  } catch {
-    // A failed ready still leaves a usable bridge in some host versions; the first
-    // invoke will surface a real error.
-  }
-  return window.dbxPlugin;
-}
-
-/**
- * CreateBridge returns an object with `invoke`, `on`, and `locale`.
- *
- * Outside DBX it installs a small local stand-in that answers enough methods to render and
- * exercise the UI: a lobby, one hosted room, and a driven board. That keeps visual work
- * independent of a packaged build.
- */
-export function createBridge() {
   if (hasHost()) {
-    return {
-      live: true,
-      locale: () => (window.dbxPlugin.locale || "zh-CN"),
-      invoke: (method, params) => window.dbxPlugin.invoke(method, params ?? {}),
-      on: (handler) => (typeof window.dbxPlugin.onEvent === "function" ? window.dbxPlugin.onEvent(handler) : () => {}),
-    };
+    try {
+      await window.dbxPlugin.ready;
+    } catch {
+      // The cloud connection is independent of host readiness.
+    }
   }
-  return createLocalBridge();
+  return null;
 }
 
-/**
- * The local stand-in. It is deliberately not a rules engine: it exists to render states,
- * not to adjudicate them. Anything that needs real authority goes through the sidecar.
- */
-function createLocalBridge() {
-  const listeners = new Set();
-  const emit = (method, params) => {
-    for (const fn of listeners) {
+export function createBridge() {
+  if (!singleton) singleton = new CloudBridge();
+  return singleton;
+}
+
+export function resolveServerUrl() {
+  const override = typeof window !== "undefined" ? window.__DBX_MINI_GAMES_SERVER__ : undefined;
+  if (typeof override === "string" && override.trim()) return override.trim();
+
+  const localConfigured =
+    typeof __DBX_LOCAL_GAME_SERVER_URL__ === "string" ? __DBX_LOCAL_GAME_SERVER_URL__ : "";
+  if (localConfigured && typeof window !== "undefined") {
+    const local = new URL(localConfigured);
+    const localPort = local.port || (local.protocol === "https:" ? "443" : "80");
+    if (window.location.port === localPort) {
+      const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
+      return `${scheme}//${window.location.host}${local.pathname}`;
+    }
+  }
+
+  const configured =
+    typeof __DBX_GAME_SERVER_URL__ === "string" ? __DBX_GAME_SERVER_URL__.trim() : "";
+  if (typeof configured === "string" && configured.trim()) return configured.trim();
+  throw new Error("游戏服务器地址未配置");
+}
+
+class CloudBridge {
+  constructor() {
+    this.live = true;
+    this.socket = null;
+    this.pending = new Map();
+    this.listeners = new Set();
+    this.connectionListeners = new Set();
+    this.requestSeq = 0;
+    this.retryTimer = null;
+    this.retryDelay = 500;
+    this.manualClose = false;
+    const developmentParams = new URLSearchParams(window.location.search);
+    const requestedClientId = developmentParams.get("clientId");
+    this.ephemeralIdentity = Boolean(requestedClientId);
+    this.clientId = requestedClientId || loadOrCreateClientId();
+    this.nickname = randomNickname();
+    this.readyPromise = null;
+    this.resolveReady = null;
+    this.rejectReady = null;
+    this.serverUrl = resolveServerUrl();
+    this.connect();
+  }
+
+  locale() {
+    return window.dbxPlugin?.locale || navigator.language || "zh-CN";
+  }
+
+  ready() {
+    if (this.socket?.readyState === WebSocket.OPEN) return Promise.resolve();
+    if (!this.readyPromise) {
+      this.readyPromise = new Promise((resolve, reject) => {
+        this.resolveReady = resolve;
+        this.rejectReady = reject;
+      });
+    }
+    return this.readyPromise;
+  }
+
+  on(handler) {
+    this.listeners.add(handler);
+    return () => this.listeners.delete(handler);
+  }
+
+  onConnection(handler) {
+    this.connectionListeners.add(handler);
+    queueMicrotask(() =>
+      handler({
+        connected: this.socket?.readyState === WebSocket.OPEN,
+        serverUrl: this.serverUrl,
+      }),
+    );
+    return () => this.connectionListeners.delete(handler);
+  }
+
+  connect() {
+    if (this.manualClose || this.socket?.readyState === WebSocket.CONNECTING) return;
+    clearTimeout(this.retryTimer);
+    const url = new URL(this.serverUrl);
+    url.searchParams.set("clientId", this.clientId);
+    url.searchParams.set("nickname", this.nickname);
+
+    const socket = new WebSocket(url);
+    this.socket = socket;
+    socket.addEventListener("open", () => {
+      this.retryDelay = 500;
+      this.resolveReady?.();
+      this.resolveReady = null;
+      this.rejectReady = null;
+      this.emitConnection({ connected: true, serverUrl: this.serverUrl });
+    });
+    socket.addEventListener("message", (event) => this.handleMessage(event.data));
+    socket.addEventListener("close", () => {
+      if (this.socket === socket) this.socket = null;
+      if (!this.resolveReady) this.readyPromise = null;
+      const error = new Error("云端连接已断开");
+      for (const pending of this.pending.values()) {
+        clearTimeout(pending.timer);
+        pending.reject(error);
+      }
+      this.pending.clear();
+      this.emitConnection({ connected: false, serverUrl: this.serverUrl });
+      if (!this.manualClose) {
+        this.retryTimer = setTimeout(() => this.connect(), this.retryDelay);
+        this.retryDelay = Math.min(10_000, this.retryDelay * 2);
+      }
+    });
+  }
+
+  handleMessage(raw) {
+    let message;
+    try {
+      message = JSON.parse(raw);
+    } catch {
+      return;
+    }
+
+    if (message.type === "response") {
+      const pending = this.pending.get(message.id);
+      if (!pending) return;
+      this.pending.delete(message.id);
+      clearTimeout(pending.timer);
+      if (message.error) {
+        pending.reject(new Error(message.error.message || "云端请求失败"));
+      } else {
+        pending.resolve(message.result);
+      }
+      return;
+    }
+    if (message.type !== "event") return;
+
+    if (message.method === "session.ready") {
+      if (message.params?.clientId) this.clientId = message.params.clientId;
+      if (message.params?.nickname) this.nickname = message.params.nickname;
+      if (!this.ephemeralIdentity) persistClientId(this.clientId);
+    }
+    for (const listener of this.listeners) {
       try {
-        fn({ method, params });
+        listener({ method: message.method, params: message.params || {} });
       } catch {
-        // A broken listener must not take down the others.
+        // One broken listener must not block the remaining subscribers.
       }
     }
-  };
+  }
 
-  const state = {
-    role: "idle",
-    roomId: null,
-    name: "本地预览房",
-    game: "xiangqi",
-    phase: "lobby",
-    seats: ["me", "rival"],
-    members: [
-      { id: "me", nickname: "我", seat: 0, connected: true, isHost: true },
-      { id: "rival", nickname: "对手", seat: 1, connected: true, isHost: false },
-    ],
-    lowMotion: false,
-    turnSeat: 0,
-    lastMove: null,
-    inCheck: false,
-    checkFocus: null,
-    result: null,
-    winLine: [],
-    cells: null,
-  };
-
-  // Both openings are static data, not rule logic. The preview has no referee; it exists
-  // so pieces and effects can be looked at in a plain browser.
-  const xiangqiOpening = () => {
-    const board = new Array(90).fill(0);
-    const back = [5, 4, 3, 2, 1, 2, 3, 4, 5];
-    for (let f = 0; f < 9; f++) {
-      board[f] = -back[f];
-      board[9 * 9 + f] = back[f];
+  emitConnection(state) {
+    for (const listener of this.connectionListeners) {
+      try {
+        listener(state);
+      } catch {}
     }
-    board[2 * 9 + 1] = -6;
-    board[2 * 9 + 7] = -6;
-    board[7 * 9 + 1] = 6;
-    board[7 * 9 + 7] = 6;
-    for (const f of [0, 2, 4, 6, 8]) {
-      board[3 * 9 + f] = -7;
-      board[6 * 9 + f] = 7;
+  }
+
+  async invoke(method, params = {}) {
+    await this.ready();
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+      throw new Error("尚未连接到游戏服务器");
     }
-    return board;
-  };
+    const id = `r${++this.requestSeq}`;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error("云端请求超时"));
+      }, REQUEST_TIMEOUT_MS);
+      this.pending.set(id, { resolve, reject, timer });
+      this.socket.send(
+        JSON.stringify({
+          type: "request",
+          id,
+          method,
+          params: params || {},
+        }),
+      );
+    });
+  }
 
-  const gomokuOpening = () => new Array(225).fill(0);
+  close() {
+    this.manualClose = true;
+    clearTimeout(this.retryTimer);
+    this.socket?.close();
+    this.socket = null;
+  }
+}
 
-  // A short scripted line per game. Each entry is a move the preview will apply when the
-  // board is clicked, purely to produce states worth looking at.
-  const scripts = {
-    xiangqi: [
-      { from: 7 * 9 + 1, to: 7 * 9 + 4 },
-      { from: 0 * 9 + 1, to: 2 * 9 + 2 },
-      { from: 7 * 9 + 7, to: 7 * 9 + 6 },
-      { from: 0 * 9 + 7, to: 0 * 9 + 6 },
-      { from: 9 * 9 + 1, to: 7 * 9 + 2 },
-      { from: 2 * 9 + 2, to: 3 * 9 + 4 },
-    ],
-    gomoku: [
-      { from: -1, to: 7 * 15 + 7 },
-      { from: -1, to: 7 * 15 + 8 },
-      { from: -1, to: 8 * 15 + 7 },
-      { from: -1, to: 6 * 15 + 8 },
-      { from: -1, to: 6 * 15 + 7 },
-      { from: -1, to: 8 * 15 + 8 },
-    ],
-  };
+function loadOrCreateClientId() {
+  try {
+    const stored = localStorage.getItem(CLIENT_ID_KEY);
+    if (stored && /^[A-Za-z0-9_-]{8,64}$/.test(stored)) return stored;
+    const created = crypto.randomUUID();
+    localStorage.setItem(CLIENT_ID_KEY, created);
+    return created;
+  } catch {
+    return `guest-${Math.random().toString(36).slice(2, 12)}`;
+  }
+}
 
-  // Scenario fixtures, copied from the sidecar so the preview and the real host agree.
-  const SCENARIO_FIXTURES = {
-    xiangqi: {
-      opening: [
-        { from: 7 * 9 + 1, to: 7 * 9 + 4 },
-        { from: 0 * 9 + 1, to: 2 * 9 + 2 },
-      ],
-      capture: [
-        { from: 70, to: 7 },
-        { from: 19, to: 10 },
-        { from: 64, to: 1 },
-      ],
-      check: [
-        { from: 82, to: 65 },
-        { from: 8, to: 17 },
-        { from: 62, to: 53 },
-        { from: 19, to: 55 },
-        { from: 70, to: 68 },
-        { from: 2, to: 22 },
-        { from: 83, to: 67 },
-        { from: 55, to: 58 },
-      ],
-    },
-    gomoku: {
-      opening: [
-        { from: -1, to: 7 * 15 + 7 },
-        { from: -1, to: 7 * 15 + 8 },
-        { from: -1, to: 8 * 15 + 8 },
-        { from: -1, to: 6 * 15 + 6 },
-        { from: -1, to: 8 * 15 + 7 },
-        { from: -1, to: 6 * 15 + 8 },
-      ],
-      win: [
-        { from: -1, to: 7 * 15 + 3 },
-        { from: -1, to: 8 * 15 + 0 },
-        { from: -1, to: 7 * 15 + 4 },
-        { from: -1, to: 8 * 15 + 2 },
-        { from: -1, to: 7 * 15 + 5 },
-        { from: -1, to: 8 * 15 + 4 },
-        { from: -1, to: 7 * 15 + 6 },
-        { from: -1, to: 8 * 15 + 6 },
-        { from: -1, to: 7 * 15 + 7 },
-      ],
-    },
-  };
+function randomNickname() {
+  const adjectives = ["青竹", "听雨", "临风", "知秋", "观澜", "云舟", "松间", "逐月"];
+  const bytes = new Uint32Array(2);
+  crypto.getRandomValues(bytes);
+  const adjective = adjectives[bytes[0] % adjectives.length];
+  const suffix = String(bytes[1] % 10_000).padStart(4, "0");
+  return `${adjective}-${suffix}`;
+}
 
-  // The winning fixture mirrors the sidecar's gomoku/win scenario.
-  const gomokuWinLine = () => [
-    { from: -1, to: 7 * 15 + 3 },
-    { from: -1, to: 8 * 15 + 0 },
-    { from: -1, to: 7 * 15 + 4 },
-    { from: -1, to: 8 * 15 + 2 },
-    { from: -1, to: 7 * 15 + 5 },
-    { from: -1, to: 8 * 15 + 4 },
-    { from: -1, to: 7 * 15 + 6 },
-    { from: -1, to: 8 * 15 + 6 },
-    { from: -1, to: 7 * 15 + 7 },
-  ];
-
-  let scriptIndex = 0;
-
-  const snapshot = () => ({
-    role: state.role,
-    roomId: state.roomId,
-    name: state.name,
-    game: state.game,
-    phase: state.phase,
-    selfId: "me",
-    seats: state.seats,
-    members: state.members,
-    lowMotion: state.lowMotion,
-    cells: state.cells,
-    turnSeat: state.turnSeat,
-    lastMove: state.lastMove,
-    inCheck: state.inCheck,
-    checkFocus: state.checkFocus,
-    result: state.result,
-    winLine: state.winLine,
-    clock: { remaining: [600000, 600000], running: state.turnSeat, budget: 600000 },
-  });
-
-  const resetBoard = () => {
-    state.cells = state.game === "xiangqi" ? xiangqiOpening() : gomokuOpening();
-    state.turnSeat = 0;
-    state.lastMove = null;
-    state.inCheck = false;
-    state.checkFocus = null;
-    state.result = null;
-    state.winLine = [];
-    scriptIndex = 0;
-  };
-
-  return {
-    live: false,
-    locale: () => "zh-CN",
-    on: (handler) => {
-      listeners.add(handler);
-      return () => listeners.delete(handler);
-    },
-    invoke: async (method, params = {}) => {
-      switch (method) {
-        case "profile.get":
-          return { id: "local", nickname: "我", lowMotion: state.lowMotion };
-        case "profile.save": {
-          if (typeof params.lowMotion === "boolean") state.lowMotion = params.lowMotion;
-          return { id: "local", nickname: params.nickname || "我", lowMotion: state.lowMotion };
-        }
-        case "room.snapshot":
-          return snapshot();
-        case "room.create":
-          state.role = "host";
-          state.roomId = "local-room";
-          state.game = params.game || "xiangqi";
-          state.phase = "lobby";
-          resetBoard();
-          return snapshot();
-        case "room.join":
-          state.role = "guest";
-          state.roomId = "local-room";
-          resetBoard();
-          return snapshot();
-        case "room.leave":
-          state.role = "idle";
-          state.roomId = null;
-          state.cells = null;
-          return { ok: true };
-        case "lobby.scan":
-          return { rooms: [] };
-        case "room.start":
-          state.phase = "playing";
-          resetBoard();
-          return snapshot();
-        case "dev.scenario": {
-          // Mirrors backend/internal/app/scenarios.go, because a preview that plays the same
-          // line for every scenario cannot be used to review the effects those scenarios exist
-          // to show.
-          const fixtures = SCENARIO_FIXTURES[state.game] || {};
-          const lineToUse = fixtures[params.name];
-          if (!lineToUse) throw new Error(`未知场景 ${params.name}`);
-          const board = state.game === "xiangqi" ? xiangqiOpening() : gomokuOpening();
-          for (let i = 0; i < lineToUse.length; i++) {
-            const mv = lineToUse[i];
-            if (state.game === "xiangqi") {
-              board[mv.to] = board[mv.from];
-              board[mv.from] = 0;
-            } else {
-              board[mv.to] = i % 2 === 0 ? 1 : 2;
-            }
-          }
-          state.cells = board;
-          state.lastMove = lineToUse.length ? lineToUse[lineToUse.length - 1] : null;
-          state.phase = "practice";
-          state.inCheck = params.name === "check";
-          state.checkFocus = state.inCheck ? 4 : null;
-          state.result = params.name === "win" ? { finished: true, outcome: 1, reason: "five in a row" } : null;
-          state.winLine = params.name === "win" ? [7 * 15 + 3, 7 * 15 + 4, 7 * 15 + 5, 7 * 15 + 6, 7 * 15 + 7] : [];
-          return snapshot();
-        }
-        case "room.practice.start":
-          state.phase = "practice";
-          resetBoard();
-          return snapshot();
-        case "room.practice.end":
-          state.phase = "lobby";
-          resetBoard();
-          return snapshot();
-        case "game.legal": {
-          // The preview offers no legality: it answers with every empty square so the hint
-          // layer can be inspected, and nothing more.
-          const from = Number(params.from ?? -1);
-          if (from < 0 || !state.cells) return { destinations: [] };
-          const dests = [];
-          for (let i = 0; i < state.cells.length; i++) if (!state.cells[i]) dests.push(i);
-          return { destinations: dests.slice(0, 24) };
-        }
-        case "game.move": {
-          const line = scripts[state.game] || [];
-          const move = line[scriptIndex];
-          if (!move) return snapshot();
-          scriptIndex += 1;
-          const next = state.cells.slice();
-          if (state.game === "xiangqi") {
-            next[move.to] = next[move.from];
-            next[move.from] = 0;
-          } else {
-            next[move.to] = scriptIndex % 2 === 1 ? 1 : 2;
-          }
-          state.cells = next;
-          state.lastMove = move;
-          state.turnSeat = scriptIndex % 2;
-          // Cue a check announcement partway through the script so the loudest effect can
-          // be reviewed without a real referee.
-          state.inCheck = state.game === "xiangqi" && scriptIndex === 5;
-          state.checkFocus = state.inCheck ? 4 : null;
-          return snapshot();
-        }
-        case "game.resign":
-          state.phase = "finished";
-          state.result = { finished: true, outcome: 1, reason: "resign" };
-          return snapshot();
-        case "game.rematch":
-          state.phase = "lobby";
-          resetBoard();
-          return snapshot();
-        case "replay.state": {
-          // The preview replays its scripted line by rebuilding the opening and applying
-          // the first N entries, mirroring what the sidecar does.
-          const line = scripts[state.game] || [];
-          const ply = Math.max(0, Math.min(line.length, Number(params.ply ?? line.length)));
-          const board = state.game === "xiangqi" ? xiangqiOpening() : gomokuOpening();
-          for (let i = 0; i < ply; i++) {
-            const mv = line[i];
-            if (state.game === "xiangqi") {
-              board[mv.to] = board[mv.from];
-              board[mv.from] = 0;
-            } else {
-              board[mv.to] = i % 2 === 0 ? 1 : 2;
-            }
-          }
-          const last = ply > 0 ? line[ply - 1] : null;
-          return {
-            ply,
-            total: line.length,
-            cells: board,
-            turnSeat: ply % 2,
-            notation: line.slice(0, ply).map((_, i) => `第 ${i + 1} 手`),
-            lastMove: last,
-            result: ply >= line.length ? state.result : null,
-          };
-        }
-        case "replay.notation":
-          return { notation: (scripts[state.game] || []).slice(0, scriptIndex).map((_, i) => `第 ${i + 1} 手`) };
-        case "room.seat":
-        case "room.release":
-        case "game.undo.request":
-        case "game.undo.consent":
-          return snapshot();
-        default:
-          if (method.startsWith("game.") || method.startsWith("room.") || method.startsWith("replay.")) {
-            return snapshot();
-          }
-          throw new Error(`本地预览未实现 ${method}`);
-      }
-    },
-    _emit: emit,
-  };
+function persistClientId(clientId) {
+  try {
+    localStorage.setItem(CLIENT_ID_KEY, clientId);
+  } catch {}
 }

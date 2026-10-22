@@ -1,6 +1,6 @@
 # 0001 — Host-authoritative LAN play with mDNS discovery
 
-Status: accepted
+Status: superseded — the current plugin uses a hosted cloud service instead.
 
 ## Context
 

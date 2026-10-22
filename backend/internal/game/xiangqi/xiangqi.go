@@ -5,7 +5,7 @@
 // Seat one plays red and moves first.
 package xiangqi
 
-import "github.com/southernMortals/dbx-board-games/backend/internal/game"
+import "github.com/lieng618/dbx-mini-games/backend/internal/game"
 
 // Piece codes. Sign marks the owner: positive is red (seat one), negative is black
 // (seat two). Zero is an empty point.

@@ -8,9 +8,9 @@ package replay
 import (
 	"fmt"
 
-	"github.com/southernMortals/dbx-board-games/backend/internal/game"
-	"github.com/southernMortals/dbx-board-games/backend/internal/game/gomoku"
-	"github.com/southernMortals/dbx-board-games/backend/internal/game/xiangqi"
+	"github.com/lieng618/dbx-mini-games/backend/internal/game"
+	"github.com/lieng618/dbx-mini-games/backend/internal/game/gomoku"
+	"github.com/lieng618/dbx-mini-games/backend/internal/game/xiangqi"
 )
 
 // Record is a portable transcript of one Match.

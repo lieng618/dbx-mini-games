@@ -1,98 +1,128 @@
-# 棋牌桌 · Board Games for DBX
+# 棋牌小馆 · DBX Mini Games
 
-局域网中国象棋与五子棋的 DBX 插件。开桌、自动发现、观战、对局复盘，全部只在你自己的局域网内完成——没有公网服务、没有账号、没有联网校验。
+一个面向 DBX 的匿名云棋牌大厅。插件是纯前端包，玩家不需要账号，也不需要在本机运行 Sidecar；中国象棋、五子棋、房间、观战和计时由独立 Go 服务统一仲裁。
 
-## 是什么
-
-一个 DBX 工作台，里面是两张棋桌：
-
-- **中国象棋**——走吃、将军、将死、困毙、将帅照面、六十回合无吃子和棋
-- **五子棋**——自由规则，五连即胜，无禁手
-
-两游戏共用一个局域网层：同一 WiFi 下自动互相发现，进来就能坐。
-
-## 怎么玩
-
-1. 在 DBX 插件中心安装本插件，打开「棋牌桌」工作台
-2. 一个人点「开桌」，选棋种（可设密码）
-3. 同一个局域网里的其他人打开同一个工作台，房间会自己出现在列表里
-4. 房间有两个座位：**先到的两人自动落座**，其余人进入观战
-5. 两人都就位后开棋
-
-座位不会因为一局结束而自动轮换。想换人下，由当前坐着的人主动点「离座」——那之后座位才交给等着的人。
-
-## 观战
-
-同一个房间里的其他人看到的是同一盘棋，共享全部特效，只是没有落子的操作入口。观战者不会打乱对局状态。
-
-## 对局复盘
-
-每局棋都会记录完整棋谱：
-
-- 逐手回放，可前后翻步，也可跳到任意一手
-- 象棋用中文记谱（如「炮八平五」「车九进二」），五子棋用坐标记谱（如「H8」）
-- 结束后可完整复盘，也可导出棋谱
-
-## 视觉
-
-整体走国风纸墨路线：木纹棋盘、水墨落子、书法字。
-
-- 落子：墨滴扩散涟漪，棋子落定轻微回弹
-- 提子：被吃棋子碎成墨尘飞散
-- 将军：棋盘边缘红光呼吸 + 镜头轻震 + 「将军」大字水墨炸开
-- 最后一手：金色描边脉冲 + 起点到终点的墨线拖尾
-- 连五 / 将死：连线生长 → 全盘定格 → 朱红印章扣下
-- 悔棋：棋子沿原路墨迹倒带
-
-**低动效模式**：以上每一条都有降级形态（关闭震屏、粒子与长动画），在设置里可常驻开启，适合晕动敏感或弱机器。
-
-## 局域网怎么工作
-
-- 开桌的人在本机起一个 TLS 1.3 监听端口，并用 mDNS 广播房间
-- 加入的人通过 mDNS 拿到房间地址与主机公钥，再连过去
-- 因为证书是自签的，客户端**固定校验主机公钥**（公钥经 mDNS 拿到，与证书分离），随后用 Ed25519 挑战应答证明自己的身份
-- 房主是唯一裁判：棋盘状态以房主为准，客户端改本地盘没有意义
-- 掉线可用重连票据回到原座位；房主离开则房间结束
-- mDNS 被系统或网络挡住时，开桌界面会直接显示本机地址，可以手动输入加入
-
-不计时之外的一切：本插件不做公网中继、不做 P2P 全互联、不做房主迁移。
-
-## 开发
-
-需要 Go 1.26+、Node 18+。
-
-```bash
-# 后端测试
-cd backend && go test ./...
-
-# 本地起独立调试宿主（不启动 DBX 桌面端）
-dbx-plugin dev --path . --port 5190
-
-# 打包未签名审核候选
-dbx-plugin package .
+```text
+Publisher: lieng618
+Plugin ID: io.github.lieng618.dbx-mini-games
+Source:    https://github.com/lieng618/dbx-mini-games
 ```
 
-产物在 `dist/`：`<plugin-id>-<version>-<target>.dbxp` 与同名 `.artifact.json`。
+## 当前能力
 
-未签名包要在插件中心的「第三方与开发者选项」里显式开启「允许安装未签名开发包」才能装。
+- 公共云端大厅，WebSocket 推送房间变化；
+- 创建、加入和观战房间，不需要登录；
+- 中国象棋与五子棋；
+- 服务器权威走子、计时和超时判负；
+- 创建者离开等待房间时自动转移房主；
+- 设置保存在浏览器本地；
+- 音效保留并默认开启，插件内不提供音效开关；
+- 服务器只使用内存，不保存账号、用户、房间或棋谱。
 
-## 仓库结构
+## 结构
 
+```text
+src/                         Vue 3 + PixiJS 插件前端
+backend/internal/cloud/      匿名大厅、房间协议、WebSocket 和服务器时钟
+backend/internal/game/       中国象棋、五子棋规则引擎
+backend/internal/replay/     内部走子历史与棋盘重建
+backend/internal/room/       房间、座位与对局状态机
+deploy/                      Docker、Caddy 和 TLS 部署文件
+scripts/cloud-smoke.mjs      三客户端端到端验收
 ```
-backend/internal/game/       两个棋种的规则引擎（纯逻辑，无网络无时钟）
-backend/internal/replay/     棋谱记录、回放游标、中文与坐标记谱
-backend/internal/room/       房间、座位、观战、对局生命周期
-backend/internal/lan/        TLS 1.3 传输与 Ed25519 握手
-backend/internal/discovery/  mDNS 广播与解析
-backend/internal/app/        宿主 RPC 面与会话
-docs/adr/                    架构决策记录
-docs/PLAN.md                 交付计划与里程碑
-CONTEXT.md                   领域词表
+
+插件端不包含原生 Sidecar。`manifest.json` 只声明工作台和云端网络入口；Go 目录只用于部署独立云服务。
+
+## 本地运行
+
+需要 Node.js 22+ 和 Go 1.22+。
+
+```powershell
+npm ci
+npm run build
+
+cd backend
+go run . -addr 127.0.0.1:8787 -ui ..\ui
 ```
 
-## 数据与隐私
+打开：
 
-插件只在本机 `plugin-data/<id>` 下保存两个文件：你的昵称与低动效偏好。棋谱不落盘，房间结束后即释放。不上传任何东西。
+```text
+http://127.0.0.1:8787
+```
+
+公网入口、WebSocket 路径和本地开发地址都集中在
+[`config/game-server.env`](config/game-server.env)。插件构建会自动把
+`PUBLIC_ORIGIN` 同步到 `manifest.json` 和前端产物，不需要再分别修改。
+
+```powershell
+npm run build
+```
+
+`npm run dev` 使用 `LOCAL_ORIGIN`；生产构建使用 `PUBLIC_ORIGIN` 加
+`WEBSOCKET_PATH`。
+
+## 验收
+
+后端单元测试：
+
+```powershell
+cd backend
+go test ./...
+```
+
+三客户端端到端测试会创建一个五子棋房间，让两名玩家完成连五，并由第三人观战和接收终局结果：
+
+```powershell
+node scripts/cloud-smoke.mjs
+```
+
+## 部署
+
+服务器需要可用的 80/443 端口，并先把唯一一份公网配置改成实际入口：
+
+```text
+PUBLIC_ORIGIN=https://play.example.com
+WEBSOCKET_PATH=/ws
+LOCAL_ORIGIN=http://127.0.0.1:8787
+```
+
+然后：
+
+```powershell
+cd deploy
+docker compose up -d --build
+```
+
+Caddy 会自动申请 TLS，WebSocket 走：
+
+```text
+wss://play.example.com/ws
+```
+
+如果 `PUBLIC_ORIGIN` 使用公网 IP，Caddy 默认只会生成内部自签名证书。
+这种方式适合本机或局域网测试；发布给公网玩家时，需要给 Caddy 提供包含
+该 IP SAN 的受信任证书，或者改用域名。Manifest 的网络权限只接受 HTTPS
+origin，不能写路径或通配符。
+
+正式发布只需执行：
+
+```powershell
+npm run package:dbx
+```
+
+这个命令会先同步配置、重新构建 UI，再执行 `dbx-plugin package .`。
+网络权限会被固化进 `.dbxp`，因此替换入口后必须重新打包并重新安装插件；
+已经安装的旧包不会自动读取新的 IP。
+
+## 匿名与数据
+
+- 无账号、Cookie 或用户数据库；
+- 房间和成员状态只在 Go 进程内存中；
+- 服务重启后房间消失；
+- 客户端不保存棋谱或回放数据；
+- 不提供聊天，避免匿名内容审核和持久化；
+- IP 只用于网络连接和可选的短时限流，不写入业务存储。
 
 ## 许可
 

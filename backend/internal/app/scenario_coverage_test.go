@@ -3,9 +3,9 @@ package app
 import (
 	"testing"
 
-	"github.com/southernMortals/dbx-board-games/backend/internal/game"
-	"github.com/southernMortals/dbx-board-games/backend/internal/game/gomoku"
-	"github.com/southernMortals/dbx-board-games/backend/internal/game/xiangqi"
+	"github.com/lieng618/dbx-mini-games/backend/internal/game"
+	"github.com/lieng618/dbx-mini-games/backend/internal/game/gomoku"
+	"github.com/lieng618/dbx-mini-games/backend/internal/game/xiangqi"
 )
 
 // offeredScenarios mirrors the 特效预演 buttons in src/App.vue. The opening button is

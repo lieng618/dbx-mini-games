@@ -1,0 +1,728 @@
+package cloud
+
+import (
+	"crypto/rand"
+	"errors"
+	"fmt"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/lieng618/dbx-mini-games/backend/internal/game"
+	"github.com/lieng618/dbx-mini-games/backend/internal/replay"
+	"github.com/lieng618/dbx-mini-games/backend/internal/room"
+)
+
+const (
+	defaultBudget  = 10 * time.Minute
+	maxBudget      = 180 * time.Minute
+	maxMoveTime    = 10 * time.Minute
+	maxNameRunes   = 32
+	maxRooms       = 250
+	lobbyEventName = "lobby.updated"
+	roomEventName  = "room.state"
+)
+
+type clientState struct {
+	id       string
+	nickname string
+	lobby    bool
+	roomID   string
+	send     func(method string, params any)
+	timer    *time.Timer
+}
+
+type cloudRoom struct {
+	room      *room.Room
+	ownerID   string
+	createdAt time.Time
+	startedAt time.Time
+	finished  time.Time
+	clock     *matchClock
+}
+
+// Hub is the in-memory public lobby. No user, room, or match data is persisted.
+type Hub struct {
+	mu      sync.Mutex
+	clients map[string]*clientState
+	rooms   map[string]*cloudRoom
+}
+
+func NewHub() *Hub {
+	return &Hub{
+		clients: map[string]*clientState{},
+		rooms:   map[string]*cloudRoom{},
+	}
+}
+
+// AddClient registers one live WebSocket session and returns its ephemeral identity.
+func (h *Hub) AddClient(requestedID, nickname string, send func(string, any)) (string, string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	id := sanitizeID(requestedID)
+	if id == "" {
+		id = randomID()
+	}
+	nickname = sanitizeName(nickname)
+	if nickname == "" {
+		nickname = "棋友-" + id[:4]
+	}
+	if existing := h.clients[id]; existing != nil {
+		if existing.timer != nil {
+			existing.timer.Stop()
+			existing.timer = nil
+		}
+		existing.send = send
+		existing.nickname = nickname
+		if record := h.rooms[existing.roomID]; record != nil {
+			record.room.SetConnected(id, true)
+			h.notifyRoomLocked(record)
+		}
+		return id, nickname
+	}
+	h.clients[id] = &clientState{
+		id:       id,
+		nickname: nickname,
+		lobby:    true,
+		send:     send,
+	}
+	return id, nickname
+}
+
+// RemoveClient keeps the seat for a short reconnect window. The public network is less
+// stable than a LAN socket, so a brief drop should not forfeit a live game immediately.
+func (h *Hub) RemoveClient(clientID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	client := h.clients[clientID]
+	if client == nil || client.timer != nil {
+		return
+	}
+	client.send = nil
+	if record := h.rooms[client.roomID]; record != nil {
+		record.room.SetConnected(clientID, false)
+		h.notifyRoomLocked(record)
+	}
+	h.notifyLobbyLocked()
+	client.timer = time.AfterFunc(25*time.Second, func() {
+		h.expireClient(clientID)
+	})
+}
+
+func (h *Hub) expireClient(clientID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	client := h.clients[clientID]
+	if client == nil || client.send != nil {
+		return
+	}
+	h.leaveRoomLocked(client)
+	delete(h.clients, clientID)
+	h.notifyLobbyLocked()
+}
+
+func (h *Hub) Call(clientID, method string, params map[string]any) (any, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	client := h.clients[clientID]
+	if client == nil {
+		return nil, errors.New("session is not connected")
+	}
+
+	switch method {
+	case "profile.get":
+		return map[string]any{"id": client.id, "nickname": client.nickname}, nil
+	case "profile.save":
+		if nickname := sanitizeName(stringParam(params, "nickname")); nickname != "" {
+			client.nickname = nickname
+			if record := h.rooms[client.roomID]; record != nil {
+				record.room.SetNickname(client.id, nickname)
+				h.notifyRoomLocked(record)
+			}
+		}
+		return map[string]any{"id": client.id, "nickname": client.nickname}, nil
+	case "lobby.subscribe":
+		client.lobby = true
+		h.notifyLobbyLocked()
+		return map[string]any{"ok": true, "online": h.lobbyClientCountLocked()}, nil
+	case "lobby.list", "lobby.scan":
+		return h.lobbyPayloadLocked(time.Now()), nil
+	case "room.snapshot":
+		if record := h.rooms[client.roomID]; record != nil {
+			return h.snapshotLocked(record, client.id, time.Now()), nil
+		}
+		return map[string]any{
+			"role":     "idle",
+			"selfId":   client.id,
+			"nickname": client.nickname,
+			"serverAt": time.Now().UnixMilli(),
+		}, nil
+	case "room.create":
+		return h.createRoomLocked(client, params)
+	case "room.join":
+		return h.joinRoomLocked(client, params)
+	case "room.leave":
+		h.leaveRoomLocked(client)
+		h.notifyLobbyLocked()
+		return map[string]any{"role": "idle"}, nil
+	case "room.start", "room.seat", "room.release", "room.practice.start",
+		"room.practice.end", "room.ai.start", "room.ai.move",
+		"game.move", "game.undo.request", "game.undo.consent", "game.resign", "game.rematch":
+		return h.actLocked(client, method, params)
+	case "game.legal":
+		return h.legalLocked(client, params)
+	default:
+		return nil, fmt.Errorf("unknown method %q", method)
+	}
+}
+
+func (h *Hub) Stats() map[string]any {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	playing := 0
+	for _, record := range h.rooms {
+		if record.room.Phase() == room.PhasePlaying {
+			playing++
+		}
+	}
+	return map[string]any{
+		"clients": len(h.clients),
+		"rooms":   len(h.rooms),
+		"playing": playing,
+	}
+}
+
+// LobbySnapshot is the public read-only room index used by /api/lobby.
+func (h *Hub) LobbySnapshot() map[string]any {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.lobbyPayloadLocked(time.Now())
+}
+
+func (h *Hub) createRoomLocked(client *clientState, params map[string]any) (any, error) {
+	if client.roomID != "" {
+		return nil, errors.New("leave the current room before creating another")
+	}
+	if len(h.rooms) >= maxRooms {
+		return nil, errors.New("server room capacity reached")
+	}
+
+	name := sanitizeName(stringParam(params, "name"))
+	gameName := stringParam(params, "game")
+	if gameName == "" {
+		gameName = "xiangqi"
+	}
+	if name == "" {
+		if gameName == "xiangqi" {
+			name = client.nickname + "象棋室"
+		} else {
+			name = client.nickname + "五子棋室"
+		}
+	}
+	hostSeat := intParam(params, "seat", -1)
+	if hostSeat != 0 && hostSeat != 1 {
+		hostSeat = -1
+	}
+
+	record := &cloudRoom{
+		ownerID:   client.id,
+		createdAt: time.Now(),
+	}
+	record.clock = newMatchClock(parseBudget(params), parseMoveTime(params))
+
+	created, err := room.New(room.Options{
+		ID:       randomID(),
+		Name:     name,
+		Game:     gameName,
+		HostID:   client.id,
+		Password: stringParam(params, "password"),
+		HostSeat: hostSeat,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if _, err := created.Join(client.id, client.nickname); err != nil {
+		return nil, err
+	}
+	record.room = created
+	h.rooms[created.ID()] = record
+	client.roomID = created.ID()
+	client.lobby = false
+	h.notifyLobbyLocked()
+	return h.snapshotLocked(record, client.id, time.Now()), nil
+}
+
+func (h *Hub) joinRoomLocked(client *clientState, params map[string]any) (any, error) {
+	if client.roomID != "" {
+		return nil, errors.New("you are already in a room")
+	}
+	roomID := stringParam(params, "roomId")
+	record := h.rooms[roomID]
+	if record == nil {
+		return nil, errors.New("room no longer exists")
+	}
+	role := stringParam(params, "role")
+	if (role == "spectator" || role == "watch") && record.room.Phase() != room.PhasePlaying {
+		return nil, errors.New("spectating is only available while a match is in progress")
+	}
+	if record.room.Locked() && !record.room.CheckPassword(stringParam(params, "password")) {
+		return nil, errors.New("wrong room password")
+	}
+
+	var (
+		member room.Member
+		err    error
+	)
+	if role == "spectator" || role == "watch" {
+		member, err = record.room.JoinSpectator(client.id, client.nickname)
+	} else {
+		member, err = record.room.Join(client.id, client.nickname)
+	}
+	if err != nil {
+		return nil, err
+	}
+	client.roomID = roomID
+	client.lobby = false
+	h.notifyLobbyLocked()
+	h.notifyRoomLocked(record)
+	return h.snapshotForMemberLocked(record, client.id, member, time.Now()), nil
+}
+
+func (h *Hub) leaveRoomLocked(client *clientState) {
+	record := h.rooms[client.roomID]
+	if record == nil {
+		client.roomID = ""
+		client.lobby = true
+		return
+	}
+	_ = record.room.LeaveForCloud(client.id)
+	client.roomID = ""
+	client.lobby = true
+
+	members := record.room.Members()
+	nextOwner := room.Member{}
+	for _, member := range members {
+		if member.IsSeated() {
+			nextOwner = member
+			break
+		}
+	}
+	// Spectators do not keep an empty table alive. If no player remains seated, close the
+	// room and return everyone still watching to the public lobby.
+	if nextOwner.ID == "" {
+		h.closeRoomLocked(record)
+		return
+	}
+	if record.ownerID == client.id {
+		record.ownerID = nextOwner.ID
+		record.room.SetHostID(record.ownerID)
+	}
+	h.notifyRoomLocked(record)
+	h.notifyLobbyLocked()
+}
+
+// closeRoomLocked removes a room that no longer has a seated player. Any spectators are
+// detached explicitly; otherwise their clients would keep a room id that no longer exists.
+func (h *Hub) closeRoomLocked(record *cloudRoom) {
+	roomID := record.room.ID()
+	now := time.Now().UnixMilli()
+	for _, client := range h.clients {
+		if client.roomID != roomID {
+			continue
+		}
+		client.roomID = ""
+		client.lobby = true
+		if client.send != nil {
+			client.send(roomEventName, map[string]any{
+				"role":     "idle",
+				"selfId":   client.id,
+				"nickname": client.nickname,
+				"serverAt": now,
+			})
+		}
+	}
+	delete(h.rooms, roomID)
+	h.notifyLobbyLocked()
+}
+
+func (h *Hub) actLocked(client *clientState, method string, params map[string]any) (any, error) {
+	record := h.rooms[client.roomID]
+	if record == nil {
+		return nil, errors.New("join a room first")
+	}
+	now := time.Now()
+
+	switch method {
+	case "room.start":
+		if client.id != record.ownerID {
+			return nil, errors.New("only the room creator can start the match")
+		}
+		if err := record.room.Start(now.UnixMilli()); err != nil {
+			return nil, err
+		}
+		record.startedAt = now
+		record.finished = time.Time{}
+		record.clock.start(now)
+	case "room.seat":
+		seat := intParam(params, "seat", -1)
+		if err := record.room.TakeSeat(client.id, seat); err != nil {
+			return nil, err
+		}
+	case "room.release":
+		if err := record.room.ReleaseSeat(client.id); err != nil {
+			return nil, err
+		}
+	case "game.move":
+		move := game.Move{
+			From: intParam(params, "from", -1),
+			To:   intParam(params, "to", -1),
+		}
+		if err := record.room.Move(client.id, move, now.UnixMilli()); err != nil {
+			return nil, err
+		}
+		if record.room.Phase() == room.PhaseFinished {
+			record.finished = now
+			record.clock.stop(now)
+		} else {
+			record.clock.switchTurn(now)
+		}
+	case "game.undo.request":
+		if err := record.room.RequestUndo(client.id); err != nil {
+			return nil, err
+		}
+	case "game.undo.consent":
+		if err := record.room.ConsentUndo(client.id); err != nil {
+			return nil, err
+		}
+	case "game.resign":
+		if err := record.room.Resign(client.id); err != nil {
+			return nil, err
+		}
+		record.finished = now
+		record.clock.stop(now)
+	case "game.rematch":
+		if client.id != record.ownerID {
+			return nil, errors.New("only the room creator can rematch")
+		}
+		if err := record.room.Rematch(); err != nil {
+			return nil, err
+		}
+		record.startedAt = time.Time{}
+		record.finished = time.Time{}
+	case "room.practice.start", "room.practice.end", "room.ai.start", "room.ai.move":
+		return nil, errors.New("practice tools are not available in cloud rooms")
+	default:
+		return nil, fmt.Errorf("unknown action %q", method)
+	}
+
+	h.notifyRoomLocked(record)
+	h.notifyLobbyLocked()
+	return h.snapshotLocked(record, client.id, now), nil
+}
+
+func (h *Hub) legalLocked(client *clientState, params map[string]any) (any, error) {
+	record := h.rooms[client.roomID]
+	if record == nil {
+		return map[string]any{"destinations": []int{}}, nil
+	}
+	rec, ok := record.room.Replay()
+	if !ok {
+		return map[string]any{"destinations": []int{}}, nil
+	}
+	engine, err := replay.NewEngine(rec.Game)
+	if err != nil {
+		return nil, err
+	}
+	for _, move := range rec.Moves {
+		if err := engine.Apply(move); err != nil {
+			return nil, err
+		}
+	}
+	return map[string]any{"destinations": engine.LegalFrom(intParam(params, "from", -1))}, nil
+}
+
+func (h *Hub) snapshotLocked(record *cloudRoom, clientID string, now time.Time) map[string]any {
+	var member room.Member
+	for _, candidate := range record.room.Members() {
+		if candidate.ID == clientID {
+			member = candidate
+			break
+		}
+	}
+	return h.snapshotForMemberLocked(record, clientID, member, now)
+}
+
+func (h *Hub) snapshotForMemberLocked(record *cloudRoom, clientID string, member room.Member, now time.Time) map[string]any {
+	role := "guest"
+	if clientID == record.ownerID {
+		role = "host"
+	}
+	view := map[string]any{
+		"role":           role,
+		"selfId":         clientID,
+		"roomId":         record.room.ID(),
+		"name":           record.room.Name(),
+		"game":           record.room.GameName(),
+		"phase":          string(record.room.Phase()),
+		"locked":         record.room.Locked(),
+		"seats":          record.room.Seats(),
+		"members":        record.room.Members(),
+		"selfSeat":       member.Seat,
+		"serverAt":       now.UnixMilli(),
+		"roomCreatedAt":  record.createdAt.UnixMilli(),
+		"roomStartedAt":  unixMilli(record.startedAt),
+		"roomFinishedAt": unixMilli(record.finished),
+		"clock":          record.clock.snapshot(now),
+	}
+	moveCount := 0
+	if rec, ok := record.room.Replay(); ok {
+		moveCount = len(rec.Moves)
+	}
+	view["moveCount"] = moveCount
+	for key, value := range boardView(record.room) {
+		view[key] = value
+	}
+	return view
+}
+
+func (h *Hub) roomSummariesLocked(now time.Time) []map[string]any {
+	out := make([]map[string]any, 0, len(h.rooms))
+	for _, record := range h.rooms {
+		members := record.room.Members()
+		seats := record.room.Seats()
+		players := 0
+		for _, seat := range seats {
+			if seat != "" {
+				players++
+			}
+		}
+		elapsed := now.Sub(record.createdAt)
+		switch record.room.Phase() {
+		case room.PhasePlaying:
+			if !record.startedAt.IsZero() {
+				elapsed = now.Sub(record.startedAt)
+			}
+		case room.PhaseFinished:
+			if !record.startedAt.IsZero() {
+				end := record.finished
+				if end.IsZero() {
+					end = now
+				}
+				elapsed = end.Sub(record.startedAt)
+			}
+		}
+		out = append(out, map[string]any{
+			"roomId":       record.room.ID(),
+			"name":         record.room.Name(),
+			"game":         record.room.GameName(),
+			"phase":        string(record.room.Phase()),
+			"players":      players,
+			"capacity":     room.SeatCount,
+			"participants": len(members),
+			"spectators":   len(members) - players,
+			"spectatorCap": room.MaxParticipants - room.SeatCount,
+			"locked":       record.room.Locked(),
+			"createdAt":    record.createdAt.UnixMilli(),
+			"startedAt":    unixMilli(record.startedAt),
+			"elapsedMs":    maxInt64(0, elapsed.Milliseconds()),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i]["createdAt"].(int64) > out[j]["createdAt"].(int64)
+	})
+	return out
+}
+
+func (h *Hub) notifyRoomLocked(record *cloudRoom) {
+	now := time.Now()
+	for _, client := range h.clients {
+		if client.roomID == record.room.ID() {
+			if client.send != nil {
+				client.send(roomEventName, h.snapshotLocked(record, client.id, now))
+			}
+		}
+	}
+}
+
+func (h *Hub) notifyLobbyLocked() {
+	payload := h.lobbyPayloadLocked(time.Now())
+	for _, client := range h.clients {
+		if client.lobby {
+			if client.send != nil {
+				client.send(lobbyEventName, payload)
+			}
+		}
+	}
+}
+
+func (h *Hub) lobbyClientCountLocked() int {
+	count := 0
+	for _, client := range h.clients {
+		if client.lobby && client.send != nil {
+			count++
+		}
+	}
+	return count
+}
+
+func (h *Hub) lobbyPayloadLocked(now time.Time) map[string]any {
+	return map[string]any{
+		"rooms":  h.roomSummariesLocked(now),
+		"online": h.lobbyClientCountLocked(),
+	}
+}
+
+func boardView(r *room.Room) map[string]any {
+	engine, err := replay.NewEngine(r.GameName())
+	if err != nil {
+		return map[string]any{}
+	}
+	var lastMove *game.Move
+	rec, hasRecord := r.Replay()
+	if hasRecord {
+		for index, move := range rec.Moves {
+			if err := engine.Apply(move); err != nil {
+				break
+			}
+			if index == len(rec.Moves)-1 {
+				applied := move
+				lastMove = &applied
+			}
+		}
+	}
+	view := map[string]any{
+		"cells":    engine.Cells(),
+		"turnSeat": int(engine.Turn()),
+	}
+	if lastMove != nil {
+		view["lastMove"] = map[string]any{"from": lastMove.From, "to": lastMove.To}
+	}
+	if r.Phase() == room.PhasePlaying {
+		if reporter, ok := engine.(game.CheckReporter); ok {
+			seat := engine.Turn()
+			if reporter.InCheck(seat) {
+				view["inCheck"] = true
+				view["checkFocus"] = reporter.KingSquare(seat)
+			}
+		}
+	}
+	if r.Phase() != room.PhaseLobby {
+		result := engine.Result()
+		// Resignation, timeout and abandonment are room-level results: the board
+		// engine never sees them as a terminal position. They are recorded on the
+		// replay, so the snapshot must fall back to that authoritative result.
+		if !result.Finished && hasRecord && rec.Outcome != game.OutcomeNone {
+			result = game.Result{
+				Finished: true,
+				Outcome:  rec.Outcome,
+				Reason:   rec.Reason,
+			}
+		}
+		if result.Finished {
+			view["result"] = map[string]any{
+				"finished": true,
+				"outcome":  int(result.Outcome),
+				"reason":   result.Reason,
+			}
+			if reporter, ok := engine.(game.WinLineReporter); ok {
+				if line := reporter.WinLine(); len(line) > 0 {
+					view["winLine"] = line
+				}
+			}
+		}
+	}
+	return view
+}
+
+func parseBudget(params map[string]any) time.Duration {
+	if _, exists := params["minutes"]; !exists {
+		return defaultBudget
+	}
+	minutes := intParam(params, "minutes", 10)
+	if minutes < 0 {
+		minutes = 0
+	}
+	if minutes > int(maxBudget/time.Minute) {
+		minutes = int(maxBudget / time.Minute)
+	}
+	return time.Duration(minutes) * time.Minute
+}
+
+func parseMoveTime(params map[string]any) time.Duration {
+	seconds := intParam(params, "moveSeconds", 0)
+	if seconds < 0 {
+		seconds = 0
+	}
+	if seconds > int(maxMoveTime/time.Second) {
+		seconds = int(maxMoveTime / time.Second)
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func stringParam(params map[string]any, key string) string {
+	value, _ := params[key].(string)
+	return strings.TrimSpace(value)
+}
+
+func intParam(params map[string]any, key string, fallback int) int {
+	switch value := params[key].(type) {
+	case float64:
+		return int(value)
+	case int:
+		return value
+	case int64:
+		return int(value)
+	default:
+		return fallback
+	}
+}
+
+func sanitizeName(value string) string {
+	value = strings.TrimSpace(strings.ReplaceAll(value, "\x00", ""))
+	runes := []rune(value)
+	if len(runes) > maxNameRunes {
+		value = string(runes[:maxNameRunes])
+	}
+	return value
+}
+
+func sanitizeID(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) < 8 || len(value) > 64 {
+		return ""
+	}
+	for _, character := range value {
+		if (character < 'a' || character > 'z') &&
+			(character < 'A' || character > 'Z') &&
+			(character < '0' || character > '9') &&
+			character != '-' && character != '_' {
+			return ""
+		}
+	}
+	return value
+}
+
+func randomID() string {
+	buffer := make([]byte, 16)
+	if _, err := rand.Read(buffer); err != nil {
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	return fmt.Sprintf("%x", buffer)
+}
+
+func unixMilli(value time.Time) int64 {
+	if value.IsZero() {
+		return 0
+	}
+	return value.UnixMilli()
+}
+
+func maxInt64(left, right int64) int64 {
+	if left > right {
+		return left
+	}
+	return right
+}

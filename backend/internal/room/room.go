@@ -9,8 +9,8 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/southernMortals/dbx-board-games/backend/internal/game"
-	"github.com/southernMortals/dbx-board-games/backend/internal/replay"
+	"github.com/lieng618/dbx-mini-games/backend/internal/game"
+	"github.com/lieng618/dbx-mini-games/backend/internal/replay"
 )
 
 // Capacity limits.
@@ -178,6 +178,17 @@ func (r *Room) Count() int {
 // lobby and a seat is open; otherwise they spectate. This is arrival-order seating: who
 // plays is decided by when you walked in, not by a challenge.
 func (r *Room) Join(id, nickname string) (Member, error) {
+	return r.join(id, nickname, true)
+}
+
+// JoinSpectator admits a member without taking an open seat. The cloud lobby uses this
+// for an explicit "watch" action; local LAN rooms keep the arrival-order behaviour of
+// Join.
+func (r *Room) JoinSpectator(id, nickname string) (Member, error) {
+	return r.join(id, nickname, false)
+}
+
+func (r *Room) join(id, nickname string, allowSeat bool) (Member, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -202,7 +213,7 @@ func (r *Room) Join(id, nickname string) (Member, error) {
 
 	// Lobby arrivals fill open seats. Mid-match arrivals always spectate, because
 	// dropping a new player into a live board would change the position being played.
-	if r.phase == PhaseLobby {
+	if allowSeat && r.phase == PhaseLobby {
 		// The host may have reserved a side at creation time. Honour it first, then fall
 		// back to "first free" for everyone else.
 		if m.IsHost && r.hostSeat >= 0 && r.hostSeat < SeatCount && r.seats[r.hostSeat] == "" {
@@ -224,6 +235,17 @@ func (r *Room) Join(id, nickname string) (Member, error) {
 // Leave removes a member. Leaving a seat vacates it, which is the only event that makes
 // a seat available to anyone else. If the host leaves, the room ends.
 func (r *Room) Leave(id string) error {
+	return r.leave(id, true)
+}
+
+// LeaveForCloud removes a member without making the room's creator the owner of the
+// room's lifetime. A cloud lobby outlives any one browser connection; ownership is
+// transferred explicitly by the room manager.
+func (r *Room) LeaveForCloud(id string) error {
+	return r.leave(id, false)
+}
+
+func (r *Room) leave(id string, endOnHost bool) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -239,10 +261,40 @@ func (r *Room) Leave(id string) error {
 			break
 		}
 	}
-	if id == r.hostID {
+	if endOnHost && id == r.hostID {
 		r.phase = PhaseFinished
 	}
 	return nil
+}
+
+// SetHostID transfers the presentation-level owner role. It does not transfer any
+// authority over the rules: the cloud service owns that for every room.
+func (r *Room) SetHostID(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.hostID = id
+	for memberID, member := range r.members {
+		member.IsHost = memberID == id
+	}
+}
+
+// SetConnected updates the presence flag shown in room snapshots. The member keeps
+// their seat while the cloud service waits for a reconnect.
+func (r *Room) SetConnected(id string, connected bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if member, ok := r.members[id]; ok {
+		member.Connected = connected
+	}
+}
+
+// SetNickname updates the transient display name for one room member.
+func (r *Room) SetNickname(id, nickname string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if member, ok := r.members[id]; ok {
+		member.Nickname = nickname
+	}
 }
 
 // vacateLocked clears a member's seat and abandons any match they were playing.

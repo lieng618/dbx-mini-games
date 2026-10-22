@@ -3,7 +3,7 @@ package app
 import (
 	"testing"
 
-	"github.com/southernMortals/dbx-board-games/backend/internal/game"
+	"github.com/lieng618/dbx-mini-games/backend/internal/game"
 )
 
 // TestSnapshotBuildersAgreeOnRoomFields guards a contract that is easy to break silently.

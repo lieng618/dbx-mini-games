@@ -1,261 +1,63 @@
-# 交接说明（给下一个会话）
+# 棋牌小馆开发交接
 
-写于 2026-10-19。上一轮会话因上下文过大（单轮输入达 469 万 token）被模型侧以
-`INVALID_REQUEST` 拒收，无法继续，故开新会话。读这份文件即可接手，不需要复述历史。
+## 身份
 
-## 一分钟了解
-
-一个 DBX 插件：局域网中国象棋 + 五子棋，含观战、复盘、练习模式、国风特效。
-
-- 源码：https://github.com/southernMortals/dbx-board-games
-- 目录：https://github.com/southernMortals/dbx-plugins
-- catalog（填进 DBX 插件中心）：
-  `https://raw.githubusercontent.com/southernMortals/dbx-plugins/main/catalog/index.json`
-
-本地工作区：`/Users/jzj/Documents/MyWorkspace/ai_study/dbxplugin/`
-（`dbx-board-games/` 源码仓，`dbx-plugins/` 目录仓）
-
-## 必读文件
-
-| 文件 | 作用 |
-| --- | --- |
-| `CONTEXT.md` | 领域词表：房间、座位、观战、复盘、练习模式等术语的精确含义 |
-| `docs/adr/` | 4 份架构决策：房主权威、座位不轮转、单包双游戏、目录分仓 |
-| `docs/PLAN.md` | 里程碑 M0–M5 |
-| `docs/VALIDATION.md` | **已经真实验证过什么、怎么验的、哪些还没验** |
-
-## 当前状态
-
-后端 110 项测试全绿。`dbx-plugin package` 可产出可安装 `.dbxp`，已签名并发布。
-
-代码结构：
-
-```
-backend/internal/game/       两个棋种规则引擎（纯逻辑，无网络无时钟）
-backend/internal/replay/     棋谱、回放游标、中文与坐标记谱
-backend/internal/room/       房间、座位、观战、对局生命周期、练习模式
-backend/internal/lan/        TLS 1.3 传输、Ed25519 握手、访客请求通道
-backend/internal/discovery/  mDNS 广播与解析
-backend/internal/app/        宿主 RPC 面、会话、时钟、场景夹具
-src/                         Vue 3 + PixiJS 8 前端
-  src/board/scene.js           场景：分层、快照 diff、特效调度
-  src/board/pieces.js          棋子层：持久化视图 + 移动补间（新增）
-  src/board/effects.js         六类特效 + pixi-filters 墨晕/压痕
-  src/board/sound.js           WebAudio 合成音效 + 触感（新增）
-  src/board/layout.js          棋盘几何
+```text
+GitHub publisher: lieng618
+Plugin ID:        io.github.lieng618.dbx-mini-games
+Workbench ID:     io.github.lieng618.dbx-mini-games.workbench
+Go module:        github.com/lieng618/dbx-mini-games/backend
 ```
 
-## 开发命令
+插件是纯前端 universal 包，不包含 DBX Sidecar。Go 服务单独部署，双方通过 WebSocket 通信。
 
-```bash
-cd backend && go test ./...                 # 后端全量测试
-npm run build                               # 构建 UI 到 ui/
-dbx-plugin dev --path . --port 5190 \
-  --data-dir /tmp/dbxbg-dev                 # 官方开发宿主（会同时起 Go 后端）
-dbx-plugin package .                        # 产出 dist/*.dbxp
+## 开发
+
+```powershell
+npm ci
+npm run build
+
+cd backend
+go test ./...
+go run . -addr 127.0.0.1:8787 -ui ..\ui
 ```
 
-注意：`dbx-plugin dev` 会持久化上次会话状态到 `--data-dir`。复测界面时用**全新
-`--data-dir`**，否则上一次的房间会恢复，界面不在初始页。
+开发页面：
 
-## 已完成且验证过
-
-- 象棋：走吃、将军、将死、困毙、将帅照面、自陷将军过滤、六十回合和棋、三次重复
-- 五子棋：自由规则、五连与长连胜、满盘和棋
-- 复盘：棋谱校验、游标翻步、中文记谱（炮八平五、前车/后车消歧）、坐标记谱、导出
-- 房间：先进先坐、8 人上限、手动离座才让位、对局中冻结、掉线判负、悔棋需双方同意
-- 局域网：TLS 1.3 自签 + 公钥固定 + Ed25519 挑战应答 + 重连票据
-- **访客操作通道**：访客可坐下、开局、落子，请求经房主仲裁（本轮刚补完并测试）
-- 六类特效：落子墨涟漪、提子墨尘、将军震屏、最后一步金边、连五连线与印章、低动效降级
-- 落子/吃子/将军/连五音效与触感反馈（WebAudio 合成，可关）
-- 练习模式：单人自由走子 + `dev.scenario` 特效预演（开局/吃子/将军/连五）
-
-## 待办（按价值排序）
-
-### 1. 「特效很一般」—— 已改两轮（2026-10-19）
-
-**第二轮的关键发现**：真实宿主里走子后连拍 5 帧像素完全相同——`drawPieces()` 每次把 32 枚棋子
-全销毁重建，全项目零补间。**棋子是瞬移的**，这是"观感平"的真正瓶颈，不是特效不够花。
-
-第二轮做了什么：
-
-- 新增 `src/board/pieces.js`（PieceLayer）：持久化棋子视图 + 快照 diff 识别 move/place/capture，
-  easeOutQuint + 正弦弧抬升；吃子改为击飞缩小。已在 iframe 内采样证明补间真实存在
-  （y: 568 → 504.8 → 490.7 → 489.3）
-- 新增 `scene.schedule()`：特效不再随快照到达就播，而是等棋子真正落地；吃子提前 60ms 与击飞重叠
-- `pixi-filters`（已验证在 CSP + 单文件 bundle 下可用）：将军字用 `GlowFilter` 做真湿边墨晕，
-  印章用 `DropShadowFilter` 做压痕；只按名导入两个 filter，gzip 共涨 ~4.5 kB
-- 印章位置从"正中压住决胜子"改为沿连线推开 0.78 格 + 边界夹取
-- 粒子缓存单位多边形 + scratch 复用，数量 34 → 52，bundle 只涨 0.14 kB
-
-**UI 也重做了**（按 premium-ui skill 的审查协议）：
-
-- 完整设计 token（色彩/圆角/阴影/动效/字体五套变量），双色板经 `check_ui.py contrast` 校验，
-  主文字 7.10:1、正文 14.29:1，全部过 AA；旧版 `#8a6a3c` 只有 4.11:1，是次要文字发灰的根因
-- 触控目标全部 ≥44px，加 `focus-visible` 焦点环，勾选框改自绘 + 隐藏 input
-- `reveal` 交错入场、`--ease-spring` 弹性曲线、按钮 hover 位移 + 双层阴影
-- `check_ui.py audit` → **0 项违规**
-
-### 1c. 时间控制 / 选边 / 座位形象 / 大手（已完成）
-
-**建房时可设**：对局限时（分钟，0=不限）、每步限时（秒，0=不限）、房主坐哪边（先手/后手/随便）。
-`room.create` 收 `minutes` / `moveSeconds` / `seat`；`Room.Options.HostSeat` 在房主入座时消费一次。
-
-**时钟**（`internal/app/support.go`）：`budget` + `perMove` 双重限时，任一到期即判负
-（`Room.Timeout(seat)`，理由 `timeout`）。前端不再本地递减，改为 500ms 轮询主机——
-单一数据源。之前有「本地递减 + 服务器校正」双写，两者打架，本地永远说最后一句话。
-
-**棋盘两侧座位形象**：席位条（SVG 人物剪影 + 名字 + 时钟）——**上下分列**，不是左右：
-后手在棋盘对面（上），先手在自己这边（下），跟真实棋桌的方向一致。走的哪边会微微抬起。
-
-**手影**：`src/board/hand.js`。**不画手，只画手的影子**——棋子直径约 40px，硬画一只矢量手
-会变成三像素宽的手指和一块贴上去的色块；影子天生是柔和的、属于纸面的，也更贴国风。
-
-- 影子从**走子方的座位那一侧**伸进来（下方座位从下往上，上方座位靠容器旋转 180°）
-- 手影画在 `underLayer`（棋盘表面之上、棋子之下），所以被搬的棋子始终清晰
-- 搬起棋子时影子会**放大并变淡**，这是物体离地时影子的真实反应
-- 形状由「基本图元」拼成（椭圆手掌 + 胶囊手指 + 圆角矩形手腕），再加 `BlurFilter` 柔化。
-  不用贝塞尔路径：之前那版画了手臂却静默丢了手掌和手指
-
-**落子冲击**：每次落子都打一圈小幅冲击波（amplitude 18）+ 一次极轻的提亮（peak 0.14），
-让安静的走子也有分量；吃子和将军用更大的量级。
-
-### 1b. 陪练（启发式对手）—— 已完成
-
-`backend/internal/ai`：象棋做两層材料搜索（一層会白送车，这是最招人烦的弱对手），
-五子棋走线型评分（活四 / 冲四 / 活三 / 眠三 / 活二），开局有轻微随机同分选择。
-
-- `room.ai.start` 开一局对陪练：玩家占自己已坐的座位，陪练坐另一个，仍然是练习局
-  （不记胜负、可随时重来）
-- `room.ai.move` 由**主机**算并落子，独立一次调用。两次走子合进一个快照会被 diff 判成
-  rebuild，两颗子会瞬移——这正是之前吃子特效消失的同一个坑
-- 陪练坐进来之后，练习盘不再是双面沙盒：`PracticeMove` 拒绝玩家替陪练走子
-- `EngineForThinking()` 返回引擎**克隆**，陪练永远拿不到活引擎
-- 棋风开关在 `internal/ai/ai.go` 顶部：象棋 `aggression`（进攻项权重，默认 14/10）、
-  五子棋 `gomokuAttack` / `gomokuDefence`（默认 13/8）。调高就更爱压上，调低就变保守
-- 换局/结束练习会清掉 `aiSeat`，否则大厅会一直显示陪练在位
-
-快照有三个构造器（`snapshot` / `snapshotForMember` / `snapshotLocked`），字段必须三处
-同步——`aiSeat` 一开始只加了两处，UI 只有在第一次动作后才看得到陪练。已有契约测试锁住。
-
-### 1a. 第一轮（同日前半段）
-
-六项都做了，在真实 `dbx-plugin dev` 宿主里逐项抓帧验过（见 `docs/VALIDATION.md`
-「特效改版后的验证方式」）。做了的事：
-
-- 落子涟漪改成真墨滴：不规则墨缘（抖动随干涸衰减）+ 致密核心 + 飞溅墨点，
-  墨迹颜色随落子方变化
-- 提子墨尘改成三类碎屑（墨块 / 拉长的墨丝 / 翻滚的墨屑）+ 冲击环，各自不同质量与
-  阻力，淡出曲线前段保持、后段陡降
-- 将军补上「书法大字炸开」：书法「将」字砸下、过冲到 1.22 再回弹、带墨晕与红墨飞溅；
-  位置按棋盘边界夹取（原来会掉到纸外）
-- 连五连线改成逐子生长的 tapered 墨线 + 笔尖光点；印章改成圆角方形墨块、纸色刻框、
-  纸色刻字（连五用「五」、象棋用「胜」）、缺墨斑点、轻微旋转与压痕偏移，并移到
-  `overlayLayer`（原来被棋子压住）
-- 新增 `src/board/sound.js`：WebAudio 合成的落子木击 / 吃子 / 将军磬声 / 胜利双音，
-  加 `navigator.vibrate` 触感；界面加「落子音效」开关（存 localStorage，不进协议）
-- 最后一手改成呼吸式金色光晕 + 双描边金环 + 渐细墨线拖尾
-- 顺带修了三个只有真跑才暴露的坑（`将`字越界、印章在棋子下、五子棋盘冒`将`字），
-  和本地预览四个场景跑同一条棋谱的问题
-
-还可以继续做（未做）：
-
-- 纸面质感目前是绘制时的固定散点；换成可平铺的噪声纹理会更耐看，但要先解决 CSP
-  下不加载外部资源的限制（可能得把噪声烘进 `assets/`）
-- 音效只做了合成音；如果要真录音，需要处理打包体积与 4 种棋子的音色差异
-
-### 2. 未验证项（`docs/VALIDATION.md` 里也列了）
-
-- 真实双机 mDNS 发现：集成测试走 loopback，广播已实现但未跨物理设备验证
-- Windows / Linux 目标：只构建测过 darwin-x64
-- 长时间对局的内存与特效泄漏
-
-### 3. 发布自动化
-
-`.github/workflows/plugin-release.yml` 被排除在 git 之外（`.gitignore`），因为推送
-需要 `workflow` scope，当前 token 没有。要恢复自动发版需先给 token 补该权限。
-
-## 已知坑（踩过，别重踩）
-
-1. **插件 ID 与仓库 ID 必须全小写**。manifest schema 强制；`southernMortals` 里的
-   大写 `M` 会被拒。当年写成 `io.github.southernMortals.*` 打包直接失败。
-2. **sidecar 里的插件 ID 必须与 manifest 完全一致**，否则 DBX 报
-   `Sidecar identity or protocol does not match manifest` 并拒绝启动。已有测试
-   `TestSidecarIdentityMatchesManifest` 守着。
-3. **DBX 的 CSP 只允许内联与 blob 脚本**。Vite 默认分包会让 Pixi 的动态 import 被
-   拦截。必须单文件 bundle（`inlineDynamicImports: true`）。
-4. **Pixi 会探测 eval**，沙箱禁止。必须 `import "pixi.js/unsafe-eval"`。
-5. **自建仓库的公钥要手动加入**，且 **Key ID 是签名用的 ID**（
-   `southernMortals-plugins.release`），不是仓库 ID（`southernmortals-plugins`）。
-   填错会报 `untrusted key`。本机信任库在
-   `~/Library/Application Support/com.dbx.app/plugins/.trust/keys.json`。
-6. **mDNS 会按网卡重复上报**，且代理软件（Clash）的 fake-ip 网段（198.18.0.0/15）
-   不可达。地址枚举已过滤，去重已按房间 ID 归并。
-7. **棋子必须持久化，不能每帧重建**。`drawPieces` 曾经 `clearPieces()` 后全量重建，
-   导致走子瞬移、任何落点特效都像后期贴上去的。现在由 `PieceLayer` 做快照 diff：
-   一个空格 + 一个填充 = move，一个填充无空格 = place，其余一律 rebuild。
-8. **特效要等棋子落地**。`scene.schedule()` 队列负责这件事；undo / 复盘跳转必须清队列，
-   否则会给已经不存在的走法喷墨。
-9. **`pixi-filters` 只按名导入**。`import { GlowFilter } from "pixi-filters"` 会把四十多个
-   filter 全打进单文件 bundle；用 `pixi-filters/glow` 这类子路径，gzip 只涨 2~2.5 kB。
-10. **验证脚本必须每次全新 `--data-dir`**。否则上次的房间会让「开桌」按钮消失，
-    `lowMotion` 也会被记住，抓到的全是降级形态。`scripts/verify-round.mjs` 已内置。
-11. **`go.work` 版本**：`dbx-plugin dev` 内部以 `go 1.22` 生成，依赖若要求更高
-   会构建失败。当前 `backend/go.mod` 保持 `go 1.22` 且依赖已固定到兼容版本。
-
-## 签名与发布
-
-密钥与工具**都放在持久位置**，不再依赖 `/tmp`（第一把私钥就是放在那里被系统清理、
-全盘无备份而丢失的，直接导致 0.2.0 换了签名身份）。
-
-| 东西 | 位置 | 说明 |
-| --- | --- | --- |
-| 私钥 | `./.dbx-repository-signing-key.env` | 在项目根，**已被 `.gitignore` 忽略**，`git status` 里看不到 |
-| 私钥备份 | `~/.dbx-signing/southernMortals-plugins.release-2.env` | 家目录，同样 600 |
-| packager | `~/.dbx-signing/bin/dbx-plugin-packager` | Rust 编译产物，1.3 MB |
-
-**当前密钥**：`southernMortals-plugins.release-2`
-**公钥**：`G8pxP5U/fwwR1j1ahwAOpEMHa/hb724qiNz0/wjU7EE=`
-
-已作废但**仍需信任**的旧密钥：`southernMortals-plugins.release`
-（`niyPPbiaadjs6VIRE6NU51gBBaNULahIKN+9eZQxsws=`，签过 0.1.0 / 0.1.1；私钥已丢失，不可复用该 ID 配新公钥）
-
-### 一条命令签名
-
-```bash
-scripts/sign.sh <版本号>          # 例：scripts/sign.sh 0.2.1
+```text
+http://127.0.0.1:8787
 ```
 
-脚本会自己找私钥和 packager，签名后打印 artifact 元数据与 sha256。找不到任一者时，
-它会直接打印**重建步骤**（packager 来自 `github.com/t8y2/dbx` 的 `plugins/sdk/packager`，
-稀疏克隆 + `cargo build --release`）。
+三客户端验收：
 
-完整发布步骤：
-
-```bash
-# 1. 升版本（两处必须一致，有测试守着）
-#    manifest.json 与 backend/main.go 的 const version
-npm run build && dbx-plugin package .
-scripts/sign.sh <版本>
-
-# 2. 目录仓
-cp dist/<id>-<ver>-darwin-x64.signed.dbxp ../dbx-plugins/releases/<ver>/<id>-<ver>-darwin-x64.dbxp
-cp dist/<id>-<ver>-darwin-x64.artifact.json ../dbx-plugins/releases/<ver>/
-# 更新 ../dbx-plugins/catalog/index.json：插入版本条目（artifacts 里的 signingKeyId
-# 要写对）、latestVersion；补 CHANGELOG
-git -C ../dbx-plugins commit -am "release: <ver> …" && git -C ../dbx-plugins push southernmortals main
-
-# 3. 源码仓打 tag
-git tag v<ver> && git push origin main v<ver>
+```powershell
+node scripts/cloud-smoke.mjs
 ```
 
-### 换新密钥时
+## 发布检查
 
-`dbx-plugin keygen <新ID> --output .dbx-repository-signing-key.env --force`，然后：
+所有公网入口配置都在：
 
-1. 新公钥写进 `../dbx-plugins/keys/<新ID>.pub`，并更新 `keys/README.md` 的表格
-2. catalog 里新版本的 `signingKeyId` 用新 ID，**老版本条目不要改**
-3. 本机信任库 `~/Library/Application Support/com.dbx.app/plugins/.trust/keys.json`
-   两把都留着，否则已装的老版本会验签失败
+```text
+config/game-server.env
+```
 
-**新私钥生成后立刻复制一份到 `~/.dbx-signing/`**，不要只留一份。
+替换 `PUBLIC_ORIGIN` 后直接打包：
+
+```powershell
+npm run package:dbx
+```
+
+构建脚本会从 `PUBLIC_ORIGIN` 和 `WEBSOCKET_PATH` 自动生成前端 WebSocket
+地址，并同步 `manifest.json` 的 `host.network` 权限。Caddy 读取同一文件；
+正式发布后检查生成的 Manifest 不再包含 `localhost`。
+
+入口地址会固化进前端产物和 Manifest，替换后必须重新打包并重新安装 `.dbxp`。
+
+## 数据边界
+
+- Go 服务只存内存状态；
+- 服务重启后房间消失；
+- 客户端不保存棋谱或回放数据；
+- 服务器不保存账号、昵称、棋谱或观战记录；
+- 音效保留并默认开启，插件内不提供音效开关。

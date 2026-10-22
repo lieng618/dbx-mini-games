@@ -1,21 +1,49 @@
 /**
  * App.vue — the workbench shell.
  *
- * Layout: a lobby rail on the left, the board in the centre, and a control bar beneath it
- * that becomes the replay scrubber once a match has ended.
+ * Layout: a full-window lobby and a focused board view once a room is entered.
  */
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { BoardScene } from "./board/scene.js";
 import { createBridge, whenReady } from "./bridge.js";
+import { clearLegacyRecords, loadSettings, saveSettings } from "./storage.js";
 
 const GAMES = [
   { id: "xiangqi", name: "中国象棋" },
   { id: "gomoku", name: "五子棋" },
 ];
+const TOTAL_TIME_OPTIONS = [
+  { value: 0, label: "不限" },
+  { value: 10, label: "10 分钟" },
+  { value: 20, label: "20 分钟" },
+  { value: 30, label: "30 分钟" },
+  { value: 60, label: "60 分钟" },
+];
+const MOVE_TIME_OPTIONS = [
+  { value: 0, label: "不限" },
+  { value: 15, label: "15 秒" },
+  { value: 30, label: "30 秒" },
+  { value: 60, label: "60 秒" },
+];
+const EFFECT_OPTIONS = [
+  { value: "full", label: "完整" },
+  { value: "reduced", label: "精简" },
+  { value: "off", label: "关闭" },
+];
+const THEME_OPTIONS = [
+  { value: "paper", label: "纸白" },
+  { value: "ink", label: "墨色" },
+];
+const BOARD_SIZE_OPTIONS = [
+  { value: "compact", label: "紧凑" },
+  { value: "standard", label: "标准" },
+  { value: "large", label: "大" },
+];
 
 const bridge = createBridge();
 const ready = ref(false);
+const settings = ref(loadSettings());
 const role = ref("idle");
 const roomId = ref(null);
 const roomName = ref("");
@@ -24,16 +52,23 @@ const phase = ref("lobby");
 const members = ref([]);
 const seats = ref(["", ""]);
 const selfId = ref("");
-const hostKey = ref("");
-const addresses = ref([]);
-const lowMotion = ref(false);
-// Sound is a local preference, not part of the host profile: it changes nothing the other
-// players see, so it does not belong in the wire protocol.
-const soundOn = ref(true);
+const lowMotion = ref(Boolean(settings.value.lowMotion));
+// Visual effect intensity is a local preference; it is not part of the cloud protocol.
+const effectsLevel = ref(settings.value.effectsLevel || "full");
+const boardSize = ref(settings.value.boardSize || "standard");
+const theme = ref(settings.value.theme || "paper");
 const lobbyRooms = ref([]);
+const lobbyOnline = ref(0);
 const scanning = ref(false);
 const error = ref("");
 const notice = ref("");
+const floatingMessage = ref(null);
+const serverConnected = ref(false);
+const serverUrl = ref(bridge.serverUrl || "");
+const lobbyTab = ref("rooms");
+const nickname = ref("");
+const joinPassword = ref("");
+const lobbyNow = ref(Date.now());
 
 const cells = ref([]);
 const lastMove = ref(null);
@@ -42,28 +77,28 @@ const checkFocus = ref(null);
 const result = ref(null);
 const winLine = ref([]);
 const clock = ref(null);
+let clockBase = null;
+let clockBaseAt = 0;
 // The practice partner's seat, or -1. Kept separate from `seats` because the partner is
 // not a member: it has a seat but no id, no nickname and no connection.
 const aiSeat = ref(-1);
 const aiThinking = ref(false);
-const record = ref(null);
-const notation = ref([]);
-const replayPly = ref(0);
-const replayTotal = ref(0);
-const replaying = ref(false);
+const moveCount = ref(0);
 
-const inputName = ref("我的棋室");
 const inputPassword = ref("");
+const passwordEnabled = ref(false);
+const showPassword = ref(false);
 // Time control chosen before the table exists. 0 means "no limit" for either field.
-const inputMinutes = ref(10);
+const inputMinutes = ref(0);
 const inputMoveSeconds = ref(0);
-// Which side the host wants. -1 keeps the old "first free seat" behaviour.
-const inputSeat = ref(-1);
-const inputAddress = ref("");
+const inputSeat = ref(0);
 
 const boardHost = ref(null);
 const canvasFailed = ref(false);
 let scene = null;
+let sceneInitPromise = null;
+let floatingTimer = null;
+let floatingSerial = 0;
 
 const mySeat = computed(() => seats.value.findIndex((id) => id && id === selfId.value));
 const isSeated = computed(() => mySeat.value >= 0);
@@ -73,20 +108,6 @@ const isMyTurn = computed(() => {
   const turn = cells.value.turnSeat;
   return isSeated.value && turn === mySeat.value;
 });
-/**
- * The complete invitation: address, room id and host public key.
- *
- * Joining needs all three. Discovery supplies the last two, so a room that mDNS cannot see
- * was previously impossible to join by hand — pasting the address alone always failed with
- * "a valid host key is required". One pasteable string fixes that.
- */
-const inviteLink = computed(() => {
-  if (role.value !== "host") return "";
-  const address = addresses.value[0];
-  if (!address || !roomId.value || !hostKey.value) return "";
-  return `${address}#${roomId.value}#${hostKey.value}`;
-});
-
 /** What to call whoever sits in a seat, including the partner, which is not a member. */
 function seatLabel(seat) {
   if (seat === aiSeat.value) return "陪练";
@@ -94,10 +115,16 @@ function seatLabel(seat) {
   return m ? m.nickname : "空座";
 }
 
+/** Place the viewer's own seat along the near edge, with the opponent across the board. */
+function isNearSeat(seat) {
+  return seat === (mySeat.value >= 0 ? mySeat.value : 0);
+}
+
 /** True when the seat is the one currently thinking. */
 function seatActive(seat) {
-  if (!clock.value) return false;
-  return clock.value.running === seat;
+  if (phase.value !== "playing" && phase.value !== "practice") return false;
+  if (clock.value?.running === seat) return true;
+  return (cells.value.turnSeat ?? -1) === seat;
 }
 
 /** How a seat is named on the board, which depends on the game. */
@@ -113,6 +140,56 @@ const seatMembers = computed(() =>
   seats.value.map((id) => members.value.find((m) => m.id === id) || null),
 );
 const spectators = computed(() => members.value.filter((m) => !seats.value.includes(m.id)));
+const phaseLabel = computed(() => {
+  if (phase.value === "playing") return "对局中";
+  if (phase.value === "practice") return "练习中";
+  if (phase.value === "finished") return "已结束";
+  return "等待开始";
+});
+const timeControlLabel = computed(() => {
+  const totalMinutes = Math.round(Number(clock.value?.budget || 0) / 60000);
+  const moveSeconds = Math.round(Number(clock.value?.perMove || 0) / 1000);
+  if (!totalMinutes && !moveSeconds) return "不限时";
+  if (!moveSeconds) return `${totalMinutes} 分钟`;
+  if (!totalMinutes) return `每步 ${moveSeconds} 秒`;
+  return `${totalMinutes} 分钟 · 每步 ${moveSeconds} 秒`;
+});
+const visibleLobbyRooms = computed(() => {
+  const phaseRank = { lobby: 0, playing: 1, finished: 2 };
+  return lobbyRooms.value
+    .slice()
+    .sort((left, right) => {
+      const phaseDifference = (phaseRank[left.phase] ?? 3) - (phaseRank[right.phase] ?? 3);
+      return phaseDifference || Number(right.createdAt || 0) - Number(left.createdAt || 0);
+    });
+});
+
+function gameLabel(gameId) {
+  return gameId === "xiangqi" ? "中国象棋" : "五子棋";
+}
+
+function roomStatusLabel(room) {
+  if (room.phase === "playing") return "进行中";
+  if (room.phase === "finished") return "已结束";
+  return "等待中";
+}
+
+function formatDuration(milliseconds) {
+  const totalSeconds = Math.max(0, Math.floor(Number(milliseconds || 0) / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours}时${String(minutes).padStart(2, "0")}分`;
+  return `${minutes}分${String(seconds).padStart(2, "0")}秒`;
+}
+
+function roomDurationLabel(room) {
+  const prefix = room.phase === "playing" ? "已进行" : room.phase === "finished" ? "本局" : "已等待";
+  let elapsed = room.elapsedMs;
+  if (room.phase === "playing" && room.startedAt) elapsed = lobbyNow.value - room.startedAt;
+  if (room.phase === "lobby" && room.createdAt) elapsed = lobbyNow.value - room.createdAt;
+  return `${prefix} ${formatDuration(elapsed)}`;
+}
 
 /** Applies any host snapshot to local state. */
 function applySnapshot(snapshot) {
@@ -123,16 +200,27 @@ function applySnapshot(snapshot) {
   if (snapshot.game) game.value = snapshot.game;
   if (snapshot.phase) phase.value = snapshot.phase;
   if (snapshot.selfId) selfId.value = snapshot.selfId;
-  if (snapshot.hostKey) hostKey.value = snapshot.hostKey;
-  if (snapshot.addresses) addresses.value = snapshot.addresses;
-  if (typeof snapshot.lowMotion === "boolean") lowMotion.value = snapshot.lowMotion;
+  if (snapshot.nickname) {
+    nickname.value = snapshot.nickname;
+  }
+  if (snapshot.role === "idle") {
+    role.value = "idle";
+    roomId.value = null;
+    roomName.value = "";
+    phase.value = "lobby";
+    members.value = [];
+    seats.value = ["", ""];
+    moveCount.value = 0;
+    return;
+  }
   if (Array.isArray(snapshot.members)) members.value = snapshot.members;
   if (Array.isArray(snapshot.seats)) seats.value = snapshot.seats;
-  if (snapshot.clock) clock.value = snapshot.clock;
-  if (snapshot.record) {
-    record.value = snapshot.record;
-    if (snapshot.record.moves) cells.value = { ...cells.value, moves: snapshot.record.moves };
+  if (snapshot.clock) {
+    clockBase = JSON.parse(JSON.stringify(snapshot.clock));
+    clockBaseAt = Date.now();
+    clock.value = JSON.parse(JSON.stringify(snapshot.clock));
   }
+  if (typeof snapshot.moveCount === "number") moveCount.value = snapshot.moveCount;
 
   if (snapshot.cells) {
     cells.value = {
@@ -142,11 +230,6 @@ function applySnapshot(snapshot) {
     };
   }
   if (snapshot.lastMove !== undefined) lastMove.value = snapshot.lastMove;
-  // `applySnapshot` folds every reply, not just room snapshots: replay.notation returns
-  // {notation}, profile.get returns a profile, and so on. So the transient effects state is
-  // only recomputed when the reply really is a whole room snapshot — otherwise a notation
-  // fetch right after 将军 would wipe the check it had just raised. Within a real snapshot
-  // absence does mean false, which is what clears a check the move has answered.
   const isRoomSnapshot = Array.isArray(snapshot.members) && typeof snapshot.phase === "string";
   if (isRoomSnapshot) {
     aiSeat.value = typeof snapshot.aiSeat === "number" ? snapshot.aiSeat : -1;
@@ -156,6 +239,9 @@ function applySnapshot(snapshot) {
     winLine.value = snapshot.winLine ?? [];
   }
   paint();
+  if (role.value !== "idle") {
+    void nextTick().then(() => ensureScene());
+  }
 }
 
 /** Pushes current state into the canvas scene. */
@@ -174,6 +260,17 @@ function paint() {
   });
 }
 
+function persistSettings() {
+  settings.value = {
+    ...settings.value,
+    lowMotion: lowMotion.value,
+    effectsLevel: effectsLevel.value,
+    boardSize: boardSize.value,
+    theme: theme.value,
+  };
+  saveSettings(settings.value);
+}
+
 /** Sends one host invocation and folds the reply into state. */
 /** Maps a sidecar error to something a player can act on. */
 function describeError(raw) {
@@ -188,6 +285,7 @@ function describeError(raw) {
     ["that seat does not exist", "没有这个座位"],
     ["a match is already in progress", "对局正在进行中，无法调整座位"],
     ["room is full", "房间人数已满（8 人）"],
+    ["spectating is only available while a match is in progress", "对局开始后才能观战"],
     ["not your turn", "还没轮到你走棋"],
     ["illegal move", "这一步不合规则"],
     ["only seated players may do that", "你在观战，坐下后才能操作"],
@@ -217,6 +315,29 @@ function describeError(raw) {
   return text || "操作失败";
 }
 
+function showFloatingMessage(text, tone = "info", duration = 3200) {
+  const message = String(text || "").trim();
+  if (!message) return;
+  floatingMessage.value = {
+    text: message,
+    tone,
+    serial: ++floatingSerial,
+  };
+  clearTimeout(floatingTimer);
+  floatingTimer = setTimeout(() => {
+    floatingMessage.value = null;
+    floatingTimer = null;
+  }, duration);
+}
+
+watch(error, (message) => {
+  if (message) showFloatingMessage(message, "error", 5200);
+});
+
+watch(notice, (message) => {
+  if (message) showFloatingMessage(message, "info", 3200);
+});
+
 async function call(method, params = {}) {
   error.value = "";
   try {
@@ -230,40 +351,36 @@ async function call(method, params = {}) {
 }
 
 async function createRoom() {
+  const roomName = `${nickname.value || "棋友"}的${game.value === "xiangqi" ? "象棋室" : "五子棋室"}`;
+  if (passwordEnabled.value && !inputPassword.value.trim()) {
+    error.value = "请输入房间密码，或切换为公开房间";
+    return;
+  }
   await call("room.create", {
-    name: inputName.value || "我的棋室",
+    name: roomName,
     game: game.value,
-    password: inputPassword.value,
+    password: passwordEnabled.value ? inputPassword.value : "",
     minutes: Number(inputMinutes.value) || 0,
     moveSeconds: Number(inputMoveSeconds.value) || 0,
     seat: Number(inputSeat.value),
   });
 }
 
-async function joinRoom(room) {
+async function joinRoom(room, joinRole = "player") {
   await call("room.join", {
-    address: room.address,
     roomId: room.roomId,
-    hostKey: room.hostKey,
-    password: inputPassword.value,
+    role: joinRole,
+    password: joinPassword.value,
   });
-}
-
-async function joinByAddress() {
-  if (!inputAddress.value) return;
-  const [address, roomIdPart, keyPart] = inputAddress.value.trim().split("#");
-  await call("room.join", {
-    address: address.trim(),
-    roomId: (roomIdPart || "").trim(),
-    hostKey: (keyPart || hostKey.value).trim(),
-  });
+  joinPassword.value = "";
 }
 
 async function scan() {
   scanning.value = true;
   try {
-    const reply = await call("lobby.scan", { windowMs: 1500 });
+    const reply = await call("lobby.list");
     if (reply && Array.isArray(reply.rooms)) lobbyRooms.value = reply.rooms;
+    if (reply && Number.isFinite(Number(reply.online))) lobbyOnline.value = Number(reply.online);
   } finally {
     scanning.value = false;
   }
@@ -344,23 +461,24 @@ async function leaveRoom() {
   result.value = null;
   members.value = [];
   seats.value = ["", ""];
+  lobbyTab.value = "rooms";
+  await scan();
 }
 
 async function toggleLowMotion() {
   lowMotion.value = !lowMotion.value;
-  await call("profile.save", { lowMotion: lowMotion.value });
+  persistSettings();
   paint();
 }
 
-/** Mutes or unmutes effect audio. Persisted in localStorage, never in the host profile. */
-function toggleSound() {
-  soundOn.value = !soundOn.value;
-  scene?.audio.setEnabled(soundOn.value);
-  try {
-    localStorage.setItem("dbxbg.sound", soundOn.value ? "on" : "off");
-  } catch {
-    // A blocked storage write only loses the preference across reloads.
+function updateEffectsLevel() {
+  if (effectsLevel.value === "off") {
+    lowMotion.value = true;
+  } else if (effectsLevel.value === "reduced") {
+    lowMotion.value = true;
   }
+  persistSettings();
+  paint();
 }
 
 /** Handles a click on a board intersection. */
@@ -387,8 +505,6 @@ async function onCell(index) {
     if (selected >= 0) {
       scene?.clearSelection();
       await call("game.move", { from: selected, to: index });
-      await loadNotation();
-      await partnerReply();
     }
     return;
   }
@@ -396,70 +512,6 @@ async function onCell(index) {
   // Gomoku: one click is one move.
   if (code) return;
   await call("game.move", { to: index });
-  await loadNotation();
-  await partnerReply();
-}
-
-async function loadNotation() {
-  const reply = await call("replay.notation");
-  if (reply && Array.isArray(reply.notation)) notation.value = reply.notation;
-  const rec = record.value;
-  replayTotal.value = rec?.moves?.length ?? notation.value.length;
-  replayPly.value = replayTotal.value;
-}
-
-/** Shows the board at a given ply. The sidecar rebuilds the position, so this is stateless. */
-async function seekPly(ply) {
-  const target = Math.max(0, Math.min(replayTotal.value, ply));
-  try {
-    const state = await bridge.invoke("replay.state", { ply: target });
-    if (!state) return;
-    replayPly.value = state.ply;
-    replaying.value = true;
-    scene?.clearEffects();
-    cells.value = { ...cells.value, board: state.cells, turnSeat: state.turnSeat };
-    lastMove.value = state.lastMove || null;
-    result.value = state.ply >= state.total ? state.result : null;
-    if (Array.isArray(state.notation)) notation.value = state.notation;
-    paint();
-  } catch (e) {
-    error.value = describeError(e?.message || e);
-  }
-}
-
-function replayFirst() { seekPly(0); }
-function replayPrev() { seekPly(replayPly.value - 1); }
-function replayNext() { seekPly(replayPly.value + 1); }
-function replayLast() { seekPly(replayTotal.value); }
-
-/** Leaves replay and returns to the live position. */
-async function exitReplay() {
-  replaying.value = false;
-  await call("room.snapshot");
-  paint();
-}
-
-/** Exports the recorded game as plain text: a header plus one ply per line. */
-function exportRecord() {
-  const rec = record.value;
-  if (!rec || !rec.moves) return;
-  const lines = [
-    `棋牌桌对局记录`,
-    `棋种: ${rec.game === "xiangqi" ? "中国象棋" : "五子棋"}`,
-    `手数: ${rec.moves.length}`,
-    rec.outcome ? `结果: ${outcomeText(rec.outcome)}${rec.reason ? `（${rec.reason}）` : ""}` : "结果: 未分胜负",
-    "",
-    ...(notation.value.length
-      ? notation.value.map((n, i) => `${String(i + 1).padStart(3, " ")}. ${n}`)
-      : rec.moves.map((m, i) => `${String(i + 1).padStart(3, " ")}. ${m.from} -> ${m.to}`)),
-  ];
-  const blob = new Blob([lines.join("\n")], { type: "text/plain;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `${rec.game}-${Date.now()}.txt`;
-  a.click();
-  URL.revokeObjectURL(url);
 }
 
 function formatClock(ms) {
@@ -467,6 +519,11 @@ function formatClock(ms) {
   const minutes = Math.floor(total / 60);
   const seconds = total % 60;
   return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+function totalClockLabel(ms) {
+  if (!clock.value || Number(clock.value.budget || 0) <= 0) return "不限";
+  return formatClock(ms);
 }
 
 function outcomeText(outcome) {
@@ -504,7 +561,7 @@ const mvp = computed(() => {
 
   const draw = res.outcome === 3;
   const winnerSeat = res.outcome === 1 ? 0 : res.outcome === 2 ? 1 : -1;
-  const moves = record.value?.moves?.length ?? 0;
+  const moves = moveCount.value;
 
   let title = MVP_TITLES[res.reason] || "本局最佳";
   if (!draw && moves > 0) {
@@ -519,7 +576,7 @@ const mvp = computed(() => {
       ? [["先手余时", 0], ["后手余时", 1]]
       : [["胜者余时", winnerSeat], ["对手余时", winnerSeat === 0 ? 1 : 0]];
     for (const [label, seat] of pairs) {
-      stats.push({ label, value: formatClock(remaining[seat] ?? 0) });
+      stats.push({ label, value: totalClockLabel(remaining[seat] ?? 0) });
     }
   }
 
@@ -562,25 +619,6 @@ function confettiStyle(n) {
   };
 }
 
-watch(phase, (next) => {
-  if (next === "finished" || next === "practice" || next === "playing") loadNotation();
-});
-
-// A move changes the record length, so keep the scrubber in step with the live board
-// unless the player is deliberately reviewing an earlier position.
-watch(
-  () => cells.value.board?.length,
-  () => {
-    if (replaying.value) return;
-    const moves = record.value?.moves?.length ?? 0;
-    if (moves > replayTotal.value) {
-      replayTotal.value = moves;
-      replayPly.value = moves;
-      if (!notation.value.length) loadNotation();
-    }
-  },
-);
-
 // ── Clock ───────────────────────────────────────────────────────────────────────────
 // The host owns the clock, so the display is refreshed from it rather than kept in step by
 // hand. An earlier version also decremented locally between snapshots; the two writers
@@ -594,8 +632,18 @@ let syncTimer = null;
 function startClockTimers() {
   if (syncTimer) return;
   syncTimer = setInterval(() => {
-    if (phase.value === "playing") call("room.snapshot");
-  }, 500);
+    lobbyNow.value = Date.now();
+    if (phase.value !== "playing" || !clockBase || clockBase.running < 0) return;
+    const elapsed = Date.now() - clockBaseAt;
+    const next = JSON.parse(JSON.stringify(clockBase));
+    if (next.budget > 0) {
+      next.remaining[next.running] = Math.max(0, next.remaining[next.running] - elapsed);
+    }
+    if (next.perMove > 0 && next.moveRemaining >= 0) {
+      next.moveRemaining = Math.max(0, next.moveRemaining - elapsed);
+    }
+    clock.value = next;
+  }, 1000);
 }
 
 function stopClockTimers() {
@@ -609,7 +657,17 @@ function stopClockTimers() {
 // poll and a guest never polls, so without a listener the table sits still until somebody
 // clicks something — which is exactly the "joined but the match never started" freeze.
 let stopEvents = null;
+let stopConnectionEvents = null;
 let refreshInFlight = false;
+let lobbyRefreshTimer = null;
+
+function scheduleLobbyRefresh() {
+  clearTimeout(lobbyRefreshTimer);
+  lobbyRefreshTimer = setTimeout(() => {
+    lobbyRefreshTimer = null;
+    void scan();
+  }, 350);
+}
 
 async function refreshFromEvent() {
   // A burst of pushes collapses into one read; the snapshot is authoritative either way.
@@ -626,73 +684,125 @@ function startEvents() {
   if (stopEvents) return;
   stopEvents = bridge.on((event) => {
     const method = event?.method;
-    // room.members: seat occupancy changed. room.state: the host pushed a new snapshot.
-    if (method !== "room.members" && method !== "room.state") return;
-    void refreshFromEvent();
+    if (method === "room.state" || method === "room.members") {
+      if (event?.params?.members && event?.params?.phase) {
+        applySnapshot(event.params);
+        return;
+      }
+      void refreshFromEvent();
+      return;
+    }
+    if (method === "lobby.updated") {
+      if (Array.isArray(event?.params?.rooms)) {
+        lobbyRooms.value = event.params.rooms;
+        if (Number.isFinite(Number(event.params.online))) {
+          lobbyOnline.value = Number(event.params.online);
+        }
+        lobbyNow.value = Date.now();
+      } else {
+        scheduleLobbyRefresh();
+      }
+    }
+  });
+  stopConnectionEvents = bridge.onConnection?.((state) => {
+    serverConnected.value = Boolean(state?.connected);
+    if (state?.serverUrl) serverUrl.value = state.serverUrl;
+    if (state?.connected) {
+      void scan();
+      void call("room.snapshot");
+    }
   });
 }
 
 function stopEventListening() {
   if (typeof stopEvents === "function") stopEvents();
   stopEvents = null;
+  if (typeof stopConnectionEvents === "function") stopConnectionEvents();
+  stopConnectionEvents = null;
+  clearTimeout(lobbyRefreshTimer);
+  lobbyRefreshTimer = null;
+}
+
+async function ensureScene() {
+  if (scene) return scene;
+  if (sceneInitPromise) return sceneInitPromise;
+  sceneInitPromise = (async () => {
+    await nextTick();
+    if (!boardHost.value || scene) return scene;
+    try {
+      const created = new BoardScene({ onCell });
+      await created.init(boardHost.value, game.value);
+      created.setFlipped(mySeat.value === 1);
+      scene = created;
+      canvasFailed.value = false;
+      if (typeof window !== "undefined" && window.__DBX_DEBUG_FX) {
+        window.__boardScene = scene;
+        window.__dbxClock = () => JSON.parse(JSON.stringify(clock.value));
+      }
+      paint();
+    } catch (sceneError) {
+      canvasFailed.value = true;
+      console.warn("board renderer unavailable", sceneError);
+    } finally {
+      sceneInitPromise = null;
+    }
+    return scene;
+  })();
+  return sceneInitPromise;
 }
 
 onMounted(async () => {
   await whenReady();
   ready.value = true;
 
-  if (boardHost.value) {
-    try {
-      scene = new BoardScene({ onCell });
-      await scene.init(boardHost.value, game.value);
-      // Seat two looks at the board from the far side of the table, so the pieces they
-      // command sit along the near edge the way a real board faces each player.
-      scene.setFlipped(mySeat.value === 1);
-      // A debug handle for the verification scripts: sampling piece positions needs to see
-      // the running scene, and a screenshot is too slow to resolve a 200 ms tween. Gated on
-      // an explicit flag so a normal session keeps its scope clean.
-      if (typeof window !== "undefined" && window.__DBX_DEBUG_FX) {
-        window.__boardScene = scene;
-        // Also expose the clock so a verification script can compare the store with what
-        // the seat panels actually paint; they disagreed once and the DOM was the liar.
-        window.__dbxClock = () => JSON.parse(JSON.stringify(clock.value));
-      }
-    } catch (e) {
-      // A failed renderer must degrade to the text grid rather than a blank workbench.
-      canvasFailed.value = true;
-      console.warn("board renderer unavailable", e);
-    }
-  }
-
-  try {
-    const stored = localStorage.getItem("dbxbg.sound");
-    if (stored === "off") soundOn.value = false;
-  } catch {
-    // Storage is unavailable in some sandboxed frames; keep the default.
-  }
-  scene?.audio.setEnabled(soundOn.value);
+  await ensureScene();
 
   startClockTimers();
   startEvents();
 
-  const snapshot = await call("room.snapshot");
-  if (snapshot) applySnapshot(snapshot);
-  const profile = await call("profile.get");
-  if (profile && typeof profile.lowMotion === "boolean") lowMotion.value = profile.lowMotion;
+  await clearLegacyRecords();
+  try {
+    await call("lobby.subscribe");
+    await scan();
+    const profile = await call("profile.get");
+    if (profile?.nickname) {
+      nickname.value = profile.nickname;
+    }
+    const snapshot = await call("room.snapshot");
+    if (snapshot) applySnapshot(snapshot);
+  } catch (connectionError) {
+    error.value = describeError(connectionError?.message || connectionError);
+  }
 });
 
 onBeforeUnmount(() => {
   if (mvpTimer) clearTimeout(mvpTimer);
   mvpTimer = null;
+  clearTimeout(floatingTimer);
+  floatingTimer = null;
   stopEventListening();
   stopClockTimers();
   scene?.destroy();
   scene = null;
 });
 
-watch(game, (next) => {
-  scene?.setGame(next);
+watch(role, async (next) => {
+  if (next !== "idle") await ensureScene();
 });
+
+watch(game, (next) => {
+  if (scene) scene.setGame(next);
+  else void ensureScene();
+});
+
+watch(
+  theme,
+  (next) => {
+    document.documentElement.dataset.theme = next;
+    persistSettings();
+  },
+  { immediate: true },
+);
 
 // Seating can settle after the board is already mounted: a guest joins, a seat is released,
 // or a spectator sits down. Re-orient whenever the viewer's own side changes.
@@ -702,138 +812,47 @@ watch(mySeat, (seat) => {
 </script>
 
 <template>
-  <div class="workbench">
-    <aside class="rail">
+  <div class="workbench" :class="{ 'lobby-mode': role === 'idle' }" :data-board-size="boardSize">
+    <aside v-show="role !== 'idle'" class="rail">
       <header class="rail-head">
-        <div class="brand">棋牌桌</div>
-        <p class="brand-sub">局域网 · 中国象棋 / 五子棋</p>
+        <div class="brand">棋牌小馆</div>
+        <p class="brand-sub">云端棋室</p>
       </header>
 
-      <section v-if="role === 'idle'" class="panel">
-        <h2>开一桌</h2>
-        <label class="field">
-          <span>房间名</span>
-          <input v-model="inputName" type="text" placeholder="我的棋室" />
-        </label>
-        <label class="field">
-          <span>棋种</span>
-          <select v-model="game">
-            <option v-for="g in GAMES" :key="g.id" :value="g.id">{{ g.name }}</option>
-          </select>
-        </label>
-        <label class="field">
-          <span>密码（可留空）</span>
-          <input v-model="inputPassword" type="password" placeholder="不设密码" />
-        </label>
-
-        <!-- Time control and side are chosen before the table exists, because both are
-             fixed for the whole match and a guest has to be able to see them on the way in. -->
-        <div class="field">
-          <span>对局限时（分钟，0 为不限）</span>
-          <input v-model.number="inputMinutes" type="number" min="0" max="180" step="1" />
-        </div>
-        <div class="field">
-          <span>每步限时（秒，0 为不限）</span>
-          <input v-model.number="inputMoveSeconds" type="number" min="0" max="600" step="5" />
-        </div>
-        <div class="field">
-          <span>我坐哪边</span>
-          <div class="side-pick">
-            <button
-              type="button"
-              class="pick"
-              :class="{ on: inputSeat === 0 }"
-              @click="inputSeat = 0"
-            >
-              {{ sideName(0) }}
-            </button>
-            <button
-              type="button"
-              class="pick"
-              :class="{ on: inputSeat === 1 }"
-              @click="inputSeat = 1"
-            >
-              {{ sideName(1) }}
-            </button>
-            <button
-              type="button"
-              class="pick"
-              :class="{ on: inputSeat === -1 }"
-              @click="inputSeat = -1"
-            >
-              随便
-            </button>
+      <section class="panel">
+        <div class="room-summary">
+          <div class="room-summary-meta">
+            <span class="room-overline">棋室</span>
+            <span class="room-phase" :class="`phase-${phase}`">{{ phaseLabel }}</span>
           </div>
+          <h2>{{ roomName }}</h2>
+          <p class="room-meta">
+            {{ gameLabel(game) }} ·
+            {{ role === "host" ? "房主" : isSeated ? "棋手" : "观战" }}
+          </p>
         </div>
 
-        <button class="primary" @click="createRoom">开桌</button>
-
-        <hr />
-
-        <h2>加入一桌</h2>
-        <button class="ghost" :disabled="scanning" @click="scan">
-          {{ scanning ? "正在搜索…" : "搜索局域网房间" }}
-        </button>
-        <ul v-if="lobbyRooms.length" class="room-list">
-          <li v-for="r in lobbyRooms" :key="r.roomId + r.address">
-            <div class="room-main">
-              <strong>{{ r.name }}</strong>
-              <small>{{ r.game === "xiangqi" ? "中国象棋" : "五子棋" }} · {{ r.players }} 人 · {{ r.address }}</small>
-            </div>
-            <button class="ghost small" :disabled="r.locked && !inputPassword" @click="joinRoom(r)">
-              {{ r.locked ? "密码加入" : "加入" }}
-            </button>
-          </li>
-        </ul>
-        <p v-else class="hint">没搜到房间。可以让对方把地址发给你，直接填在下面。</p>
-
-        <label class="field">
-          <span>手动地址</span>
-          <input v-model="inputAddress" type="text" placeholder="192.168.1.10:51234#房间id" />
-        </label>
-        <button class="ghost" @click="joinByAddress">按地址加入</button>
-      </section>
-
-      <section v-else class="panel">
-        <h2>{{ roomName }}</h2>
-        <p class="hint">
-          {{ game === "xiangqi" ? "中国象棋" : "五子棋" }} ·
-          {{ role === "host" ? "你是房主" : "你是访客" }} ·
-          {{ phase === "playing" ? "对局中" : phase === "practice" ? "练习中" : phase === "finished" ? "已结束" : "等待开始" }}
-        </p>
-
-        <div class="seat-row">
-          <div
-            v-for="(m, i) in seatMembers"
-            :key="i"
-            class="seat"
-            :class="{ empty: !m && i !== aiSeat, partner: i === aiSeat }"
-          >
-            <span class="seat-tag">{{ i === 0 ? "先手" : "后手" }}</span>
-            <!-- The partner holds a seat without being a member, so it has no nickname. -->
-            <span class="seat-name">{{ i === aiSeat ? "陪练" : m ? m.nickname : "空座" }}</span>
+        <dl class="room-details">
+          <div>
+            <dt>我的位置</dt>
+            <dd>{{ isSeated ? sideName(mySeat) : "观战席" }}</dd>
           </div>
-        </div>
+          <div>
+            <dt>用时规则</dt>
+            <dd>{{ timeControlLabel }}</dd>
+          </div>
+        </dl>
 
         <div v-if="spectators.length" class="spectators">
-          <span class="hint">观战 {{ spectators.length }} 人：</span>
-          <span v-for="s in spectators" :key="s.id" class="chip">{{ s.nickname }}</span>
-        </div>
-
-        <div v-if="clock" class="clock">
-          <!-- The two clocks sit under the two seats, so repeating 先手/后手 here would be
-               the third time the same word appears on screen. -->
-          <div class="clock-side" :class="{ running: clock.running === 0 }">
-            {{ formatClock(clock.remaining[0]) }}
-          </div>
-          <div class="clock-side" :class="{ running: clock.running === 1 }">
-            {{ formatClock(clock.remaining[1]) }}
+          <span class="spectator-label">观战 {{ spectators.length }} 人</span>
+          <div class="spectator-names">
+            <span v-for="s in spectators" :key="s.id" class="chip">{{ s.nickname }}</span>
           </div>
         </div>
 
         <!-- The per-move limit only exists when the host set one. -->
         <div
-          v-if="clock && clock.perMove > 0 && clock.moveRemaining >= 0"
+          v-if="clock && clock.perMove > 0 && clock.moveRemaining >= 0 && (phase === 'playing' || phase === 'practice')"
           class="move-clock"
           :class="{ urgent: clock.moveRemaining <= 10000 }"
         >
@@ -845,70 +864,393 @@ watch(mySeat, (seat) => {
           <button v-if="phase === 'lobby' && role === 'host'" class="primary" @click="startMatch">
             开始对局
           </button>
-          <button
-            v-if="phase === 'lobby' && role === 'host'"
-            class="primary"
-            title="和启发式陪练下一局：不记胜负，可以随时重来"
-            @click="startPartner"
-          >
-            和陪练下
-          </button>
-          <button
-            v-if="phase === 'lobby' && role === 'host'"
-            class="ghost"
-            title="一个人先摆一摆：不计胜负，只用于看盘面和特效"
-            @click="startPractice"
-          >
-            先摆一摆
-          </button>
-          <button v-if="phase === 'practice'" class="ghost" @click="endPractice">结束练习</button>
-          <button v-if="phase === 'playing'" class="ghost" @click="resign">认输</button>
-          <button v-if="phase === 'finished'" class="primary" @click="rematch">再来一局</button>
+          <button v-if="phase === 'playing' && isSeated" class="ghost" @click="resign">认输</button>
+          <button v-if="phase === 'finished' && role === 'host'" class="primary" @click="rematch">再来一局</button>
           <button class="ghost" @click="leaveRoom">{{ role === "host" ? "结束房间" : "离开" }}</button>
         </div>
 
-        <div v-if="phase === 'practice'" class="scenarios">
-          <span class="hint">特效预演</span>
-          <div class="scenario-row">
-            <button class="ghost tiny" @click="runScenario('opening')">开局</button>
-            <button v-if="game === 'xiangqi'" class="ghost tiny" @click="runScenario('capture')">吃子</button>
-            <button v-if="game === 'xiangqi'" class="ghost tiny" @click="runScenario('check')">将军</button>
-            <button v-if="game === 'gomoku'" class="ghost tiny" @click="runScenario('win')">连五</button>
-          </div>
-        </div>
-
-        <label class="toggle">
-          <input type="checkbox" :checked="lowMotion" @change="toggleLowMotion" />
-          <span class="box" aria-hidden="true"></span>
-          <span>低动效模式</span>
-        </label>
-
-        <label class="toggle">
-          <input type="checkbox" :checked="soundOn" @change="toggleSound" />
-          <span class="box" aria-hidden="true"></span>
-          <span>落子音效</span>
-        </label>
-
-        <div v-if="role === 'host' && addresses.length" class="address">
-          <span class="hint">让朋友用这个地址加入：</span>
-          <!-- The first entry is ranked by reachability, so a machine on both WiFi and a
-               corporate VPN does not hand out the address nobody can dial. -->
-          <code v-for="(a, i) in addresses" :key="a">
-            {{ a }}<span v-if="i === 0" class="addr-tag">推荐</span>
-          </code>
-          <span v-if="inviteLink" class="hint">
-            网络里搜不到时，把这一整串发给朋友，粘到「手动地址」里：
-          </span>
-          <code v-if="inviteLink" class="invite">{{ inviteLink }}</code>
-        </div>
       </section>
 
-      <p v-if="error" class="error">{{ error }}</p>
-      <p v-if="notice" class="hint">{{ notice }}</p>
-      <p v-if="!bridge.live" class="hint">本地预览模式：未连接 DBX 宿主，部分操作不可用。</p>
     </aside>
 
-    <main class="stage">
+    <main class="stage" :class="{ 'lobby-stage': role === 'idle' }">
+      <section v-if="role === 'idle'" class="lobby-screen">
+        <div class="lobby-atmosphere" aria-hidden="true">
+          <i v-for="n in 9" :key="n" :class="`mote mote-${n}`"></i>
+        </div>
+
+        <header class="lobby-topbar">
+          <div class="lobby-brand">
+            <span class="lobby-mark" aria-hidden="true">
+              <svg viewBox="0 0 32 32">
+                <path d="M8 7h16v18H8zM8 13h16M8 19h16M14 7v18M18 7v18" />
+                <circle cx="16" cy="16" r="4.5" />
+              </svg>
+            </span>
+            <div>
+              <h1>棋牌小馆</h1>
+              <p class="lobby-brand-note">实时棋局</p>
+            </div>
+          </div>
+
+          <div class="lobby-account">
+            <span class="guest-name">{{ nickname || "随机昵称生成中" }}</span>
+            <span class="connection-state" :class="{ online: serverConnected }">
+              <i aria-hidden="true"></i>
+              {{ serverConnected ? "在线" : "连接中" }}
+            </span>
+            <span
+              v-if="serverConnected"
+              class="lobby-population"
+              role="status"
+              aria-live="polite"
+              :aria-label="`当前大厅 ${lobbyOnline} 人`"
+              title="当前大厅在线人数"
+            >
+              <svg aria-hidden="true" viewBox="0 0 24 24">
+                <circle cx="9" cy="8" r="3" />
+                <path d="M3.5 19c.5-4 2.4-6 5.5-6s5 2 5.5 6M16 6.5a3 3 0 0 1 0 5.8M17 13c2.2.4 3.4 2.3 3.5 5" />
+              </svg>
+              <span class="lobby-population-label">大厅</span>
+              <strong>{{ lobbyOnline }}</strong>
+              <span class="lobby-population-unit">人</span>
+            </span>
+            <button
+              type="button"
+              class="lobby-settings-button"
+              :class="{ active: lobbyTab === 'settings' }"
+              :aria-label="lobbyTab === 'settings' ? '返回房间列表' : '设置'"
+              :title="lobbyTab === 'settings' ? '返回房间列表' : '设置'"
+              @click="lobbyTab = lobbyTab === 'settings' ? 'rooms' : 'settings'"
+            >
+              <svg aria-hidden="true" viewBox="0 0 24 24">
+                <path d="M4 7h9M17 7h3M4 17h3M11 17h9M4 12h4M12 12h8" />
+                <circle cx="15" cy="7" r="2" />
+                <circle cx="9" cy="17" r="2" />
+                <circle cx="10" cy="12" r="2" />
+              </svg>
+            </button>
+          </div>
+        </header>
+
+        <main class="lobby-main">
+        <section v-show="lobbyTab === 'rooms'" class="lobby-view">
+          <label v-if="visibleLobbyRooms.some((room) => room.locked)" class="lobby-password">
+            <span>房间密码</span>
+            <input v-model="joinPassword" type="password" placeholder="输入密码后加入" />
+          </label>
+
+          <div v-if="visibleLobbyRooms.length" class="lobby-room-grid">
+            <article
+              v-for="roomItem in visibleLobbyRooms"
+              :key="roomItem.roomId"
+              class="lobby-room-card"
+              :class="`status-${roomItem.phase}`"
+              :data-game="roomItem.game"
+            >
+              <div class="lobby-room-top">
+                <span class="game-mark">
+                  <span class="game-seal" aria-hidden="true">
+                    <svg v-if="roomItem.game === 'xiangqi'" viewBox="0 0 24 24">
+                      <circle cx="12" cy="12" r="8" />
+                      <path d="M8.5 10h7M8.5 14h7M12 7.5v9" />
+                    </svg>
+                    <svg v-else viewBox="0 0 24 24">
+                      <circle cx="6" cy="6" r="2" />
+                      <circle cx="12" cy="9" r="2" />
+                      <circle cx="18" cy="12" r="2" />
+                      <circle cx="9" cy="15" r="2" />
+                      <circle cx="15" cy="18" r="2" />
+                    </svg>
+                  </span>
+                  {{ gameLabel(roomItem.game) }}
+                </span>
+                <span class="room-badges">
+                  <span v-if="roomItem.locked" class="lock-badge" title="需要密码">
+                    <svg aria-hidden="true" viewBox="0 0 16 16">
+                      <rect x="3.5" y="7" width="9" height="6" rx="1.5" />
+                      <path d="M5.5 7V5.5a2.5 2.5 0 0 1 5 0V7" />
+                    </svg>
+                    私房
+                  </span>
+                  <span class="room-state">{{ roomStatusLabel(roomItem) }}</span>
+                </span>
+              </div>
+              <h3>{{ roomItem.name }}</h3>
+              <div class="room-stats">
+                <span><b>{{ roomItem.players }}/{{ roomItem.capacity }}</b> 玩家</span>
+                <span v-if="roomItem.phase === 'playing'"><b>{{ roomItem.spectators }}</b> 观战</span>
+                <span>{{ roomDurationLabel(roomItem) }}</span>
+              </div>
+              <div class="room-actions" :class="{ 'single-action': roomItem.phase !== 'playing' }">
+                <button
+                  class="primary"
+                  :disabled="roomItem.players >= roomItem.capacity || roomItem.phase === 'finished'"
+                  @click="joinRoom(roomItem, 'player')"
+                >
+                  {{ roomItem.phase === "finished" ? "已结束" : roomItem.players >= roomItem.capacity ? "满桌" : "加入" }}
+                </button>
+                <button
+                  v-if="roomItem.phase === 'playing'"
+                  class="ghost"
+                  :disabled="roomItem.spectators >= roomItem.spectatorCap"
+                  @click="joinRoom(roomItem, 'spectator')"
+                >
+                  观战
+                </button>
+              </div>
+            </article>
+            <article class="lobby-create-card">
+              <div class="create-card-top">
+                <span class="create-card-mark" aria-hidden="true">
+                  <svg viewBox="0 0 24 24">
+                    <path d="M12 5v14M5 12h14" />
+                  </svg>
+                </span>
+                <strong>另开一席</strong>
+              </div>
+              <button type="button" class="primary lobby-create-action" @click="lobbyTab = 'create'">
+                创建房间
+              </button>
+            </article>
+          </div>
+          <div v-else class="lobby-empty">
+            <svg class="empty-board-art" aria-hidden="true" viewBox="0 0 440 320">
+              <rect x="38" y="24" width="364" height="272" rx="10" />
+              <path d="M56 62h328M56 100h328M56 138h328M56 176h328M56 214h328M56 252h328" />
+              <path d="M74 42v236M112 42v236M150 42v236M188 42v236M226 42v236M264 42v236M302 42v236M340 42v236M378 42v236" />
+              <circle class="stone red" cx="150" cy="138" r="12" />
+              <circle class="stone dark" cx="226" cy="100" r="12" />
+              <circle class="stone red" cx="264" cy="214" r="12" />
+              <circle class="stone dark" cx="302" cy="176" r="12" />
+            </svg>
+            <div class="empty-copy">
+              <span class="lobby-kicker">{{ scanning ? "正在读取" : "棋席虚设" }}</span>
+              <p>这里还没有开桌。选好棋种与时限，先把这一席留给朋友。</p>
+              <button class="primary" @click="lobbyTab = 'create'">创建房间</button>
+            </div>
+          </div>
+        </section>
+
+        <section v-show="lobbyTab === 'create'" class="lobby-view lobby-form-card">
+          <header class="lobby-form-heading">
+            <button
+              type="button"
+              class="lobby-form-back"
+              aria-label="返回房间列表"
+              title="返回房间列表"
+              @click="lobbyTab = 'rooms'"
+            >
+              <svg aria-hidden="true" viewBox="0 0 24 24">
+                <path d="M19 12H5m6-6-6 6 6 6" />
+              </svg>
+            </button>
+            <span class="lobby-kicker">新开一席</span>
+            <h2>创建房间</h2>
+            <p>定下棋种、执方和用时时长，邀请朋友入座。</p>
+          </header>
+          <div class="lobby-form-grid">
+            <div class="field">
+              <span>玩法</span>
+              <div class="side-pick game-pick">
+                <button
+                  v-for="item in GAMES"
+                  :key="item.id"
+                  type="button"
+                  class="time-option"
+                  :class="{ on: game === item.id }"
+                  @click="game = item.id"
+                >
+                  <span>{{ item.name }}</span>
+                  <svg v-if="game === item.id" class="choice-check" aria-hidden="true" viewBox="0 0 20 20">
+                    <path d="m5 10.5 3.2 3.2L15 6.8" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+            <div class="field">
+              <span>执方</span>
+              <div class="side-pick">
+                <button type="button" class="time-option" :class="{ on: inputSeat === 0 }" @click="inputSeat = 0">
+                  <span>{{ sideName(0) }}</span>
+                  <svg v-if="inputSeat === 0" class="choice-check" aria-hidden="true" viewBox="0 0 20 20">
+                    <path d="m5 10.5 3.2 3.2L15 6.8" />
+                  </svg>
+                </button>
+                <button type="button" class="time-option" :class="{ on: inputSeat === 1 }" @click="inputSeat = 1">
+                  <span>{{ sideName(1) }}</span>
+                  <svg v-if="inputSeat === 1" class="choice-check" aria-hidden="true" viewBox="0 0 20 20">
+                    <path d="m5 10.5 3.2 3.2L15 6.8" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+            <div class="field">
+              <span>访问方式</span>
+              <div class="password-row" :class="{ enabled: passwordEnabled }">
+                <div class="password-options">
+                  <button
+                    type="button"
+                    class="time-option"
+                    :class="{ on: !passwordEnabled }"
+                    :aria-pressed="!passwordEnabled"
+                    @click="passwordEnabled = false"
+                  >
+                    公开房间
+                    <svg v-if="!passwordEnabled" aria-hidden="true" viewBox="0 0 20 20">
+                      <path d="m5 10.5 3.2 3.2L15 6.8" />
+                    </svg>
+                  </button>
+                  <button
+                    type="button"
+                    class="time-option"
+                    :class="{ on: passwordEnabled }"
+                    :aria-pressed="passwordEnabled"
+                    @click="passwordEnabled = true"
+                  >
+                    密码房
+                    <svg v-if="passwordEnabled" aria-hidden="true" viewBox="0 0 20 20">
+                      <path d="m5 10.5 3.2 3.2L15 6.8" />
+                    </svg>
+                  </button>
+                </div>
+
+                <div v-if="passwordEnabled" class="password-control">
+                  <input
+                    v-model="inputPassword"
+                    :type="showPassword ? 'text' : 'password'"
+                    maxlength="32"
+                    autocomplete="new-password"
+                    placeholder="输入房间密码"
+                  />
+                  <button
+                    type="button"
+                    class="password-reveal"
+                    :aria-label="showPassword ? '隐藏密码' : '显示密码'"
+                    @click="showPassword = !showPassword"
+                  >
+                    <svg aria-hidden="true" viewBox="0 0 20 20">
+                      <path d="M2.5 10s2.8-4.5 7.5-4.5 7.5 4.5 7.5 4.5-2.8 4.5-7.5 4.5S2.5 10 2.5 10z" />
+                      <circle cx="10" cy="10" r="2.2" />
+                      <path v-if="!showPassword" d="m4 4 12 12" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+            </div>
+            <div class="field">
+              <span>总时间</span>
+              <div class="time-options">
+                <button
+                  v-for="option in TOTAL_TIME_OPTIONS"
+                  :key="option.value"
+                  type="button"
+                  class="time-option"
+                  :class="{ on: inputMinutes === option.value }"
+                  @click="inputMinutes = option.value"
+                >
+                  {{ option.label }}
+                  <svg v-if="inputMinutes === option.value" class="choice-check" aria-hidden="true" viewBox="0 0 20 20">
+                    <path d="m5 10.5 3.2 3.2L15 6.8" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+            <div class="field">
+              <span>每步限时</span>
+              <div class="time-options">
+                <button
+                  v-for="option in MOVE_TIME_OPTIONS"
+                  :key="option.value"
+                  type="button"
+                  class="time-option"
+                  :class="{ on: inputMoveSeconds === option.value }"
+                  @click="inputMoveSeconds = option.value"
+                >
+                  {{ option.label }}
+                  <svg v-if="inputMoveSeconds === option.value" class="choice-check" aria-hidden="true" viewBox="0 0 20 20">
+                    <path d="m5 10.5 3.2 3.2L15 6.8" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+          </div>
+          <button class="primary lobby-create" @click="createRoom">创建并进入</button>
+        </section>
+
+        <section v-show="lobbyTab === 'settings'" class="lobby-view lobby-settings">
+          <div class="settings-head">
+            <h2>设置</h2>
+            <span>仅本机保存</span>
+          </div>
+          <div class="settings-grid">
+            <label class="setting-row">
+              <span><strong>低动效</strong></span>
+              <input :checked="lowMotion" type="checkbox" @change="toggleLowMotion" />
+            </label>
+            <div class="setting-row setting-choice-row">
+              <span><strong>特效</strong></span>
+              <div class="time-options">
+                <button
+                  v-for="option in EFFECT_OPTIONS"
+                  :key="option.value"
+                  type="button"
+                  class="time-option"
+                  :class="{ on: effectsLevel === option.value }"
+                  @click="effectsLevel = option.value; updateEffectsLevel()"
+                >
+                  {{ option.label }}
+                  <svg v-if="effectsLevel === option.value" class="choice-check" aria-hidden="true" viewBox="0 0 20 20">
+                    <path d="m5 10.5 3.2 3.2L15 6.8" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+            <div class="setting-row setting-choice-row">
+              <span>
+                <strong>棋盘大小</strong>
+                <small>对局中的棋盘显示尺寸</small>
+              </span>
+              <div class="time-options">
+                <button
+                  v-for="option in BOARD_SIZE_OPTIONS"
+                  :key="option.value"
+                  type="button"
+                  class="time-option"
+                  :class="{ on: boardSize === option.value }"
+                  @click="boardSize = option.value; persistSettings()"
+                >
+                  {{ option.label }}
+                  <svg v-if="boardSize === option.value" class="choice-check" aria-hidden="true" viewBox="0 0 20 20">
+                    <path d="m5 10.5 3.2 3.2L15 6.8" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+            <div class="setting-row setting-choice-row">
+              <span><strong>主题</strong></span>
+              <div class="time-options">
+                <button
+                  v-for="option in THEME_OPTIONS"
+                  :key="option.value"
+                  type="button"
+                  class="time-option"
+                  :class="{ on: theme === option.value }"
+                  @click="theme = option.value; persistSettings()"
+                >
+                  {{ option.label }}
+                  <svg v-if="theme === option.value" class="choice-check" aria-hidden="true" viewBox="0 0 20 20">
+                    <path d="m5 10.5 3.2 3.2L15 6.8" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+          </div>
+        </section>
+        </main>
+      </section>
+
+      <div v-show="role !== 'idle'" class="room-stage">
       <!-- Seats flank the board so the players are placed around the table rather than
            listed away in the sidebar. Each one carries the person, the name and the clock. -->
       <div class="board-col">
@@ -920,7 +1262,7 @@ watch(mySeat, (seat) => {
           :key="seat"
           class="seat-strip"
           :class="[
-            seat === 0 ? 'near' : 'far',
+            isNearSeat(seat) ? 'near' : 'far',
             {
               active: seatActive(seat),
               empty: !seatMembers[seat] && seat !== aiSeat,
@@ -937,8 +1279,13 @@ watch(mySeat, (seat) => {
           </svg>
           <span class="seat-panel-tag">{{ seat === 0 ? "先手" : "后手" }}</span>
           <span class="seat-panel-name">{{ seatLabel(seat) }}</span>
-          <span v-if="clock" class="seat-strip-clock" :class="{ low: clock.remaining[seat] <= 30000 }">
-            {{ formatClock(clock.remaining[seat]) }}
+          <span v-if="mySeat === seat" class="seat-self">你</span>
+          <span
+            v-if="clock && clock.budget > 0 && (seatMembers[seat] || seat === aiSeat)"
+            class="seat-strip-clock"
+            :class="{ low: clock.remaining[seat] <= 30000 }"
+          >
+            {{ totalClockLabel(clock.remaining[seat]) }}
           </span>
         </aside>
 
@@ -979,54 +1326,22 @@ watch(mySeat, (seat) => {
         </div>
       </div>
 
-      <footer class="controls">
-        <div class="controls-top">
-        <div class="status">
-          <span v-if="phase === 'practice' && aiSeat >= 0">
-            {{ aiThinking || isAiTurn ? "陪练正在想…" : "轮到你走 · 陪练模式" }}
-          </span>
-          <span v-else-if="phase === 'practice'">练习模式 · 不计胜负，可自由走子</span>
-          <span v-else-if="phase === 'playing'">
-            {{ isMyTurn ? "轮到你走" : isSeated ? "等对方走" : "观战中" }}
-          </span>
-          <span v-else-if="phase === 'lobby'">{{ isSeated ? "你已就座" : "你在观战" }}</span>
-          <span v-else>对局结束</span>
-          <span v-if="inCheck" class="check-flag">将军</span>
-        </div>
-
-        <div v-if="replayTotal > 0" class="replay-bar">
-          <button class="ghost tiny" title="复盘到开局" @click="replayFirst">⏮</button>
-          <button class="ghost tiny" title="上一手" @click="replayPrev">◀</button>
-          <input
-            class="scrubber"
-            type="range"
-            min="0"
-            :max="replayTotal"
-            :value="replayPly"
-            @input="seekPly(Number($event.target.value))"
-          />
-          <button class="ghost tiny" title="下一手" @click="replayNext">▶</button>
-          <button class="ghost tiny" title="复盘到最后一手" @click="replayLast">⏭</button>
-          <span class="ply-count">{{ replayPly }} / {{ replayTotal }}</span>
-          <button v-if="replaying" class="ghost tiny" @click="exitReplay">回到实时</button>
-          <button class="ghost tiny" title="导出棋谱" @click="exportRecord">导出</button>
-        </div>
-        </div>
-
-        <div v-if="notation.length" class="notation">
-          <button
-            v-for="(n, i) in notation"
-            :key="i"
-            class="ply"
-            :class="{ active: i + 1 === replayPly }"
-            :title="`跳到第 ${i + 1} 手`"
-            @click="seekPly(i + 1)"
-          >
-            <em>{{ i + 1 }}</em>{{ n }}
-          </button>
-        </div>
-      </footer>
+      </div>
     </main>
+
+    <Transition name="floating-message">
+      <div
+        v-if="floatingMessage"
+        :key="floatingMessage.serial"
+        class="floating-message"
+        :class="`is-${floatingMessage.tone}`"
+        :role="floatingMessage.tone === 'error' ? 'alert' : 'status'"
+        :aria-live="floatingMessage.tone === 'error' ? 'assertive' : 'polite'"
+        aria-atomic="true"
+      >
+        <span>{{ floatingMessage.text }}</span>
+      </div>
+    </Transition>
   </div>
 </template>
 
@@ -1098,6 +1413,757 @@ watch(mySeat, (seat) => {
     radial-gradient(120% 90% at 14% 0%, rgba(212, 162, 74, 0.13), transparent 52%),
     radial-gradient(100% 80% at 92% 100%, rgba(176, 58, 46, 0.08), transparent 50%),
     var(--paper);
+}
+
+.workbench.lobby-mode { grid-template-columns: 1fr; }
+
+/* ── Public lobby ───────────────────────────────────────────────────────── */
+
+.lobby-stage {
+  min-height: 100vh;
+  overflow-y: auto;
+  background:
+    linear-gradient(180deg, rgba(255, 250, 239, 0.12), rgba(56, 40, 24, 0.08)),
+    url("../assets/lobby-bg.svg") center / cover no-repeat,
+    #d9c5a1;
+}
+
+.lobby-screen {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  width: min(1180px, 100%);
+  min-height: 100vh;
+  margin: 0 auto;
+  padding: 24px 34px 50px;
+}
+
+.lobby-atmosphere {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.mote {
+  position: absolute;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: rgba(176, 58, 46, 0.44);
+  box-shadow: 0 0 14px rgba(212, 162, 74, 0.45);
+  animation: mote-drift 12s ease-in-out infinite alternate;
+}
+
+.mote-1 { left: 8%; top: 24%; animation-delay: -1s; }
+.mote-2 { left: 18%; top: 78%; width: 3px; height: 3px; animation-delay: -5s; }
+.mote-3 { left: 34%; top: 14%; animation-delay: -7s; }
+.mote-4 { left: 51%; top: 84%; width: 4px; height: 4px; animation-delay: -3s; }
+.mote-5 { left: 67%; top: 17%; width: 3px; height: 3px; animation-delay: -8s; }
+.mote-6 { left: 78%; top: 62%; animation-delay: -4s; }
+.mote-7 { left: 88%; top: 34%; width: 4px; height: 4px; animation-delay: -9s; }
+.mote-8 { left: 42%; top: 63%; width: 2px; height: 2px; animation-delay: -2s; }
+.mote-9 { left: 94%; top: 80%; width: 3px; height: 3px; animation-delay: -6s; }
+
+.lobby-topbar {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.48);
+  border-radius: 20px 8px 20px 8px;
+  background:
+    linear-gradient(120deg, rgba(255, 252, 244, 0.72), rgba(246, 235, 214, 0.42));
+  box-shadow: 0 12px 40px rgba(64, 45, 24, 0.13);
+  backdrop-filter: blur(16px) saturate(1.1);
+}
+
+.lobby-brand {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.lobby-brand h1 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 24px;
+  line-height: 1.1;
+  letter-spacing: 0.04em;
+  color: var(--ink);
+}
+
+.lobby-mark {
+  display: grid;
+  place-items: center;
+  width: 46px;
+  height: 46px;
+  flex: 0 0 auto;
+  font-family: var(--font-display);
+  font-size: 24px;
+  color: var(--paper-warm);
+  border-radius: 6px 12px 6px 12px;
+  background: linear-gradient(145deg, #cf5945, #8f271f);
+  box-shadow: 0 8px 24px rgba(176, 58, 46, 0.28);
+  animation: seal-breathe 5s ease-in-out infinite;
+}
+
+.lobby-mark svg {
+  width: 28px;
+  height: 28px;
+  fill: none;
+  stroke: #fff3df;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.lobby-brand > div {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.lobby-account {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-left: auto;
+}
+
+.guest-name {
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--muted-text);
+  background: rgba(255, 252, 244, 0.56);
+  border: 1px solid rgba(112, 88, 55, 0.16);
+  border-radius: var(--radius-pill);
+}
+
+.connection-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  color: var(--soft-text);
+}
+
+.connection-state i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #8f8371;
+}
+
+.connection-state.online i {
+  background: #3f7b56;
+  box-shadow: 0 0 0 4px rgba(63, 123, 86, 0.12);
+}
+
+.lobby-nav {
+  display: flex;
+  flex-direction: row;
+  gap: 4px;
+}
+
+.lobby-nav button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 44px;
+  padding: 0 14px;
+  text-align: center;
+  color: var(--muted-text);
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.nav-icon {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  margin-right: 10px;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.lobby-nav button.active {
+  color: var(--red-deep);
+  background: rgba(255, 250, 240, 0.78);
+  border-color: rgba(176, 58, 46, 0.18);
+  box-shadow: 0 5px 14px rgba(78, 53, 28, 0.1);
+}
+
+.lobby-nav button.active .nav-icon {
+  stroke: var(--red-deep);
+}
+
+.lobby-main .primary {
+  border-radius: 18px 7px 20px 9px;
+  color: #fff9ee;
+  background: linear-gradient(135deg, #c8513d, #8f2c22);
+  box-shadow: 0 9px 22px rgba(119, 39, 29, 0.22);
+}
+
+.lobby-main .primary:hover {
+  background: linear-gradient(135deg, #d05c47, #9b3227);
+  box-shadow: 0 13px 28px rgba(119, 39, 29, 0.28);
+}
+
+.lobby-main .ghost {
+  border-radius: 7px 16px 8px 18px;
+  background: rgba(255, 250, 240, 0.55);
+  backdrop-filter: blur(10px);
+}
+
+.lobby-main {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+  padding: 8px 4px 40px;
+  background: transparent;
+  box-shadow: none;
+  z-index: 1;
+}
+
+.lobby-main > * {
+  position: relative;
+  z-index: 1;
+}
+
+.server-pill {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 4px 9px;
+  padding: 12px 16px;
+  font-size: 12px;
+  color: var(--soft-text);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  background: rgba(255, 253, 248, 0.82);
+  box-shadow: var(--shadow-1);
+}
+
+.server-pill small {
+  grid-column: 2;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--soft-text);
+}
+
+.server-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--soft-text);
+  box-shadow: 0 0 0 4px rgba(107, 98, 83, 0.1);
+}
+
+.server-pill.online .server-dot {
+  background: #3f7b56;
+  box-shadow: 0 0 0 4px rgba(63, 123, 86, 0.14);
+}
+
+.lobby-tabs {
+  display: flex;
+  gap: 8px;
+  margin: 16px 0 20px;
+  padding: 5px;
+  width: fit-content;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: rgba(255, 253, 248, 0.72);
+}
+
+.lobby-tabs button {
+  height: 40px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  box-shadow: none;
+  color: var(--soft-text);
+}
+
+.lobby-tabs button.active {
+  color: var(--paper-warm);
+  background: var(--ink);
+  box-shadow: var(--shadow-2);
+}
+
+.lobby-view {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  animation: reveal var(--dur-slow) var(--ease-decelerate) both;
+}
+
+.lobby-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.lobby-toolbar h2 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 26px;
+  letter-spacing: 0.04em;
+}
+
+.room-filters {
+  display: flex;
+  gap: 4px;
+}
+
+.room-filters button {
+  height: 36px;
+  padding: 0 14px;
+  font-size: 13px;
+  color: var(--soft-text);
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.room-filters button.active {
+  color: var(--ink);
+  background: var(--surface);
+  border-color: var(--line);
+  box-shadow: var(--shadow-1);
+}
+
+.lobby-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--soft-text);
+}
+
+.lobby-section-head {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.lobby-section-head h2 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 24px;
+  letter-spacing: 0.06em;
+}
+
+.lobby-section-head p {
+  margin: 6px 0 0;
+  color: var(--soft-text);
+  font-size: 13px;
+}
+
+.identity-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 16px 18px;
+  background: rgba(255, 253, 248, 0.72);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+}
+
+.identity-card > div:first-child { display: flex; flex-direction: column; gap: 4px; }
+.identity-label { font-size: 11px; letter-spacing: 0.12em; color: var(--soft-text); }
+.identity-edit { display: flex; gap: 8px; }
+
+.identity-edit input,
+.lobby-password input,
+.setting-row select {
+  min-height: 38px;
+  padding: 0 12px;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-btn);
+  font: inherit;
+}
+
+.lobby-password {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 16px;
+  border-left: 3px solid var(--gold);
+  background: rgba(212, 162, 74, 0.09);
+}
+
+.lobby-password span { font-size: 12px; color: var(--soft-text); }
+.lobby-password input { flex: 1; }
+
+.notice {
+  margin: 0;
+  padding: 9px 12px;
+  color: var(--wood);
+  background: rgba(212, 162, 74, 0.1);
+  border-left: 3px solid var(--gold);
+  border-radius: var(--radius-sm);
+}
+
+.lobby-room-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: 10px;
+}
+
+.lobby-room-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
+  overflow: hidden;
+  border: 1px solid rgba(91, 70, 44, 0.18);
+  border-radius: 4px 14px 14px 4px;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.65), transparent 55%),
+    #fbf5e9;
+  box-shadow: 4px 4px 0 rgba(59, 45, 29, 0.06), 0 10px 24px rgba(59, 45, 29, 0.08);
+  transition: transform var(--dur-base) var(--ease-standard), box-shadow var(--dur-base) var(--ease-standard);
+}
+
+.lobby-room-card:nth-child(3n + 1) { transform: rotate(-0.35deg); }
+.lobby-room-card:nth-child(3n + 2) { transform: translateY(4px) rotate(0.28deg); }
+.lobby-room-card:nth-child(3n) { transform: translateY(-2px) rotate(0.16deg); }
+
+.lobby-room-card::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 5px;
+  background: linear-gradient(180deg, #c34a39, #8f271f);
+}
+
+.lobby-room-card.status-playing::before { background: var(--red); }
+.lobby-room-card.status-finished::before { background: var(--soft-text); }
+.lobby-room-card:hover {
+  transform: translateY(-4px) rotate(0deg);
+  box-shadow: 5px 5px 0 rgba(59, 45, 29, 0.07), 0 15px 30px rgba(59, 45, 29, 0.12);
+}
+
+.lobby-room-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.game-mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-display);
+  font-size: 14px;
+  letter-spacing: 0.08em;
+}
+
+.game-seal {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  font-size: 14px;
+  color: var(--paper-warm);
+  border-radius: 50%;
+  background: var(--ink);
+}
+
+.game-seal svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: #fff8eb;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.lobby-room-card[data-game="gomoku"] .game-seal svg {
+  fill: #fff8eb;
+  stroke: none;
+}
+
+.lobby-room-card[data-game="xiangqi"] .game-seal {
+  background: linear-gradient(145deg, #c54d3c, #8f271f);
+}
+
+.lobby-room-card[data-game="gomoku"] .game-seal {
+  background: linear-gradient(145deg, #4d4a43, #211f1b);
+}
+
+.room-state {
+  padding: 4px 9px;
+  font-size: 11px;
+  border-radius: var(--radius-pill);
+  background: rgba(212, 162, 74, 0.12);
+  color: var(--wood);
+}
+
+.status-playing .room-state { background: rgba(176, 58, 46, 0.1); color: var(--red-deep); }
+.status-finished .room-state { background: rgba(28, 26, 23, 0.07); color: var(--soft-text); }
+
+.lobby-room-card h3 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 20px;
+  line-height: 1.25;
+  letter-spacing: 0.04em;
+}
+
+.room-facts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin: 0;
+}
+
+.room-badges {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.lock-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 7px;
+  font-size: 10px;
+  border-radius: var(--radius-pill);
+  color: var(--red-deep);
+  background: rgba(176, 58, 46, 0.08);
+}
+
+.lock-badge svg {
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+}
+
+.room-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  font-size: 12px;
+  color: var(--soft-text);
+}
+
+.room-stats b {
+  font-family: var(--font-num);
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.room-facts > div {
+  padding: 8px 10px;
+  background: rgba(28, 26, 23, 0.035);
+  border-radius: var(--radius-sm);
+}
+
+.room-facts dt { font-size: 10px; letter-spacing: 0.08em; color: var(--soft-text); }
+.room-facts dd { margin: 2px 0 0; font-size: 13px; font-weight: 650; }
+.room-actions { display: grid; grid-template-columns: 1fr auto; gap: 8px; margin-top: auto; }
+.lobby-room-card .room-actions { grid-template-columns: auto auto; justify-content: start; }
+.room-actions.single-action { grid-template-columns: auto; }
+.lobby-room-card .room-actions .primary {
+  background: linear-gradient(180deg, #9c3429, #76241d);
+}
+.lobby-room-card .room-actions button {
+  width: 108px;
+  min-width: 108px;
+  height: 36px;
+  padding: 0 12px;
+  font-size: 13px;
+  box-shadow: 2px 2px 0 var(--ink);
+}
+.lobby-room-card .room-actions button:hover {
+  box-shadow: 3px 3px 0 var(--ink);
+}
+
+.lobby-empty {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding: 48px 24px;
+  text-align: center;
+  min-height: 360px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 4px 18px 18px 4px;
+  background:
+    radial-gradient(ellipse at center, rgba(255, 250, 240, 0.48), rgba(255, 250, 240, 0.1) 55%, transparent 73%),
+    repeating-linear-gradient(0deg, transparent 0 46px, rgba(104, 77, 43, 0.08) 46px 47px),
+    repeating-linear-gradient(90deg, transparent 0 46px, rgba(104, 77, 43, 0.08) 46px 47px);
+}
+
+.empty-board-art {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: min(440px, 72%);
+  transform: translate(-50%, -50%) rotate(-4deg);
+  fill: none;
+  stroke: rgba(104, 77, 43, 0.12);
+  stroke-width: 1;
+  pointer-events: none;
+}
+
+.empty-board-art .stone {
+  stroke-width: 0;
+}
+
+.empty-board-art .stone.red { fill: rgba(176, 58, 46, 0.16); }
+.empty-board-art .stone.dark { fill: rgba(28, 26, 23, 0.12); }
+
+.lobby-empty strong,
+.lobby-empty button {
+  position: relative;
+  z-index: 1;
+}
+
+.lobby-empty strong { font-family: var(--font-display); font-size: 28px; letter-spacing: 0.08em; }
+.lobby-empty p { margin: 0 0 8px; color: var(--soft-text); }
+
+.lobby-form-card h2,
+.settings-head h2 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 22px;
+  letter-spacing: 0.04em;
+}
+
+.settings-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 16px;
+}
+
+.settings-head > span {
+  font-size: 12px;
+  color: var(--soft-text);
+}
+
+.lobby-form-card,
+.lobby-settings {
+  width: min(680px, 100%);
+  margin-inline: auto;
+  padding: 24px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-panel);
+  background: rgba(255, 253, 248, 0.8);
+  box-shadow: var(--shadow-1);
+}
+
+.lobby-form-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 18px;
+}
+
+.lobby-form-card > h2 { text-align: center; }
+.lobby-create { align-self: center; min-width: 200px; }
+
+.settings-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+
+.setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 54px;
+  padding: 10px 14px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-card);
+  background: rgba(255, 253, 248, 0.72);
+}
+
+.setting-row > span { display: flex; flex-direction: column; gap: 3px; }
+.setting-row strong { font-size: 14px; }
+.setting-row small { color: var(--soft-text); font-size: 11px; line-height: 1.45; }
+.setting-row > input[type="checkbox"] { width: 20px; height: 20px; accent-color: var(--red); }
+.setting-row.disabled { opacity: 0.5; }
+.setting-range { flex-wrap: wrap; }
+.setting-range input[type="range"] { width: 100%; accent-color: var(--red); }
+
+:root[data-theme="ink"] {
+  --ink: #f3ead9;
+  --ink-soft: #d9ceb9;
+  --paper: #171613;
+  --paper-warm: #211f1a;
+  --paper-deep: #2c2922;
+  --surface: #24211c;
+  --muted-text: #d0c5b2;
+  --soft-text: #b7ad9d;
+  --line: rgba(243, 234, 217, 0.16);
+  --line-soft: rgba(243, 234, 217, 0.09);
+}
+
+[data-theme="ink"] .workbench,
+[data-theme="ink"] .lobby-stage {
+  background: radial-gradient(90% 80% at 20% 0%, rgba(212, 162, 74, 0.1), transparent 50%), var(--paper);
+}
+
+[data-theme="ink"] .lobby-main {
+  background:
+    linear-gradient(90deg, rgba(143, 47, 40, 0.2) 0 4px, transparent 4px),
+    radial-gradient(70% 80% at 85% 8%, rgba(212, 162, 74, 0.08), transparent 60%),
+    repeating-linear-gradient(0deg, transparent 0 39px, rgba(243, 234, 217, 0.018) 39px 40px),
+    #201d18;
+}
+
+[data-theme="ink"] .lobby-empty {
+  background:
+    linear-gradient(rgba(32, 29, 24, 0.84), rgba(32, 29, 24, 0.94)),
+    repeating-linear-gradient(0deg, transparent 0 46px, rgba(212, 162, 74, 0.12) 46px 47px),
+    repeating-linear-gradient(90deg, transparent 0 46px, rgba(212, 162, 74, 0.12) 46px 47px);
+}
+
+[data-theme="ink"] .rail,
+[data-theme="ink"] .lobby-room-card,
+[data-theme="ink"] .identity-card,
+[data-theme="ink"] .lobby-form-card,
+[data-theme="ink"] .lobby-settings,
+[data-theme="ink"] .setting-row,
+[data-theme="ink"] .server-pill {
+  background-color: rgba(36, 33, 28, 0.9);
+}
+
+[data-theme="ink"] .lobby-section-head p,
+[data-theme="ink"] .lobby-lead,
+[data-theme="ink"] .room-facts dt {
+  color: var(--soft-text);
 }
 
 /* ── Rail ───────────────────────────────────────────────────────────────── */
@@ -1199,6 +2265,79 @@ watch(mySeat, (seat) => {
 .field select:focus-visible {
   border-color: var(--wood);
   box-shadow: 0 0 0 3px rgba(122, 92, 49, 0.18);
+}
+
+.password-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.password-options {
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 0;
+  flex: 0 0 auto;
+}
+
+.password-control {
+  width: 100%;
+  min-width: 0;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  background: rgba(255, 252, 244, 0.52);
+  border: 1px solid rgba(112, 88, 55, 0.1);
+  border-radius: 0;
+  animation: password-pop var(--dur-base) var(--ease-decelerate) both;
+}
+
+.password-control input {
+  width: 100%;
+  flex: 1;
+  min-width: 0;
+  height: 42px;
+  padding: 0 10px;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+}
+
+.password-control input:focus-visible {
+  outline: 0;
+  box-shadow: none;
+}
+
+.password-reveal {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  flex: 0 0 42px;
+  padding: 0;
+  color: var(--soft-text);
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+  box-shadow: none;
+}
+
+.password-reveal:hover {
+  color: var(--ink);
+  background: rgba(112, 88, 55, 0.08);
+}
+
+.password-reveal svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 /* ── Buttons ────────────────────────────────────────────────────────────── */
@@ -1526,11 +2665,20 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
 .scenario-row { display: flex; flex-wrap: wrap; gap: 8px; }
 
 /* Side picker: three equal chips, sized to stay past the 44px touch floor. */
-.side-pick { display: grid; grid-template-columns: 1fr 1fr 0.8fr; gap: 8px; }
+.side-pick {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
 
 .side-pick .pick {
-  min-height: 44px;
-  padding: 0 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  min-height: 38px;
+  padding: 0 14px;
+  flex: 0 1 auto;
   font-family: var(--font-ui);
   font-size: 13px;
   color: var(--muted-text);
@@ -1546,12 +2694,63 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
 .side-pick .pick:hover { color: var(--ink); border-color: var(--wood); }
 
 .side-pick .pick.on {
-  color: var(--paper-warm);
-  background: var(--ink);
-  border-color: var(--ink);
+  color: #28573f;
+  background: rgba(63, 123, 86, 0.09);
+  border-color: rgba(63, 123, 86, 0.42);
+  box-shadow: inset 3px 0 0 #4f8665;
 }
 
 .side-pick .pick:focus-visible { outline: 3px solid var(--gold); outline-offset: 2px; }
+
+.time-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.time-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 34px;
+  padding: 0 10px;
+  flex: 0 0 auto;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--muted-text);
+  background: rgba(247, 239, 223, 0.42);
+  border: 1px solid rgba(112, 88, 55, 0.14);
+  border-radius: var(--radius-pill);
+  box-shadow: none;
+}
+
+.time-option:hover {
+  color: var(--ink);
+  background: rgba(255, 250, 240, 0.68);
+  border-color: rgba(112, 88, 55, 0.28);
+}
+
+.time-option.on {
+  color: #28573f;
+  background: rgba(63, 123, 86, 0.1);
+  border-color: rgba(63, 123, 86, 0.4);
+}
+
+.time-option .choice-check {
+  width: 15px;
+  height: 15px;
+}
+
+.choice-check {
+  width: 19px;
+  height: 19px;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: #3f7b56;
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
 
 .address { display: flex; flex-direction: column; gap: 4px; }
 
@@ -1582,6 +2781,7 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
 /* ── Stage ──────────────────────────────────────────────────────────────── */
 
 .stage { position: relative; display: flex; flex-direction: column; min-width: 0; }
+.room-stage { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 
 /* Board with its two seats stacked across the table: the far side on top, the viewer's
    side underneath. Placed by named areas rather than source order, because both seats come
@@ -1979,94 +3179,6 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
   50% { opacity: 0.62; }
 }
 
-/* ── Replay bar ─────────────────────────────────────────────────────────── */
-
-.replay-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-shrink: 0;
-  padding: 8px 12px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-card);
-  background: var(--surface);
-  box-shadow: var(--shadow-1);
-}
-
-.scrubber {
-  flex: 1;
-  min-width: 120px;
-  max-width: 260px;
-  height: 4px;
-  border-radius: var(--radius-pill);
-  background: rgba(28, 26, 23, 0.14);
-  appearance: none;
-  cursor: pointer;
-}
-
-.scrubber::-webkit-slider-thumb {
-  appearance: none;
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  background: var(--ink);
-  border: 3px solid var(--surface);
-  box-shadow: var(--shadow-2);
-  transition: transform var(--dur-fast) var(--ease-spring);
-}
-
-.scrubber::-webkit-slider-thumb:hover { transform: scale(1.15); }
-
-.scrubber:focus-visible { outline: 3px solid var(--gold); outline-offset: 4px; }
-
-.ply-count {
-  font-family: var(--font-num);
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-  color: var(--soft-text);
-}
-
-/* ── Notation ───────────────────────────────────────────────────────────── */
-
-.notation {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  max-height: 60px;
-  overflow-y: auto;
-  padding: 2px 0;
-}
-
-.ply {
-  display: inline-flex;
-  align-items: center;
-  height: 28px;
-  padding: 0 8px;
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-  color: var(--muted-text);
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  transition: background var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard);
-}
-
-.ply:hover { background: rgba(122, 92, 49, 0.1); color: var(--ink); }
-
-.ply.active {
-  color: var(--ink);
-  font-weight: 650;
-  background: rgba(122, 92, 49, 0.15);
-  border-color: rgba(122, 92, 49, 0.4);
-}
-
-.ply em {
-  font-style: normal;
-  margin-right: 4px;
-  font-size: 12px;
-  color: var(--soft-text);
-}
-
 /* ── Staggered entrance ────────────────────────────────────────────────── */
 
 .reveal { animation: reveal var(--dur-slow) var(--ease-decelerate) both; }
@@ -2080,10 +3192,27 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
   to { opacity: 1; transform: translateY(0); }
 }
 
+@keyframes mote-drift {
+  from { transform: translate3d(-8px, 8px, 0) scale(0.8); opacity: 0.25; }
+  55% { opacity: 0.75; }
+  to { transform: translate3d(18px, -26px, 0) scale(1.15); opacity: 0.2; }
+}
+
+@keyframes seal-breathe {
+  0%, 100% { transform: rotate(-1deg); box-shadow: 0 8px 24px rgba(176, 58, 46, 0.24); }
+  50% { transform: rotate(1deg); box-shadow: 0 11px 30px rgba(176, 58, 46, 0.34); }
+}
+
+@keyframes password-pop {
+  from { opacity: 0; transform: translateX(-7px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
 /* ── Responsive ─────────────────────────────────────────────────────────── */
 
 @media (max-width: 900px) {
   .workbench { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+  .workbench.lobby-mode { grid-template-rows: 1fr; }
 
   .rail {
     flex-direction: row;
@@ -2096,7 +3225,32 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
 
   .rail-head { flex: 1 0 100%; }
   .panel { min-width: 280px; }
-  .notation { max-width: 100%; justify-content: flex-start; }
+  .lobby-screen {
+    gap: 12px;
+    padding: 12px 14px 36px;
+  }
+  .lobby-topbar {
+    flex-wrap: wrap;
+    align-items: center;
+    padding: 12px;
+    border-radius: 16px;
+  }
+  .lobby-brand { flex: 1 0 auto; }
+  .lobby-nav { flex-direction: row; flex-wrap: wrap; }
+  .lobby-nav button { width: auto; }
+  .lobby-account {
+    flex-direction: row;
+    align-items: center;
+    margin-left: auto;
+  }
+  .lobby-main { padding: 4px 0 32px; }
+  .lobby-toolbar { align-items: flex-start; flex-direction: column; }
+  .lobby-form-grid,
+  .settings-grid { grid-template-columns: 1fr; }
+  .identity-card { align-items: stretch; flex-direction: column; }
+  .identity-edit { width: 100%; }
+  .identity-edit input { flex: 1; min-width: 0; }
+  .lobby-room-grid { grid-template-columns: 1fr; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -2106,6 +3260,1884 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+  }
+}
+
+/* ── 2026 editorial refresh ───────────────────────────────────────────────
+ * A chess-house visual language: fewer floating cards, flatter paper surfaces,
+ * seal-red accents, ink rules and board geometry. The interaction model and
+ * game canvas stay untouched.
+ */
+
+:root {
+  --ink: #201d18;
+  --ink-soft: #343028;
+  --paper: #e8decd;
+  --paper-warm: #f7f0e4;
+  --paper-deep: #d8cbb7;
+  --surface: #f8f2e7;
+  --red: #9d3026;
+  --red-deep: #7d241d;
+  --gold: #bc8a3d;
+  --wood: #735833;
+  --muted-text: #564e42;
+  --soft-text: #665c4d;
+  --line: rgba(42, 34, 24, 0.2);
+  --line-soft: rgba(42, 34, 24, 0.1);
+  --radius-sm: 2px;
+  --radius-btn: 3px;
+  --radius-card: 3px;
+  --radius-panel: 4px;
+  --radius-pill: 3px;
+  --shadow-1: 0 1px 0 rgba(41, 31, 20, 0.06);
+  --shadow-2: 0 8px 24px rgba(41, 31, 20, 0.08);
+  --shadow-3: 0 18px 48px rgba(41, 31, 20, 0.14);
+  --font-ui: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
+  --font-display: "Noto Serif SC", "Source Han Serif SC", "Songti SC", "SimSun", serif;
+}
+
+.workbench {
+  background-color: #ddd1bf;
+  background-image:
+    linear-gradient(90deg, rgba(73, 57, 38, 0.025) 1px, transparent 1px),
+    linear-gradient(rgba(73, 57, 38, 0.025) 1px, transparent 1px);
+  background-size: 56px 56px;
+}
+
+.lobby-stage {
+  position: relative;
+  background-color: #e9dfcf;
+  background-image:
+    linear-gradient(90deg, rgba(69, 54, 36, 0.055) 1px, transparent 1px),
+    linear-gradient(rgba(69, 54, 36, 0.055) 1px, transparent 1px),
+    repeating-linear-gradient(0deg, transparent 0 3px, rgba(255, 255, 255, 0.08) 3px 4px),
+    repeating-linear-gradient(115deg, transparent 0 22px, rgba(77, 59, 39, 0.022) 22px 23px);
+  background-size: 64px 64px, 64px 64px, auto, auto;
+}
+
+.lobby-stage::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    linear-gradient(90deg, transparent 0 7.5%, rgba(116, 86, 50, 0.06) 7.5% calc(7.5% + 1px), transparent calc(7.5% + 1px)),
+    linear-gradient(90deg, transparent 0 92.5%, rgba(116, 86, 50, 0.06) 92.5% calc(92.5% + 1px), transparent calc(92.5% + 1px));
+}
+
+.lobby-stage::after {
+  content: "";
+  position: fixed;
+  right: clamp(-175px, -10vw, -72px);
+  bottom: clamp(-190px, -20vh, -90px);
+  z-index: 0;
+  width: clamp(460px, 52vw, 740px);
+  aspect-ratio: 1;
+  border: 1px solid rgba(73, 53, 30, 0.13);
+  background-image:
+    repeating-linear-gradient(0deg, transparent 0 55px, rgba(73, 53, 30, 0.11) 55px 56px),
+    repeating-linear-gradient(90deg, transparent 0 55px, rgba(73, 53, 30, 0.11) 55px 56px);
+  box-shadow: inset 0 0 0 18px rgba(255, 250, 239, 0.05);
+  transform: rotate(-7deg);
+  pointer-events: none;
+}
+
+.lobby-screen {
+  z-index: 1;
+  gap: 18px;
+  width: min(1240px, 100%);
+  padding: 22px 42px 48px;
+}
+
+.lobby-atmosphere {
+  display: none;
+}
+
+.lobby-topbar {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 34px;
+  align-items: center;
+  padding: 15px 0 17px;
+  border: 0;
+  border-bottom: 1px solid rgba(42, 34, 24, 0.28);
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+.lobby-brand {
+  gap: 13px;
+}
+
+.lobby-mark {
+  width: 42px;
+  height: 46px;
+  border: 1px solid rgba(255, 248, 235, 0.38);
+  border-radius: 2px;
+  background: var(--red-deep);
+  box-shadow: 4px 4px 0 rgba(83, 61, 36, 0.15);
+  animation: none;
+}
+
+.lobby-mark svg {
+  width: 25px;
+  height: 25px;
+  stroke: #fff9ed;
+}
+
+.lobby-brand > div {
+  gap: 5px;
+}
+
+.lobby-brand h1 {
+  font-size: 25px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+}
+
+.lobby-brand-note {
+  margin: 0;
+  font-family: var(--font-ui);
+  font-size: 10px;
+  line-height: 1;
+  letter-spacing: 0.18em;
+  color: var(--soft-text);
+}
+
+.lobby-nav {
+  align-self: stretch;
+  justify-self: center;
+  gap: 24px;
+}
+
+.lobby-nav button {
+  position: relative;
+  height: auto;
+  min-height: 44px;
+  padding: 0 3px;
+  color: var(--soft-text);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.lobby-nav button::after {
+  content: "";
+  position: absolute;
+  right: 2px;
+  bottom: -18px;
+  left: 2px;
+  height: 2px;
+  background: transparent;
+  transition: background var(--dur-base) var(--ease-standard);
+}
+
+.lobby-nav button:hover {
+  color: var(--ink);
+  background: transparent;
+}
+
+.lobby-nav button.active {
+  color: var(--ink);
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+}
+
+.lobby-nav button.active::after {
+  background: var(--red);
+}
+
+.lobby-nav button.active .nav-icon {
+  stroke: var(--red-deep);
+}
+
+.nav-icon {
+  width: 21px;
+  height: 21px;
+  margin-right: 8px;
+  stroke-width: 1.55;
+}
+
+.lobby-account {
+  gap: 14px;
+}
+
+.lobby-settings-button,
+.lobby-form-back {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  color: var(--soft-text);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  box-shadow: none;
+}
+
+.lobby-settings-button {
+  margin-left: 4px;
+}
+
+.lobby-form-back {
+  width: 42px;
+  height: 42px;
+  color: #fffaf0;
+  background: var(--red-deep);
+  border-color: var(--red-deep);
+  box-shadow: 2px 2px 0 var(--ink);
+}
+
+.lobby-form-back:hover {
+  color: #fffaf0;
+  background: var(--red);
+  border-color: var(--red);
+  box-shadow: 3px 3px 0 var(--ink);
+}
+
+.lobby-form-back:active {
+  box-shadow: 1px 1px 0 var(--ink);
+  transform: translate(1px, 1px);
+}
+
+.lobby-population {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding-left: 14px;
+  color: var(--soft-text);
+  border-left: 1px solid var(--line);
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.lobby-population svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.lobby-population strong {
+  color: var(--ink);
+  font-family: var(--font-num);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.lobby-settings-button:hover,
+.lobby-form-back:hover {
+  color: var(--ink);
+  background: rgba(247, 240, 228, 0.5);
+  border-color: rgba(58, 45, 29, 0.34);
+  transform: none;
+}
+
+.lobby-settings-button.active {
+  color: #fffaf0;
+  background: var(--red-deep);
+  border-color: var(--red-deep);
+}
+
+.lobby-settings-button svg,
+.lobby-form-back svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.guest-name {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  font-family: var(--font-num);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+}
+
+.connection-state {
+  padding-left: 14px;
+  border-left: 1px solid var(--line);
+  font-size: 11px;
+}
+
+.connection-state.online i {
+  background: #47705a;
+  box-shadow: none;
+}
+
+.lobby-main {
+  gap: 18px;
+  padding: 22px 0 34px;
+}
+
+.lobby-toolbar {
+  align-items: flex-end;
+  padding-bottom: 17px;
+  border-bottom: 1px solid var(--line);
+}
+
+.lobby-toolbar-copy {
+  display: grid;
+  grid-template-columns: auto auto;
+  align-items: baseline;
+  gap: 5px 13px;
+}
+
+.lobby-toolbar-copy h2 {
+  font-size: 30px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.lobby-toolbar-copy p {
+  grid-column: 2;
+  margin: 0;
+  color: var(--soft-text);
+  font-size: 13px;
+}
+
+.lobby-kicker {
+  font-family: var(--font-ui);
+  color: var(--red-deep);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+}
+
+.lobby-room-count {
+  padding-bottom: 3px;
+  font-family: var(--font-num);
+  color: var(--soft-text);
+  font-size: 11px;
+  letter-spacing: 0.05em;
+}
+
+.lobby-room-grid {
+  grid-template-columns: repeat(auto-fill, minmax(274px, 1fr));
+  gap: 14px;
+}
+
+.lobby-room-card {
+  gap: 12px;
+  padding: 19px 19px 17px;
+  border: 1px solid rgba(58, 45, 29, 0.2);
+  border-radius: 2px;
+  background: #f7f0e4;
+  box-shadow: 3px 3px 0 rgba(69, 51, 30, 0.055);
+}
+
+.lobby-room-card:nth-child(3n + 1),
+.lobby-room-card:nth-child(3n + 2),
+.lobby-room-card:nth-child(3n) {
+  transform: none;
+}
+
+.lobby-room-card::before {
+  width: 3px;
+  background: var(--red-deep);
+}
+
+.lobby-room-card:hover {
+  transform: translateY(-2px);
+  border-color: rgba(58, 45, 29, 0.34);
+  box-shadow: 4px 5px 0 rgba(69, 51, 30, 0.07);
+}
+
+.lobby-create-card {
+  display: flex;
+  min-height: 188px;
+  height: auto;
+  padding: 19px 19px 17px;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--ink);
+  border: 1px dashed rgba(58, 45, 29, 0.3);
+  border-radius: 2px;
+  background: transparent;
+  box-shadow: none;
+}
+
+.lobby-create-card:hover {
+  color: var(--ink);
+  border-color: rgba(157, 48, 38, 0.5);
+  background: transparent;
+  transform: translateY(-1px);
+}
+
+.lobby-create-card:hover .create-card-mark {
+  background: var(--red);
+}
+
+.create-card-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.create-card-mark {
+  display: grid;
+  place-items: center;
+  width: 25px;
+  height: 25px;
+  flex: 0 0 auto;
+  color: #fffaf0;
+  background: var(--red-deep);
+}
+
+.create-card-mark svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+}
+
+.create-card-top strong {
+  font-family: var(--font-display);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: 0.08em;
+}
+
+.lobby-create-action {
+  width: 108px;
+  min-width: 108px;
+  height: 36px;
+  margin-top: 0;
+  padding: 0 12px;
+  font-size: 13px;
+  box-shadow: 2px 2px 0 var(--ink);
+}
+
+.lobby-create-action:hover {
+  box-shadow: 3px 3px 0 var(--ink);
+}
+
+.game-mark {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.game-seal {
+  width: 25px;
+  height: 25px;
+  border-radius: 1px;
+}
+
+.lobby-room-card[data-game="xiangqi"] .game-seal {
+  background: var(--red-deep);
+}
+
+.lobby-room-card[data-game="gomoku"] .game-seal {
+  background: var(--ink);
+}
+
+.room-state {
+  border-radius: 1px;
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--soft-text);
+  letter-spacing: 0.04em;
+}
+
+.lobby-room-card h3 {
+  font-size: 21px;
+  font-weight: 700;
+}
+
+.room-facts > div {
+  border: 1px solid var(--line-soft);
+  border-radius: 1px;
+  background: rgba(71, 53, 32, 0.035);
+}
+
+.lobby-room-card .room-actions .primary {
+  background: var(--red-deep);
+}
+
+.lobby-empty {
+  display: grid;
+  grid-template-columns: minmax(250px, 0.82fr) minmax(360px, 1.18fr);
+  align-items: center;
+  gap: 42px;
+  min-height: 430px;
+  padding: 38px 2px 56px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  text-align: left;
+}
+
+.lobby-empty::before {
+  content: none;
+}
+
+.empty-copy {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 15px;
+}
+
+.lobby-empty strong {
+  font-size: clamp(38px, 4.2vw, 56px);
+  font-weight: 700;
+  line-height: 1.08;
+  letter-spacing: 0.08em;
+}
+
+.lobby-empty p {
+  max-width: 34ch;
+  margin: 0 0 8px;
+  color: var(--soft-text);
+  font-size: 14px;
+  line-height: 1.75;
+}
+
+.empty-board-art {
+  position: relative;
+  top: auto;
+  left: auto;
+  grid-column: 2;
+  grid-row: 1;
+  width: min(100%, 510px);
+  transform: rotate(-1.2deg);
+  stroke: rgba(73, 53, 30, 0.33);
+  filter: drop-shadow(9px 12px 0 rgba(72, 52, 29, 0.06));
+}
+
+.empty-board-art rect {
+  fill: #eadcc5;
+}
+
+.empty-board-art .stone.dark {
+  fill: rgba(32, 29, 24, 0.68);
+}
+
+.empty-board-art .stone.red {
+  fill: rgba(157, 48, 38, 0.68);
+}
+
+button {
+  border-radius: 2px;
+  transition:
+    transform var(--dur-fast) var(--ease-standard),
+    background var(--dur-base) var(--ease-standard),
+    box-shadow var(--dur-base) var(--ease-standard),
+    border-color var(--dur-base) var(--ease-standard);
+}
+
+button:active {
+  transform: translate(1px, 1px);
+}
+
+button:focus-visible {
+  outline: 2px solid var(--red-deep);
+  outline-offset: 3px;
+}
+
+.primary {
+  color: #fffaf0;
+  background: var(--red-deep);
+  border-color: var(--red-deep);
+  box-shadow: 4px 4px 0 var(--ink);
+}
+
+.lobby-main .primary {
+  color: #fffaf0;
+  border-radius: 2px;
+  background: var(--red-deep);
+  box-shadow: 4px 4px 0 var(--ink);
+}
+
+.primary:hover {
+  color: #fffaf0;
+  background: var(--red);
+  box-shadow: 5px 5px 0 var(--ink);
+  transform: translate(-1px, -1px);
+}
+
+.lobby-main .primary:hover {
+  background: var(--red);
+  box-shadow: 5px 5px 0 var(--ink);
+}
+
+.primary:active {
+  box-shadow: 2px 2px 0 var(--ink);
+  transform: translate(2px, 2px);
+}
+
+.lobby-room-card .room-actions button,
+.lobby-main .lobby-create-action {
+  box-shadow: 2px 2px 0 var(--ink);
+}
+
+.lobby-room-card .room-actions button:hover,
+.lobby-main .lobby-create-action:hover {
+  box-shadow: 3px 3px 0 var(--ink);
+}
+
+.ghost {
+  color: var(--ink);
+  background: transparent;
+  border-color: rgba(48, 38, 26, 0.32);
+  box-shadow: none;
+}
+
+.lobby-main .ghost {
+  border-radius: 2px;
+  background: transparent;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+.ghost:hover {
+  background: rgba(255, 250, 239, 0.56);
+  border-color: var(--ink);
+  box-shadow: none;
+  transform: none;
+}
+
+.lobby-form-card,
+.lobby-settings {
+  width: min(900px, 100%);
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.lobby-form-card {
+  gap: 28px;
+}
+
+.lobby-form-heading {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: baseline;
+  gap: 7px 16px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--line);
+}
+
+.lobby-form-back {
+  position: absolute;
+  top: 0;
+  right: 0;
+}
+
+.lobby-form-heading h2,
+.settings-head h2 {
+  margin: 0;
+  font-size: 32px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.lobby-form-heading p {
+  grid-column: 2;
+  margin: 0;
+  color: var(--soft-text);
+  font-size: 13px;
+}
+
+.lobby-form-grid {
+  grid-template-columns: 1fr 1fr;
+  gap: 0;
+  border-top: 1px solid var(--line-soft);
+}
+
+.lobby-form-grid > .field {
+  gap: 12px;
+  min-width: 0;
+  padding: 22px 24px 24px 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.lobby-form-grid > .field:nth-child(even) {
+  padding-right: 0;
+  padding-left: 24px;
+  border-left: 1px solid var(--line-soft);
+}
+
+.lobby-form-grid > .field:last-child {
+  grid-column: 2;
+  padding-right: 0;
+  padding-left: 24px;
+  border-left: 1px solid var(--line-soft);
+}
+
+.field > span {
+  font-family: var(--font-display);
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+}
+
+.side-pick,
+.time-options {
+  gap: 0;
+  flex-wrap: wrap;
+}
+
+.time-option {
+  height: 44px;
+  padding: 0 16px;
+  border: 1px solid rgba(55, 43, 27, 0.25);
+  border-radius: 0;
+  background: rgba(249, 244, 235, 0.42);
+  color: var(--muted-text);
+  letter-spacing: 0.02em;
+}
+
+.time-option + .time-option {
+  margin-left: -1px;
+}
+
+.time-option:hover {
+  position: relative;
+  z-index: 1;
+  color: var(--ink);
+  border-color: var(--ink);
+  background: var(--paper-warm);
+}
+
+.side-pick .time-option:hover {
+  border-color: var(--ink);
+}
+
+.time-option.on,
+.side-pick .pick.on {
+  position: relative;
+  z-index: 2;
+  color: #fffaf0;
+  background: var(--ink);
+  border-color: var(--ink);
+  box-shadow: none;
+}
+
+.choice-check {
+  stroke: currentColor;
+}
+
+.game-pick .time-option {
+  min-width: 128px;
+  justify-content: space-between;
+  height: 46px;
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.password-control {
+  border-radius: 0;
+  background: var(--surface);
+  border-color: rgba(48, 38, 26, 0.28);
+}
+
+.password-control input {
+  height: 38px;
+}
+
+.lobby-create {
+  grid-column: 1 / -1;
+  align-self: flex-end;
+  justify-self: end;
+  min-width: 176px;
+  height: 48px;
+  margin-top: 2px;
+}
+
+.settings-head {
+  justify-content: flex-start;
+  gap: 24px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--line);
+}
+
+.settings-head h2 {
+  font-size: 30px;
+}
+
+.settings-grid {
+  gap: 0;
+  border-top: 1px solid var(--line-soft);
+}
+
+.setting-row {
+  min-height: 64px;
+  padding: 14px 4px;
+  border: 0;
+  border-bottom: 1px solid var(--line-soft);
+  border-radius: 0;
+  background: transparent;
+}
+
+.setting-row strong {
+  font-family: var(--font-display);
+  font-size: 15px;
+  letter-spacing: 0.06em;
+}
+
+.identity-card {
+  border-radius: 2px;
+  background: rgba(249, 244, 235, 0.48);
+  box-shadow: none;
+}
+
+.lobby-password,
+.notice {
+  border-radius: 0;
+}
+
+.error {
+  border-radius: 0;
+}
+
+.rail {
+  gap: 24px;
+  padding: 28px 26px 30px;
+  border-right-color: rgba(42, 34, 24, 0.24);
+  background-color: #e8decd;
+  background-image: repeating-linear-gradient(0deg, transparent 0 3px, rgba(255, 255, 255, 0.04) 3px 4px);
+  box-shadow: none;
+}
+
+.rail-head {
+  gap: 9px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--line);
+}
+
+.brand {
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: 0.15em;
+}
+
+.brand::before {
+  width: 6px;
+  height: 24px;
+  border-radius: 0;
+  background: var(--red-deep);
+  box-shadow: none;
+}
+
+.brand-sub {
+  padding-left: 18px;
+  font-size: 10px;
+  letter-spacing: 0.18em;
+}
+
+.panel {
+  flex: 1;
+  min-height: 0;
+  gap: 17px;
+}
+
+.panel h2 {
+  font-family: var(--font-display);
+  font-size: 17px;
+  line-height: 1.45;
+  letter-spacing: 0.05em;
+  color: var(--ink);
+}
+
+.room-summary {
+  padding-bottom: 21px;
+  border-bottom: 1px solid var(--line);
+}
+
+.room-summary-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.room-overline {
+  color: var(--red-deep);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.2em;
+}
+
+.room-phase {
+  padding: 4px 8px;
+  color: var(--soft-text);
+  border: 1px solid var(--line);
+  font-size: 10px;
+  line-height: 1;
+  letter-spacing: 0.06em;
+}
+
+.room-phase.phase-playing,
+.room-phase.phase-practice {
+  color: #fffaf0;
+  background: var(--red-deep);
+  border-color: var(--red-deep);
+}
+
+.room-summary h2 {
+  margin: 13px 0 6px;
+  font-family: var(--font-display);
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1.35;
+  letter-spacing: 0.035em;
+  color: var(--ink);
+}
+
+.room-meta {
+  margin: 0;
+  color: var(--soft-text);
+  font-size: 12px;
+  line-height: 1.5;
+  letter-spacing: 0.04em;
+}
+
+.room-details {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.room-details > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 0;
+}
+
+.room-details > div + div {
+  border-top: 1px solid var(--line-soft);
+}
+
+.room-details dt {
+  color: var(--soft-text);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+}
+
+.room-details dd {
+  margin: 0;
+  color: var(--ink);
+  font-family: var(--font-display);
+  font-size: 14px;
+  font-weight: 700;
+  text-align: right;
+}
+
+.spectator-label {
+  color: var(--soft-text);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+}
+
+.spectator-names {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.panel > .actions {
+  margin-top: auto;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
+
+.panel > .actions button {
+  flex: 1 1 0;
+  min-width: 0;
+  padding-inline: 12px;
+}
+
+.seat {
+  padding: 13px 14px;
+  border-radius: 1px;
+  background: rgba(249, 244, 235, 0.56);
+  box-shadow: none;
+}
+
+.seat.active {
+  border-color: rgba(157, 48, 38, 0.46);
+  box-shadow: inset 3px 0 0 var(--red-deep);
+  background: rgba(157, 48, 38, 0.045);
+}
+
+.seat.empty {
+  background: transparent;
+}
+
+.seat.partner {
+  background: rgba(157, 48, 38, 0.045);
+}
+
+.seat-tag {
+  font-size: 10px;
+  letter-spacing: 0.2em;
+}
+
+.seat-name {
+  font-family: var(--font-display);
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.chip {
+  height: 26px;
+  border: 1px solid rgba(96, 72, 40, 0.2);
+  border-radius: 1px;
+  background: transparent;
+}
+
+.clock-side {
+  border-radius: 1px;
+  background: rgba(249, 244, 235, 0.55);
+}
+
+.clock-side.running {
+  border-color: var(--red-deep);
+  box-shadow: inset 3px 0 0 var(--red-deep);
+}
+
+.move-clock {
+  border-radius: 1px;
+}
+
+.actions {
+  gap: 10px;
+}
+
+.actions .primary {
+  color: #fffaf0;
+}
+
+.toggle .box {
+  border-radius: 1px;
+}
+
+.toggle input:focus-visible + .box {
+  outline: 2px solid var(--red-deep);
+}
+
+.room-stage {
+  background-color: #e8dece;
+  background-image:
+    linear-gradient(90deg, rgba(69, 54, 36, 0.035) 1px, transparent 1px),
+    linear-gradient(rgba(69, 54, 36, 0.035) 1px, transparent 1px);
+  background-size: 52px 52px;
+}
+
+.seat-strip {
+  justify-content: center;
+  gap: 10px;
+  min-width: 230px;
+  padding: 8px 16px;
+  border-radius: 1px;
+  background: rgba(248, 242, 231, 0.78);
+  box-shadow: none;
+}
+
+.seat-strip.active {
+  border-color: rgba(157, 48, 38, 0.5);
+  box-shadow: inset 3px 0 0 var(--red-deep);
+  transform: none;
+}
+
+.seat-strip.empty {
+  background: rgba(248, 242, 231, 0.36);
+}
+
+.seat-self {
+  padding: 2px 5px;
+  color: var(--red-deep);
+  border: 1px solid rgba(157, 48, 38, 0.3);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.seat-strip-clock {
+  margin-left: 4px;
+}
+
+.canvas-host canvas {
+  filter: drop-shadow(0 24px 36px rgba(28, 24, 18, 0.15));
+  transform-origin: center;
+  transition: transform var(--dur-base) var(--ease-standard);
+}
+
+.workbench[data-board-size="compact"] .canvas-host canvas {
+  transform: scale(1);
+}
+
+.workbench[data-board-size="standard"] .canvas-host canvas {
+  transform: scale(1.14);
+}
+
+.workbench[data-board-size="large"] .canvas-host canvas {
+  transform: scale(1.28);
+}
+
+.controls {
+  border-top-color: rgba(42, 34, 24, 0.2);
+  background: rgba(233, 223, 207, 0.9);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+.result-banner {
+  border-radius: 2px;
+  background: rgba(32, 29, 24, 0.96);
+}
+
+.mvp {
+  background-color: #e8decd;
+  background-image: repeating-linear-gradient(0deg, transparent 0 3px, rgba(255, 255, 255, 0.04) 3px 4px);
+  border-right-color: var(--line);
+}
+
+.mvp-card {
+  border-radius: 2px;
+  border-color: rgba(157, 48, 38, 0.38);
+  background: #f5ecde;
+  box-shadow: 8px 8px 0 rgba(34, 28, 20, 0.16);
+}
+
+.mvp-badge {
+  background: none;
+  -webkit-background-clip: initial;
+  background-clip: initial;
+  color: var(--red-deep);
+  filter: none;
+  animation: none;
+}
+
+.mvp-stats > div {
+  border-radius: 1px;
+}
+
+.lobby-view {
+  animation: none;
+}
+
+.floating-message {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  z-index: 120;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 9px;
+  width: max-content;
+  max-width: min(560px, calc(100vw - 40px));
+  padding: 0 20px;
+  text-align: center;
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+}
+
+.workbench:not(.lobby-mode) .floating-message {
+  left: calc(50% + 152px);
+}
+
+.workbench:not(.lobby-mode) .floating-message span {
+  text-shadow: 0 1px 1px rgba(255, 248, 235, 0.72);
+}
+
+.floating-message::before {
+  content: "";
+  width: 34px;
+  height: 2px;
+  background: var(--red-deep);
+}
+
+.floating-message span {
+  padding: 0;
+  color: var(--ink);
+  background: transparent;
+  font-family: var(--font-display);
+  font-size: clamp(18px, 1.8vw, 25px);
+  font-weight: 700;
+  line-height: 1.55;
+  letter-spacing: 0.055em;
+  text-shadow:
+    0 1px 2px var(--paper-warm),
+    0 0 14px var(--paper-warm);
+}
+
+.floating-message.is-error::before {
+  background: #b33e32;
+}
+
+.floating-message.is-error span {
+  color: var(--red-deep);
+}
+
+.floating-message-enter-active,
+.floating-message-leave-active {
+  transition:
+    opacity var(--dur-base) var(--ease-standard),
+    transform var(--dur-slow) var(--ease-standard);
+}
+
+.floating-message-enter-from {
+  opacity: 0;
+  transform: translate(-50%, calc(-50% + 14px)) scale(0.98);
+}
+
+.floating-message-leave-to {
+  opacity: 0;
+  transform: translate(-50%, calc(-50% - 10px)) scale(0.99);
+}
+
+[data-theme="ink"] .lobby-stage,
+[data-theme="ink"] .room-stage {
+  background-color: #181613;
+  background-image:
+    linear-gradient(90deg, rgba(236, 222, 199, 0.06) 1px, transparent 1px),
+    linear-gradient(rgba(236, 222, 199, 0.06) 1px, transparent 1px),
+    repeating-linear-gradient(115deg, transparent 0 22px, rgba(236, 222, 199, 0.018) 22px 23px);
+  background-size: 64px 64px, 64px 64px, auto;
+}
+
+[data-theme="ink"] .lobby-topbar {
+  background: transparent;
+  border-bottom-color: rgba(243, 234, 217, 0.22);
+}
+
+[data-theme="ink"] .lobby-main,
+[data-theme="ink"] .lobby-form-card,
+[data-theme="ink"] .lobby-settings,
+[data-theme="ink"] .setting-row {
+  background: transparent;
+}
+
+[data-theme="ink"] .lobby-empty {
+  border-color: rgba(243, 234, 217, 0.18);
+  background: transparent;
+}
+
+[data-theme="ink"] .lobby-stage::after {
+  border-color: rgba(243, 234, 217, 0.13);
+  background-image:
+    repeating-linear-gradient(0deg, transparent 0 55px, rgba(243, 234, 217, 0.1) 55px 56px),
+    repeating-linear-gradient(90deg, transparent 0 55px, rgba(243, 234, 217, 0.1) 55px 56px);
+  box-shadow: inset 0 0 0 18px rgba(24, 22, 19, 0.12);
+}
+
+[data-theme="ink"] .lobby-create-card {
+  border-color: rgba(243, 234, 217, 0.28);
+}
+
+[data-theme="ink"] .lobby-create-card:hover {
+  color: #f3ead9;
+  border-color: rgba(239, 139, 127, 0.55);
+}
+
+[data-theme="ink"] .lobby-create-card:hover .create-card-mark {
+  background: #a64035;
+}
+
+[data-theme="ink"] .empty-board-art rect {
+  fill: #2b2721;
+}
+
+[data-theme="ink"] .rail,
+[data-theme="ink"] .mvp {
+  background-color: #201d18;
+  background-image: repeating-linear-gradient(0deg, transparent 0 3px, rgba(255, 255, 255, 0.018) 3px 4px);
+}
+
+[data-theme="ink"] .seat,
+[data-theme="ink"] .clock-side,
+[data-theme="ink"] .seat-strip,
+[data-theme="ink"] .mvp-card {
+  background: rgba(43, 39, 33, 0.82);
+}
+
+[data-theme="ink"] .primary {
+  color: #fffaf0;
+  border-color: #b4473c;
+  background: #8d2e25;
+}
+
+[data-theme="ink"] .lobby-nav button.active .nav-icon {
+  stroke: #ef8b7f;
+}
+
+[data-theme="ink"] .lobby-nav button.active::after {
+  background: #d56559;
+}
+
+[data-theme="ink"] .lobby-settings-button {
+  color: #d8cebc;
+  border-color: rgba(243, 234, 217, 0.28);
+}
+
+[data-theme="ink"] .lobby-settings-button:hover {
+  color: #fffaf0;
+  background: rgba(255, 248, 235, 0.07);
+  border-color: rgba(243, 234, 217, 0.5);
+}
+
+[data-theme="ink"] .lobby-settings-button.active {
+  color: #fffaf0;
+  background: #98372d;
+  border-color: #c85e52;
+}
+
+[data-theme="ink"] .lobby-form-back {
+  color: #fffaf0;
+  background: #98372d;
+  border-color: #c85e52;
+  box-shadow: 2px 2px 0 #080706;
+}
+
+[data-theme="ink"] .lobby-form-back:hover {
+  color: #fffaf0;
+  background: #aa4338;
+  border-color: #df776b;
+  box-shadow: 3px 3px 0 #080706;
+}
+
+[data-theme="ink"] .lobby-kicker {
+  color: #ef8b7f;
+}
+
+[data-theme="ink"] .time-option {
+  color: #e9dfcf;
+  background: rgba(255, 248, 235, 0.055);
+  border-color: rgba(243, 234, 217, 0.26);
+}
+
+[data-theme="ink"] .time-option:hover {
+  color: #fffaf0;
+  background: #302b24;
+  border-color: #e4d8c5;
+}
+
+[data-theme="ink"] .time-option.on,
+[data-theme="ink"] .side-pick .pick.on {
+  color: #fffaf0;
+  background: #98372d;
+  border-color: #d76d61;
+}
+
+[data-theme="ink"] .choice-check {
+  stroke: #fffaf0;
+}
+
+[data-theme="ink"] .toggle .box {
+  background: #24211c;
+  border-color: rgba(243, 234, 217, 0.42);
+}
+
+[data-theme="ink"] .toggle input:checked + .box {
+  background: #98372d;
+  border-color: #c85e52;
+}
+
+[data-theme="ink"] .toggle input:checked + .box::after {
+  border-color: #fffaf0;
+}
+
+[data-theme="ink"] .ghost,
+[data-theme="ink"] .lobby-main .ghost {
+  color: #f3ead9;
+  background: transparent;
+  border-color: rgba(243, 234, 217, 0.3);
+}
+
+[data-theme="ink"] .ghost:hover,
+[data-theme="ink"] .lobby-main .ghost:hover {
+  color: #fffaf0;
+  background: rgba(255, 248, 235, 0.08);
+  border-color: #f3ead9;
+}
+
+[data-theme="ink"] .primary,
+[data-theme="ink"] .lobby-main .primary {
+  color: #fffaf0;
+  background: #98372d;
+  border-color: #c85e52;
+  box-shadow: 4px 4px 0 #080706;
+}
+
+[data-theme="ink"] .primary:hover,
+[data-theme="ink"] .lobby-main .primary:hover {
+  color: #fffaf0;
+  background: #aa4338;
+  box-shadow: 5px 5px 0 #080706;
+}
+
+[data-theme="ink"] .lobby-room-card .room-actions button,
+[data-theme="ink"] .lobby-main .lobby-create-action {
+  box-shadow: 2px 2px 0 #080706;
+}
+
+[data-theme="ink"] .lobby-room-card .room-actions button:hover,
+[data-theme="ink"] .lobby-main .lobby-create-action:hover {
+  box-shadow: 3px 3px 0 #080706;
+}
+
+[data-theme="ink"] .floating-message span {
+  color: #f3ead9;
+  background: transparent;
+  text-shadow:
+    0 1px 2px #181613,
+    0 0 16px #181613;
+}
+
+[data-theme="ink"] .floating-message.is-error span {
+  color: #ffb3a8;
+}
+
+/* Messages over the ink-theme board still sit on the light paper canvas. */
+[data-theme="ink"] .workbench:not(.lobby-mode) .floating-message span {
+  color: #201d18;
+  text-shadow: 0 1px 1px rgba(255, 248, 235, 0.72);
+}
+
+[data-theme="ink"] .workbench:not(.lobby-mode) .floating-message.is-error span {
+  color: #9d3026;
+}
+
+[data-theme="ink"] button:disabled {
+  opacity: 0.62;
+}
+
+[data-theme="ink"] .room-state,
+[data-theme="ink"] .room-stats,
+[data-theme="ink"] .lobby-form-heading p,
+[data-theme="ink"] .lobby-toolbar-copy p,
+[data-theme="ink"] .settings-head > span {
+  color: #c8bda9;
+}
+
+[data-theme="ink"] .notice {
+  color: #e6c88f;
+  background: rgba(212, 162, 74, 0.11);
+}
+
+[data-theme="ink"] .error {
+  color: #ffb3a8;
+  background: rgba(176, 58, 46, 0.17);
+  border-left-color: #d56559;
+}
+
+[data-theme="ink"] .mvp-card {
+  background: #2b2721;
+  border-color: rgba(222, 128, 114, 0.42);
+}
+
+[data-theme="ink"] .mvp-eyebrow,
+[data-theme="ink"] .mvp-stats dt,
+[data-theme="ink"] .mvp-reason {
+  color: rgba(243, 234, 217, 0.72);
+}
+
+[data-theme="ink"] .mvp-name {
+  color: #f3ead9;
+}
+
+[data-theme="ink"] .mvp-stats > div {
+  background: rgba(255, 248, 235, 0.07);
+}
+
+@media (min-width: 901px) {
+  .workbench:not(.lobby-mode) {
+    grid-template-columns: 304px minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 1040px) {
+  .lobby-topbar {
+    gap: 20px;
+  }
+
+  .lobby-nav {
+    gap: 14px;
+  }
+
+  .lobby-empty {
+    grid-template-columns: minmax(230px, 0.9fr) minmax(300px, 1.1fr);
+    gap: 24px;
+    padding: 36px;
+  }
+}
+
+@media (max-width: 900px) {
+  .workbench:not(.lobby-mode) .floating-message {
+    top: 64%;
+    left: 50%;
+  }
+
+  .lobby-screen {
+    gap: 14px;
+    padding: 14px 20px 36px;
+  }
+
+  .lobby-topbar {
+    grid-template-columns: 1fr auto;
+    gap: 14px 20px;
+    padding: 14px 0 12px;
+    border-radius: 0;
+  }
+
+  .lobby-nav {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    justify-self: stretch;
+    justify-content: flex-start;
+    gap: 22px;
+    border-top: 1px solid var(--line-soft);
+  }
+
+  .lobby-nav button {
+    height: 44px;
+  }
+
+  .lobby-nav button::after {
+    bottom: -1px;
+  }
+
+  .lobby-account {
+    margin-left: 0;
+  }
+
+  .lobby-main {
+    padding-top: 16px;
+  }
+
+  .lobby-empty {
+    grid-template-columns: 1fr;
+    gap: 30px;
+    min-height: 0;
+    padding: 30px 0 44px;
+  }
+
+  .lobby-empty::before {
+    font-size: 220px;
+  }
+
+  .empty-copy {
+    grid-row: 1;
+  }
+
+  .empty-board-art {
+    grid-column: 1;
+    grid-row: 2;
+    justify-self: end;
+    width: min(390px, 78%);
+  }
+
+  .lobby-form-card,
+  .lobby-settings {
+    width: 100%;
+  }
+
+  .lobby-form-grid > .field,
+  .lobby-form-grid > .field:nth-child(even),
+  .lobby-form-grid > .field:last-child {
+    grid-column: 1;
+    padding: 20px 0;
+    border-left: 0;
+  }
+
+  .rail {
+    border-bottom-color: var(--line);
+  }
+}
+
+@media (max-width: 620px) {
+  .workbench:not(.lobby-mode) .floating-message {
+    top: 69%;
+  }
+
+  .workbench:not(.lobby-mode) {
+    grid-template-rows: auto minmax(500px, 1fr);
+    height: 100dvh;
+  }
+
+  .workbench:not(.lobby-mode) .rail {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 10px;
+    max-height: 310px;
+    padding: 12px 14px;
+    overflow-y: auto;
+  }
+
+  .workbench:not(.lobby-mode) .rail-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    padding-bottom: 9px;
+  }
+
+  .workbench:not(.lobby-mode) .brand {
+    font-size: 18px;
+    letter-spacing: 0.12em;
+  }
+
+  .workbench:not(.lobby-mode) .brand::before {
+    height: 18px;
+  }
+
+  .workbench:not(.lobby-mode) .brand-sub {
+    padding-left: 0;
+  }
+
+  .workbench:not(.lobby-mode) .panel {
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+    min-width: 0;
+  }
+
+  .workbench:not(.lobby-mode) .room-summary {
+    padding-bottom: 9px;
+  }
+
+  .workbench:not(.lobby-mode) .room-summary h2 {
+    margin: 5px 0 2px;
+    font-size: 18px;
+  }
+
+  .workbench:not(.lobby-mode) .room-details {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .workbench:not(.lobby-mode) .room-details > div {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+    padding: 6px 0;
+  }
+
+  .workbench:not(.lobby-mode) .room-details > div + div {
+    padding-left: 12px;
+    border-top: 0;
+    border-left: 1px solid var(--line-soft);
+  }
+
+  .workbench:not(.lobby-mode) .room-details dd {
+    font-size: 12px;
+    text-align: left;
+  }
+
+  .workbench:not(.lobby-mode) .panel > .actions {
+    margin-top: 0;
+    padding-top: 9px;
+    gap: 8px;
+  }
+
+  .workbench:not(.lobby-mode) .actions button {
+    flex: 1 1 auto;
+  }
+
+  .workbench:not(.lobby-mode) .toggle {
+    min-height: 34px;
+  }
+
+  .workbench:not(.lobby-mode) .board-col {
+    gap: 6px;
+    padding: 8px 10px;
+  }
+
+  .workbench:not(.lobby-mode) .seat-strip {
+    padding: 5px 10px;
+  }
+
+  .workbench:not(.lobby-mode) .canvas-host {
+    padding: 6px;
+  }
+
+  /* The Pixi scene uses a fixed 16:9 logical surface. Scaling that surface up and
+     clipping its empty side margins keeps the square board readable on a phone
+     without stretching pieces or changing hit testing. */
+  .workbench:not(.lobby-mode) .canvas-host canvas {
+    width: 200% !important;
+    height: auto !important;
+    max-width: none !important;
+    max-height: none !important;
+  }
+
+  .workbench[data-board-size="compact"] .canvas-host canvas {
+    transform: scale(0.96);
+  }
+
+  .workbench[data-board-size="standard"] .canvas-host canvas {
+    transform: scale(1.02);
+  }
+
+  .workbench[data-board-size="large"] .canvas-host canvas {
+    transform: scale(1.06);
+  }
+
+  .lobby-screen {
+    padding-inline: 14px;
+  }
+
+  .lobby-topbar {
+    gap: 10px;
+  }
+
+  .lobby-brand h1 {
+    font-size: 21px;
+  }
+
+  .lobby-brand-note {
+    font-size: 9px;
+  }
+
+  .lobby-account {
+    gap: 6px;
+  }
+
+  .guest-name {
+    display: none;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .connection-state {
+    padding-left: 6px;
+    font-size: 10px;
+  }
+
+  .lobby-population {
+    gap: 4px;
+    padding-left: 6px;
+  }
+
+  .lobby-population-label,
+  .lobby-population-unit {
+    display: none;
+  }
+
+  .lobby-settings-button {
+    width: 36px;
+    height: 36px;
+    margin-left: 0;
+  }
+
+  .lobby-nav {
+    justify-content: space-between;
+    gap: 4px;
+  }
+
+  .lobby-nav button {
+    padding-inline: 2px;
+    font-size: 13px;
+  }
+
+  .nav-icon {
+    width: 19px;
+    height: 19px;
+    margin-right: 5px;
+  }
+
+  .lobby-toolbar {
+    align-items: flex-start;
+  }
+
+  .lobby-toolbar-copy {
+    grid-template-columns: 1fr;
+  }
+
+  .lobby-toolbar-copy h2 {
+    font-size: 25px;
+  }
+
+  .lobby-toolbar-copy p {
+    grid-column: 1;
+  }
+
+  .lobby-room-count {
+    margin-top: 22px;
+  }
+
+  .lobby-room-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .lobby-empty {
+    padding: 24px 0 40px;
+  }
+
+  .lobby-empty strong {
+    font-size: 36px;
+  }
+
+  .empty-board-art {
+    width: 100%;
+  }
+
+  .lobby-form-heading {
+    grid-template-columns: 1fr;
+  }
+
+  .lobby-form-heading p {
+    grid-column: 1;
+  }
+
+  .lobby-form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .lobby-form-grid > .field,
+  .lobby-form-grid > .field:nth-child(even) {
+    grid-column: 1;
+    padding: 20px 0;
+    border-left: 0;
+  }
+
+  .game-pick .time-option {
+    min-width: 0;
+    flex: 1;
+  }
+
+  .lobby-create {
+    justify-self: stretch;
+    width: 100%;
   }
 }
 </style>

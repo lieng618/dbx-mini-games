@@ -1,25 +1,22 @@
 {
-  "$schema": "https://raw.githubusercontent.com/t8y2/dbx/plugin-sdk-v1/plugins/manifest.schema.json",
+  "$schema": "https://raw.githubusercontent.com/t8y2/dbx/main/plugins/manifest.schema.json",
   "manifest_version": 1,
-  "id": "io.github.southernmortals.board-games",
-  "name": "Board Games",
-  "version": "0.2.5",
-  "publisher": "southernMortals",
-  "description": "Local-network Chinese chess and five-in-a-row, with spectators and replay.",
+  "id": "io.github.lieng618.dbx-mini-games",
+  "name": "DBX Mini Games",
+  "version": "0.3.0",
+  "publisher": "lieng618",
+  "description": "A quiet online parlour for Chinese chess and Gomoku, with rooms, spectators, and match clocks.",
   "icon": "assets/plugin.svg",
-  "source": "https://github.com/southernMortals/dbx-board-games",
-  "homepage": "https://github.com/southernMortals/dbx-board-games",
+  "source": "https://github.com/lieng618/dbx-mini-games",
+  "homepage": "https://github.com/lieng618/dbx-mini-games",
   "engines": {
     "dbx": ">=0.6.44",
     "host_api": "1"
   },
   "permissions": [
-    "host.events"
+    "host.network:https://203.0.113.10"
   ],
   "entrypoints": {
-    "backend": {
-      "executable": "bin/dbx-plugin-board-games"
-    },
     "ui": {
       "root": "ui",
       "entry": "ui/index.html"
@@ -28,20 +25,20 @@
   "contributions": [
     {
       "type": "workbench",
-      "id": "io.github.southernmortals.board-games.workbench",
-      "label": "Board Games",
-      "description": "Host or join a local-network Chinese chess or five-in-a-row table.",
+      "id": "io.github.lieng618.dbx-mini-games.workbench",
+      "label": "DBX Mini Games",
+      "description": "Settle in for a game of Chinese chess or Gomoku.",
       "icon": "assets/plugin.svg"
     }
   ],
   "localizations": {
     "zh-CN": {
-      "name": "棋牌桌",
-      "description": "本地局域网中国象棋与五子棋，支持观战与对局复盘。",
+      "name": "棋牌小馆",
+      "description": "一间线上棋牌小馆：对弈中国象棋与五子棋，可开房、观战。",
       "contributions": {
-        "io.github.southernmortals.board-games.workbench": {
-          "label": "棋牌桌",
-          "description": "在局域网内开桌或加入中国象棋、五子棋对局。"
+        "io.github.lieng618.dbx-mini-games.workbench": {
+          "label": "棋牌小馆",
+          "description": "开一桌，或加入一局中国象棋、五子棋。"
         }
       }
     }

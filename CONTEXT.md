@@ -1,4 +1,4 @@
-# CONTEXT — Board Games plugin
+# CONTEXT — DBX Mini Games plugin
 
 Glossary for the DBX board-games plugin. Terms only; no implementation detail.
 
@@ -19,13 +19,13 @@ more in a row wins. There is deliberately no 三三 / 四四 / 长连 referee.
 
 ## Room and seating
 
-**Room** — one hosted match table on the local network. A Room has one Host, up to
+**Room** — one in-memory match table on the cloud game service. A Room has one Host, up to
 two Seats, and zero or more Spectators. A Room is tied to one Game: 象棋 and 五子棋
 never share a Room.
 
-**Host** — the participant whose machine runs the authoritative sidecar listener. The
-Host is also the referee: only the Host's state is authoritative. When the Host
-leaves, the Room ends.
+**Host** — the participant who created the Room. The Host controls room actions such as
+starting the Match, but the cloud service is the referee. Host status transfers to a
+remaining seated player when the creator leaves.
 
 **Seat** — an authoritative playing position. A Room has exactly two Seats
 (`seat 0` and `seat 1`), independent of Game. A Seat is either occupied or empty.
@@ -35,16 +35,16 @@ leaves, the Room ends.
 **Spectator** — a participant connected to the Room who holds no Seat. A Spectator
 receives the same authoritative state as an Occupant but cannot move.
 
-**Occupancy rule** — an arriving participant takes a Seat when one is empty, and
-otherwise becomes a Spectator. This is the "first to arrive sits down" behaviour:
-arrival order, not an explicit challenge, decides who plays.
+**Occupancy rule** — a participant joining as a player takes an empty Seat. A Room with
+both Seats occupied rejects another player; joining as a spectator is an explicit
+choice and is available while a Match is in progress.
 
-**Vacating** — a Seat becomes empty only when its Occupant leaves the Seat on
-purpose, or disconnects. Seats are never rotated automatically between Games.
-(This is why a completed Game does not reshuffle the table.)
+**Vacating** — a Seat becomes empty when its Occupant leaves on purpose. A transient
+disconnect keeps the Seat reserved for the reconnect window. Seats are never rotated
+automatically between Games, so completion does not reshuffle the table.
 
-**Rotation** — the act of a vacated Seat being taken by the next participant. Rotation
-is triggered by Vacating, never by a Game ending.
+**Rotation** — the act of a vacated Seat being taken by a later player. Rotation is
+triggered by Vacating, never by a Game ending.
 
 ## Match
 
@@ -67,7 +67,7 @@ effect only on the other Occupant's agreement. There is no unconditional Undo.
 opponent as winner.
 
 **Forfeit** — the result recorded when an Occupant disconnects and does not return
-before the reconnect window closes, or when their clock expires.
+before the cloud reconnect window closes, or when their clock expires.
 
 ## Clock
 

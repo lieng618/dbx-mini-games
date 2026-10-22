@@ -3,7 +3,7 @@ package app
 import (
 	"testing"
 
-	"github.com/southernMortals/dbx-board-games/backend/internal/room"
+	"github.com/lieng618/dbx-mini-games/backend/internal/room"
 )
 
 func TestLobbySnapshotShowsOpeningPosition(t *testing.T) {

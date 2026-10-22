@@ -1,7 +1,7 @@
 package app
 
 import (
-	"github.com/southernMortals/dbx-board-games/backend/internal/game"
+	"github.com/lieng618/dbx-mini-games/backend/internal/game"
 )
 
 // scenarioMoves returns a scripted line that produces one interesting position.

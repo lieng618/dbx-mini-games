@@ -1,4 +1,7 @@
-# Delivery plan — `io.github.southernmortals.board-games`
+# Delivery plan — `io.github.lieng618.dbx-mini-games`
+
+> 历史文档：这是旧 Sidecar/LAN 架构的实施计划，已被当前“纯前端插件 + 独立云大厅”
+> 实现取代。当前行为以 `README.md`、`CONTEXT.md` 和代码为准。
 
 Complete delivery, staged so that each milestone is independently verifiable. "Complete"
 means both games, spectators, seating, effects, packaging, signing, and catalog — not a

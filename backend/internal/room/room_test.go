@@ -3,7 +3,7 @@ package room
 import (
 	"testing"
 
-	"github.com/southernMortals/dbx-board-games/backend/internal/game"
+	"github.com/lieng618/dbx-mini-games/backend/internal/game"
 )
 
 func newRoom(t *testing.T, gameName string) *Room {
@@ -71,6 +71,23 @@ func TestDuplicateJoinRejected(t *testing.T) {
 	}
 	if _, err := r.Join("host", "房主"); err != ErrAlreadyJoined {
 		t.Fatalf("expected ErrAlreadyJoined, got %v", err)
+	}
+}
+
+func TestExplicitSpectatorJoinLeavesSeatOpen(t *testing.T) {
+	r := newRoom(t, "gomoku")
+	if _, err := r.Join("host", "房主"); err != nil {
+		t.Fatal(err)
+	}
+	member, err := r.JoinSpectator("watcher", "观战者")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if member.Seat != -1 {
+		t.Fatalf("spectator seat = %d, want -1", member.Seat)
+	}
+	if r.Seats()[1] != "" {
+		t.Fatal("explicit spectator consumed the open seat")
 	}
 }
 
@@ -237,6 +254,20 @@ func TestHostLeavingEndsRoom(t *testing.T) {
 	}
 	if r.Phase() != PhaseFinished {
 		t.Fatalf("expected the room to end when the host leaves, got %s", r.Phase())
+	}
+}
+
+func TestCloudLeaveKeepsRoomOpen(t *testing.T) {
+	r := newRoom(t, "gomoku")
+	mustJoin(t, r, "host", "a")
+	if err := r.LeaveForCloud("host"); err != nil {
+		t.Fatal(err)
+	}
+	if r.Phase() != PhaseLobby {
+		t.Fatalf("cloud leave changed the room phase to %s", r.Phase())
+	}
+	if r.Count() != 1 {
+		t.Fatalf("expected one remaining member, got %d", r.Count())
 	}
 }
 

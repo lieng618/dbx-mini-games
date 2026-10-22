@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/southernMortals/dbx-board-games/backend/internal/room"
+	"github.com/lieng618/dbx-mini-games/backend/internal/room"
 )
 
 func newTestApp(t *testing.T) *App {

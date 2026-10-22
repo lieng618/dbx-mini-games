@@ -13,13 +13,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/southernMortals/dbx-board-games/backend/internal/ai"
-	"github.com/southernMortals/dbx-board-games/backend/internal/discovery"
-	"github.com/southernMortals/dbx-board-games/backend/internal/lan"
-	"github.com/southernMortals/dbx-board-games/backend/internal/replay"
-	"github.com/southernMortals/dbx-board-games/backend/internal/room"
+	"github.com/lieng618/dbx-mini-games/backend/internal/ai"
+	"github.com/lieng618/dbx-mini-games/backend/internal/discovery"
+	"github.com/lieng618/dbx-mini-games/backend/internal/lan"
+	"github.com/lieng618/dbx-mini-games/backend/internal/replay"
+	"github.com/lieng618/dbx-mini-games/backend/internal/room"
 
-	"github.com/southernMortals/dbx-board-games/backend/internal/game"
+	"github.com/lieng618/dbx-mini-games/backend/internal/game"
 )
 
 // EmitFunc publishes an event to the host.

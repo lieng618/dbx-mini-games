@@ -8,11 +8,10 @@ import (
 	"testing"
 )
 
-// TestSidecarIdentityMatchesManifest guards the contract DBX enforces at startup: the id
-// and version the sidecar reports must equal the manifest's. A mismatch makes the host
-// refuse to run the backend with "Sidecar identity or protocol does not match manifest",
-// which is only visible at runtime.
-func TestSidecarIdentityMatchesManifest(t *testing.T) {
+// TestFrontendManifestAndServerVersion guards the split between the frontend-only plugin
+// package and the separately deployed cloud service. The plugin must not declare a
+// backend entrypoint, and the server's advertised version must match the package.
+func TestFrontendManifestAndServerVersion(t *testing.T) {
 	root := filepath.Join("..", "..", "..")
 
 	raw, err := os.ReadFile(filepath.Join(root, "manifest.json"))
@@ -20,11 +19,18 @@ func TestSidecarIdentityMatchesManifest(t *testing.T) {
 		t.Skipf("manifest not reachable from the test working directory: %v", err)
 	}
 	var manifest struct {
-		ID      string `json:"id"`
-		Version string `json:"version"`
+		ID          string `json:"id"`
+		Version     string `json:"version"`
+		Entrypoints struct {
+			Backend json.RawMessage `json:"backend"`
+		} `json:"entrypoints"`
 	}
 	if err := json.Unmarshal(raw, &manifest); err != nil {
 		t.Fatalf("manifest is not valid JSON: %v", err)
+	}
+
+	if len(manifest.Entrypoints.Backend) > 0 && string(manifest.Entrypoints.Backend) != "null" {
+		t.Fatal("a frontend-only plugin must not declare a backend entrypoint")
 	}
 
 	source, err := os.ReadFile(filepath.Join(root, "backend", "main.go"))
@@ -32,22 +38,13 @@ func TestSidecarIdentityMatchesManifest(t *testing.T) {
 		t.Fatalf("cannot read the sidecar entrypoint: %v", err)
 	}
 
-	idPattern := regexp.MustCompile(`ID:\s+"([^"]+)"`)
 	versionPattern := regexp.MustCompile(`const version = "([^"]+)"`)
-
-	idMatch := idPattern.FindSubmatch(source)
-	if idMatch == nil {
-		t.Fatal("the sidecar entrypoint must declare a plugin id")
-	}
-	if got := string(idMatch[1]); got != manifest.ID {
-		t.Fatalf("sidecar id %q must equal manifest id %q", got, manifest.ID)
-	}
 
 	versionMatch := versionPattern.FindSubmatch(source)
 	if versionMatch == nil {
-		t.Fatal("the sidecar entrypoint must declare a version")
+		t.Fatal("the cloud entrypoint must declare a version")
 	}
 	if got := string(versionMatch[1]); got != manifest.Version {
-		t.Fatalf("sidecar version %q must equal manifest version %q", got, manifest.Version)
+		t.Fatalf("server version %q must equal manifest version %q", got, manifest.Version)
 	}
 }

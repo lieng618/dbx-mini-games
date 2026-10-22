@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/southernMortals/dbx-board-games/backend/internal/game"
-	"github.com/southernMortals/dbx-board-games/backend/internal/room"
+	"github.com/lieng618/dbx-mini-games/backend/internal/game"
+	"github.com/lieng618/dbx-mini-games/backend/internal/room"
 )
 
 // TestPerMoveLimitTimesOut covers the second kind of time limit: a seat can lose a move

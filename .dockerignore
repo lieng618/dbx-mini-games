@@ -1,0 +1,7 @@
+.git
+.dbx-dev
+dist
+node_modules
+ui
+work
+scripts/out

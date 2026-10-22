@@ -1,12 +1,13 @@
 {
-  "name": "dbx-board-games-ui",
+  "name": "dbx-mini-games-ui",
   "private": true,
   "type": "module",
   "license": "Apache-2.0",
   "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "build:watch": "vite build --watch"
+    "dev": "node scripts/dbx-vite.mjs",
+    "build": "node scripts/dbx-vite.mjs build",
+    "build:watch": "node scripts/dbx-vite.mjs build --watch",
+    "package:dbx": "npm run build && dbx-plugin package ."
   },
   "dependencies": {
     "pixi-filters": "^6.1.5",

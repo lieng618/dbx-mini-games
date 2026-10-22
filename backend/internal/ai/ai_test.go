@@ -3,9 +3,9 @@ package ai
 import (
 	"testing"
 
-	"github.com/southernMortals/dbx-board-games/backend/internal/game"
-	"github.com/southernMortals/dbx-board-games/backend/internal/game/gomoku"
-	"github.com/southernMortals/dbx-board-games/backend/internal/game/xiangqi"
+	"github.com/lieng618/dbx-mini-games/backend/internal/game"
+	"github.com/lieng618/dbx-mini-games/backend/internal/game/gomoku"
+	"github.com/lieng618/dbx-mini-games/backend/internal/game/xiangqi"
 )
 
 func at(file, rank int) int { return rank*gomokuSize + file }

@@ -13,3 +13,7 @@
 
 # Dependencies are installed from package-lock.json, never committed.
 /node_modules/
+
+# Local deployment and build configuration.
+/.env
+/deploy/.env
