@@ -115,9 +115,18 @@ function seatLabel(seat) {
   return m ? m.nickname : "空座";
 }
 
-/** Place the viewer's own seat along the near edge, with the opponent across the board. */
+/**
+ * Xiangqi is read from each player's side, so the viewer's seat stays near. Gomoku uses one
+ * shared screen orientation for both players: seat zero stays near and seat one stays far.
+ */
 function isNearSeat(seat) {
+  if (game.value === "gomoku") return seat === 0;
   return seat === (mySeat.value >= 0 ? mySeat.value : 0);
+}
+
+/** Only xiangqi is drawn from each player's own side of the table. */
+function shouldFlipBoard(gameId, seat) {
+  return gameId === "xiangqi" && seat === 1;
 }
 
 /** True when the seat is the one currently thinking. */
@@ -315,12 +324,13 @@ function describeError(raw) {
   return text || "操作失败";
 }
 
-function showFloatingMessage(text, tone = "info", duration = 3200) {
+function showFloatingMessage(text, tone = "info", duration = 3200, compact = false) {
   const message = String(text || "").trim();
   if (!message) return;
   floatingMessage.value = {
     text: message,
     tone,
+    compact,
     serial: ++floatingSerial,
   };
   clearTimeout(floatingTimer);
@@ -608,6 +618,10 @@ function dismissMvp() {
   mvpDismissed.value = true;
 }
 
+function closeResultOnEscape(event) {
+  if (event.key === "Escape" && mvp.value) dismissMvp();
+}
+
 // Fixed pseudo-random placement: the ribbons must not jump around when the panel re-renders.
 function confettiStyle(n) {
   const colors = ["#c8a24a", "#8f2f28", "#4a6b52", "#2f2a24", "#d9c48a"];
@@ -732,7 +746,7 @@ async function ensureScene() {
     try {
       const created = new BoardScene({ onCell });
       await created.init(boardHost.value, game.value);
-      created.setFlipped(mySeat.value === 1);
+      created.setFlipped(shouldFlipBoard(game.value, mySeat.value));
       scene = created;
       canvasFailed.value = false;
       if (typeof window !== "undefined" && window.__DBX_DEBUG_FX) {
@@ -759,6 +773,7 @@ onMounted(async () => {
 
   startClockTimers();
   startEvents();
+  window.addEventListener("keydown", closeResultOnEscape);
 
   await clearLegacyRecords();
   try {
@@ -776,6 +791,7 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  window.removeEventListener("keydown", closeResultOnEscape);
   if (mvpTimer) clearTimeout(mvpTimer);
   mvpTimer = null;
   clearTimeout(floatingTimer);
@@ -791,7 +807,10 @@ watch(role, async (next) => {
 });
 
 watch(game, (next) => {
-  if (scene) scene.setGame(next);
+  if (scene) {
+    scene.setGame(next);
+    scene.setFlipped(shouldFlipBoard(next, mySeat.value));
+  }
   else void ensureScene();
 });
 
@@ -805,9 +824,29 @@ watch(
 );
 
 // Seating can settle after the board is already mounted: a guest joins, a seat is released,
-// or a spectator sits down. Re-orient whenever the viewer's own side changes.
+// or a spectator sits down. Xiangqi follows the viewer's side; Gomoku keeps one orientation
+// so the same coordinate is visible in the same place on both screens.
 watch(mySeat, (seat) => {
-  scene?.setFlipped(seat === 1);
+  scene?.setFlipped(shouldFlipBoard(game.value, seat));
+});
+
+// A departure arrives as a normal room snapshot. Compare the seating table with its
+// previous value so the remaining player is told why their opponent vanished, while a
+// reconnect or a room change does not replay a stale notice.
+watch(seats, (next, previous) => {
+  if (role.value === "idle" || !selfId.value || !previous) return;
+  const myPreviousSeat = previous.findIndex((id) => id && id === selfId.value);
+  if (myPreviousSeat < 0) return;
+  const opponentSeat = 1 - myPreviousSeat;
+  const departedId = previous[opponentSeat];
+  if (!departedId || next[opponentSeat]) return;
+
+  const stillInRoom = members.value.some((member) => member.id === departedId);
+  let message = stillInRoom ? "对手已离开棋席" : "对手已离开房间";
+  if (result.value?.finished && result.value.reason === "forfeit") {
+    message = "对手已离开，本局判你胜";
+  }
+  showFloatingMessage(message, "info", 3600, true);
 });
 </script>
 
@@ -1254,9 +1293,8 @@ watch(mySeat, (seat) => {
       <!-- Seats flank the board so the players are placed around the table rather than
            listed away in the sidebar. Each one carries the person, the name and the clock. -->
       <div class="board-col">
-        <!-- Seats sit across the table, not beside it: seat one is the far side, seat zero
-             is the side nearest the viewer. Reading down the screen is then the same as
-             looking across a real board. -->
+        <!-- Seats sit across the table, not beside it. Xiangqi puts the viewer's own side
+             near; Gomoku keeps seat zero near for both players so their boards match. -->
         <aside
           v-for="seat in [0, 1]"
           :key="seat"
@@ -1300,16 +1338,29 @@ watch(mySeat, (seat) => {
       </div>
 
       <!-- 结算整活。低动效模式只留淡入：不撒彩带、不旋转，符合本项目的降级约定。
-           彩带整窗飘但只是细条，不压暗也不拦截点击；面板自己固定在左侧栏，
-           把棋盘和它上面的连线、印章等结算特效完整让出来。 -->
+           等棋盘的连线、印章演完后，居中的结算卡再出现。 -->
       <div v-if="mvp && !lowMotion" class="mvp-confetti" aria-hidden="true">
         <i v-for="n in 26" :key="n" :style="confettiStyle(n)"></i>
       </div>
 
-      <div v-if="mvp" class="mvp" :class="{ calm: lowMotion, draw: mvp.draw }">
+      <div
+        v-if="mvp"
+        class="mvp"
+        :class="{ calm: lowMotion, draw: mvp.draw }"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="mvp-title"
+        @click.self="dismissMvp"
+      >
         <div class="mvp-card">
+          <button
+            class="mvp-close"
+            type="button"
+            aria-label="收起结算卡"
+            @click="dismissMvp"
+          >×</button>
           <p class="mvp-eyebrow">本 局 最 有 价 值</p>
-          <h2 class="mvp-badge">MVP</h2>
+          <h2 id="mvp-title" class="mvp-badge">MVP</h2>
           <p class="mvp-name">{{ mvp.name }}</p>
           <p class="mvp-title">{{ mvp.title }}</p>
           <dl class="mvp-stats">
@@ -1321,7 +1372,6 @@ watch(mySeat, (seat) => {
           <p class="mvp-reason">{{ mvp.reason }}</p>
           <div class="mvp-actions">
             <button class="primary" @click="rematch">再来一局</button>
-            <button class="ghost" @click="dismissMvp">看看棋盘</button>
           </div>
         </div>
       </div>
@@ -1334,7 +1384,7 @@ watch(mySeat, (seat) => {
         v-if="floatingMessage"
         :key="floatingMessage.serial"
         class="floating-message"
-        :class="`is-${floatingMessage.tone}`"
+        :class="[`is-${floatingMessage.tone}`, { compact: floatingMessage.compact }]"
         :role="floatingMessage.tone === 'error' ? 'alert' : 'status'"
         :aria-live="floatingMessage.tone === 'error' ? 'assertive' : 'polite'"
         aria-atomic="true"
@@ -2934,24 +2984,22 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
 
 /* ── MVP panel ──────────────────────────────────────────────────────────── */
 
-/* Fixed rather than absolute: the panel is a full-window flourish and must not depend on
-   whichever ancestor happens to be positioned. */
+/* The result is a modal card at the centre of the viewport, independent of the room layout.
+   Its backdrop is clickable so the player can return to the board without the old
+   secondary action. */
 .mvp {
   position: fixed;
-  left: 0;
-  top: 0;
-  bottom: 0;
+  inset: 0;
   z-index: 60;
-  width: 336px;
-  max-width: 100vw;
+  width: auto;
+  max-width: none;
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 18px;
-  /* 结算后的展示层，不该挡住棋盘：只有卡片本身接收点击，其余区域留给棋盘。 */
-  pointer-events: none;
-  background: linear-gradient(180deg, #fffdf8, #f2e8d5);
-  border-right: 1px solid var(--line);
+  padding: clamp(16px, 4vw, 40px);
+  overflow-y: auto;
+  background: rgba(28, 26, 23, 0.48);
+  backdrop-filter: blur(5px);
   animation: mvp-fade 320ms ease both;
 }
 
@@ -2984,8 +3032,10 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
 .mvp-card {
   position: relative;
   z-index: 1;
-  width: 100%;
-  padding: 26px 20px 22px;
+  width: min(430px, 100%);
+  max-height: calc(100dvh - clamp(32px, 8vw, 80px));
+  padding: 30px 30px 24px;
+  overflow-y: auto;
   pointer-events: auto;
   display: flex;
   flex-direction: column;
@@ -3000,6 +3050,26 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
     0 0 0 1px rgba(255, 255, 255, 0.5) inset,
     0 26px 70px rgba(28, 26, 23, 0.45);
   animation: mvp-pop 620ms var(--ease-spring) both;
+}
+
+.mvp-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  box-shadow: none;
+  color: rgba(28, 26, 23, 0.48);
+  font: 400 24px/1 var(--font-ui);
+}
+
+.mvp-close:hover {
+  color: var(--ink);
+  background: rgba(28, 26, 23, 0.07);
 }
 
 @keyframes mvp-pop {
@@ -3120,6 +3190,10 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
   flex-wrap: wrap;
   justify-content: center;
   gap: 8px;
+}
+
+.mvp-actions button {
+  min-width: 148px;
 }
 
 @keyframes mvp-fade {
@@ -4425,9 +4499,8 @@ button:focus-visible {
 }
 
 .mvp {
-  background-color: #e8decd;
-  background-image: repeating-linear-gradient(0deg, transparent 0 3px, rgba(255, 255, 255, 0.04) 3px 4px);
-  border-right-color: var(--line);
+  background-color: rgba(28, 26, 23, 0.48);
+  background-image: none;
 }
 
 .mvp-card {
@@ -4447,6 +4520,10 @@ button:focus-visible {
 }
 
 .mvp-stats > div {
+  border-radius: 1px;
+}
+
+.mvp-close {
   border-radius: 1px;
 }
 
@@ -4508,6 +4585,32 @@ button:focus-visible {
   color: var(--red-deep);
 }
 
+.floating-message.compact {
+  top: 96px;
+  gap: 0;
+  padding: 9px 16px;
+  border: 1px solid rgba(247, 240, 228, 0.18);
+  border-radius: 2px;
+  background: rgba(32, 29, 24, 0.92);
+  box-shadow: 0 10px 28px rgba(28, 26, 23, 0.24);
+  transform: translate(-50%, 0);
+}
+
+.floating-message.compact::before {
+  display: none;
+}
+
+.floating-message.compact span,
+[data-theme="ink"] .workbench:not(.lobby-mode) .floating-message.compact span {
+  color: var(--paper-warm);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.45;
+  letter-spacing: 0.06em;
+  text-shadow: none;
+}
+
 .floating-message-enter-active,
 .floating-message-leave-active {
   transition:
@@ -4523,6 +4626,16 @@ button:focus-visible {
 .floating-message-leave-to {
   opacity: 0;
   transform: translate(-50%, calc(-50% - 10px)) scale(0.99);
+}
+
+.floating-message.compact.floating-message-enter-from {
+  opacity: 0;
+  transform: translate(-50%, -8px) scale(0.98);
+}
+
+.floating-message.compact.floating-message-leave-to {
+  opacity: 0;
+  transform: translate(-50%, -8px) scale(0.99);
 }
 
 [data-theme="ink"] .lobby-stage,
@@ -4577,10 +4690,13 @@ button:focus-visible {
   fill: #2b2721;
 }
 
-[data-theme="ink"] .rail,
-[data-theme="ink"] .mvp {
+[data-theme="ink"] .rail {
   background-color: #201d18;
   background-image: repeating-linear-gradient(0deg, transparent 0 3px, rgba(255, 255, 255, 0.018) 3px 4px);
+}
+
+[data-theme="ink"] .mvp {
+  background: rgba(9, 8, 7, 0.7);
 }
 
 [data-theme="ink"] .seat,
@@ -4773,6 +4889,15 @@ button:focus-visible {
 
 [data-theme="ink"] .mvp-name {
   color: #f3ead9;
+}
+
+[data-theme="ink"] .mvp-close {
+  color: rgba(243, 234, 217, 0.62);
+}
+
+[data-theme="ink"] .mvp-close:hover {
+  color: #f3ead9;
+  background: rgba(255, 248, 235, 0.08);
 }
 
 [data-theme="ink"] .mvp-stats > div {

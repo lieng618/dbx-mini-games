@@ -114,25 +114,33 @@ const guestMvp = await panelOf(guestFr);
 step("hostMvp", hostMvp);
 step("guestMvp", guestMvp);
 
-// 面板必须待在左侧栏里，不能盖住棋盘——棋盘上有连线与印章等结算特效。
+// 结算卡必须在视口正中；棋盘特效此时已经演完。
 const geometry = await hostFr.evaluate(() => {
   const mvp = document.querySelector(".mvp");
-  const canvas = document.querySelector("canvas");
-  if (!mvp || !canvas) return null;
+  const card = document.querySelector(".mvp-card");
+  if (!mvp || !card) return null;
   const m = mvp.getBoundingClientRect();
-  const c = canvas.getBoundingClientRect();
+  const c = card.getBoundingClientRect();
   return {
     mvp: { left: Math.round(m.left), right: Math.round(m.right), width: Math.round(m.width) },
-    canvas: { left: Math.round(c.left), right: Math.round(c.right), width: Math.round(c.width) },
-    overlapsBoard: m.right > c.left + 1,
+    card: {
+      left: Math.round(c.left),
+      top: Math.round(c.top),
+      right: Math.round(c.right),
+      bottom: Math.round(c.bottom),
+      width: Math.round(c.width),
+    },
+    horizontalOffset: Math.round((c.left + c.right) / 2 - innerWidth / 2),
+    verticalOffset: Math.round((c.top + c.bottom) / 2 - innerHeight / 2),
+    coversViewport: m.left === 0 && m.top === 0 && m.right === innerWidth && m.bottom === innerHeight,
   };
 });
 step("geometry", geometry);
 await hostPage.screenshot({ path: `${OUT}/01-host-mvp.png` });
 await guestPage.screenshot({ path: `${OUT}/02-guest-mvp.png` });
 
-// 关掉面板后横幅应接上，而不是留下一片空白。
-await hostFr.getByRole("button", { name: "看看棋盘" }).click();
+// 收起结算卡后横幅应接上，而不是留下一片空白。
+await hostFr.getByRole("button", { name: "收起结算卡" }).click();
 await hostPage.waitForTimeout(700);
 const bannerAfterDismiss = await hostFr.evaluate(
   () => document.querySelector(".result-banner")?.innerText.replace(/\s+/g, " ").trim() ?? ""
@@ -147,7 +155,11 @@ report.ok =
   hostMvp.title.length > 0 &&
   hostMvp.stats.length >= 2 &&
   hostMvp.ribbons > 0 &&
-  !!geometry && !geometry.overlapsBoard && geometry.mvp.width <= 340 &&
+  !!geometry &&
+  geometry.coversViewport &&
+  Math.abs(geometry.horizontalOffset) <= 1 &&
+  Math.abs(geometry.verticalOffset) <= 1 &&
+  geometry.card.width <= 430 &&
   mvpBeforeDelay === false &&
   guestMvp.badge === "MVP" &&
   bannerAfterDismiss.length > 0;
