@@ -5,6 +5,7 @@ go 1.22
 require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/grandcat/zeroconf v1.0.0
+	github.com/importcjj/sensitive v0.0.0-20200106142752-42d1c505be7b
 )
 
 require (

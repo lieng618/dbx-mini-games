@@ -151,6 +151,13 @@ func (r *Room) ID() string { return r.id }
 // Name returns the display name.
 func (r *Room) Name() string { return r.name }
 
+// SetName updates the display name used in room snapshots and the public lobby.
+func (r *Room) SetName(name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.name = name
+}
+
 // GameName returns the game this room plays.
 func (r *Room) GameName() string { return r.gameName }
 

@@ -76,8 +76,8 @@ func (h *Hub) AddClientSession(requestedID, nickname string, send func(string, a
 	if id == "" {
 		id = randomID()
 	}
-	nickname = sanitizeName(nickname)
-	if nickname == "" {
+	nickname, nicknameErr := validateNickname(nickname)
+	if nicknameErr != nil {
 		nickname = "棋友-" + id[:4]
 	}
 	connectionToken := randomID()
@@ -176,12 +176,22 @@ func (h *Hub) CallSession(clientID, connectionToken, method string, params map[s
 	case "profile.get":
 		return map[string]any{"id": client.id, "nickname": client.nickname}, nil
 	case "profile.save":
-		if nickname := sanitizeName(stringParam(params, "nickname")); nickname != "" {
-			client.nickname = nickname
-			if record := h.rooms[client.roomID]; record != nil {
-				record.room.SetNickname(client.id, nickname)
-				h.notifyRoomLocked(record)
+		nickname, err := validateNickname(stringParam(params, "nickname"))
+		if err != nil {
+			return nil, err
+		}
+		client.nickname = nickname
+		if record := h.rooms[client.roomID]; record != nil {
+			record.room.SetNickname(client.id, nickname)
+			if record.ownerID == client.id {
+				suffix := "的象棋室"
+				if record.room.GameName() == "gomoku" {
+					suffix = "的五子棋室"
+				}
+				record.room.SetName(nickname + suffix)
+				h.notifyLobbyLocked()
 			}
+			h.notifyRoomLocked(record)
 		}
 		return map[string]any{"id": client.id, "nickname": client.nickname}, nil
 	case "lobby.subscribe":

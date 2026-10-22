@@ -40,6 +40,7 @@ const BOARD_SIZE_OPTIONS = [
   { value: "standard", label: "标准" },
   { value: "large", label: "大" },
 ];
+const NICKNAME_PATTERN = /^[\p{L}\p{N}_-]{2,12}$/u;
 
 const bridge = createBridge();
 const ready = ref(false);
@@ -68,6 +69,11 @@ const serverConnected = ref(false);
 const serverUrl = ref(bridge.serverUrl || "");
 const lobbyTab = ref("rooms");
 const nickname = ref("");
+const nicknameDraft = ref(bridge.nickname || "");
+const nicknameSaving = ref(false);
+const nicknameError = ref("");
+const nicknameEditing = ref(false);
+const nicknameInput = ref(null);
 const joinPassword = ref("");
 const joinPrompt = ref(null);
 const joinPasswordError = ref("");
@@ -367,6 +373,12 @@ function describeError(raw) {
     ["server room capacity reached", "服务器房间已满，请稍后再试"],
     ["only the room creator can start the match", "只有房主可以开始对局"],
     ["only the room creator can rematch", "只有房主可以再来一局"],
+    ["nickname must contain 2 to 12 characters", "昵称需为 2–12 个字符"],
+    [
+      "nickname may only contain letters, numbers, hyphens, and underscores",
+      "昵称只能使用文字、数字、短横线和下划线",
+    ],
+    ["nickname contains unavailable words", "昵称包含不可用词语，请换一个"],
     ["session was replaced by a newer connection", "连接已更新，正在恢复"],
     ["session is not connected", "连接已失效，正在恢复"],
     ["poll session does not exist", "连接已失效，正在恢复"],
@@ -409,6 +421,59 @@ function showFloatingMessage(text, tone = "info", duration = 3200) {
   }, duration);
 }
 
+function validateNicknameDraft(value) {
+  const candidate = String(value || "").trim();
+  if (!NICKNAME_PATTERN.test(candidate)) {
+    return "昵称需为 2–12 个字符，只能使用文字、数字、短横线和下划线";
+  }
+  return "";
+}
+
+async function saveNickname() {
+  if (!nicknameEditing.value || nicknameSaving.value) return;
+  const candidate = String(nicknameDraft.value || "").trim();
+  if (candidate === nickname.value) {
+    nicknameEditing.value = false;
+    nicknameError.value = "";
+    return;
+  }
+  const validationError = validateNicknameDraft(candidate);
+  nicknameError.value = validationError;
+  if (validationError) return;
+
+  nicknameSaving.value = true;
+  try {
+    const reply = await bridge.invoke("profile.save", { nickname: candidate });
+    if (reply && typeof reply === "object") applySnapshot(reply);
+    nickname.value = reply?.nickname || candidate;
+    nicknameDraft.value = nickname.value;
+    nicknameEditing.value = false;
+    showFloatingMessage("昵称已更新", "info", 2800);
+  } catch (e) {
+    nicknameError.value = describeError(e?.message || e);
+  } finally {
+    nicknameSaving.value = false;
+  }
+}
+
+function beginNicknameEdit() {
+  if (nicknameSaving.value) return;
+  nicknameDraft.value = nickname.value;
+  nicknameError.value = "";
+  nicknameEditing.value = true;
+  void nextTick(() => {
+    nicknameInput.value?.focus();
+    nicknameInput.value?.select();
+  });
+}
+
+function cancelNicknameEdit() {
+  if (nicknameSaving.value) return;
+  nicknameEditing.value = false;
+  nicknameDraft.value = nickname.value;
+  nicknameError.value = "";
+}
+
 watch(error, (message) => {
   if (message) showFloatingMessage(message, "error", 5200);
 });
@@ -428,6 +493,10 @@ async function call(method, params = {}) {
     return null;
   }
 }
+
+watch(nickname, (value) => {
+  nicknameDraft.value = value;
+});
 
 async function createRoom() {
   const roomName = `${nickname.value || "棋友"}的${game.value === "xiangqi" ? "象棋室" : "五子棋室"}`;
@@ -768,6 +837,10 @@ function dismissMvp() {
 
 function closeResultOnEscape(event) {
   if (event.key !== "Escape") return;
+  if (nicknameEditing.value) {
+    cancelNicknameEdit();
+    return;
+  }
   if (joinPrompt.value) {
     closeJoinPrompt();
     return;
@@ -1135,7 +1208,46 @@ watch(seats, (next, previous) => {
           </div>
 
           <div class="lobby-account">
-            <span class="guest-name">{{ nickname || "随机昵称生成中" }}</span>
+            <div class="guest-name-wrap">
+              <input
+                v-if="nicknameEditing"
+                ref="nicknameInput"
+                v-model="nicknameDraft"
+                class="guest-name-input"
+                :class="{ invalid: Boolean(nicknameError) }"
+                type="text"
+                maxlength="12"
+                autocomplete="nickname"
+                autocapitalize="off"
+                spellcheck="false"
+                aria-label="昵称"
+                :aria-invalid="Boolean(nicknameError)"
+                :aria-describedby="nicknameError ? 'nickname-inline-error' : undefined"
+                :disabled="nicknameSaving"
+                @input="nicknameError = ''"
+                @mouseleave="saveNickname"
+                @blur="saveNickname"
+                @keydown.enter.prevent="saveNickname"
+                @keydown.esc.prevent="cancelNicknameEdit"
+              />
+              <button
+                v-else
+                type="button"
+                class="guest-name"
+                title="点击修改昵称"
+                @click="beginNicknameEdit"
+              >
+                {{ nickname || "随机昵称生成中" }}
+              </button>
+              <span
+                v-if="nicknameError"
+                id="nickname-inline-error"
+                class="nickname-inline-error"
+                role="alert"
+              >
+                {{ nicknameError }}
+              </span>
+            </div>
             <span class="connection-state" :class="{ online: serverConnected }">
               <i aria-hidden="true"></i>
               {{ serverConnected ? "在线" : "连接中" }}
@@ -1694,6 +1806,8 @@ watch(seats, (next, previous) => {
   --surface: #fffdf8;
   --red: #b03a2e;
   --red-deep: #8f2b20;
+  /* Text on intentionally dark surfaces must not follow the theme's dark paper. */
+  --on-dark: #fffaf0;
   --gold: #d4a24a;
   --wood: #7a5c31;
   --muted-text: #5f5647;
@@ -1831,7 +1945,7 @@ watch(seats, (next, previous) => {
   flex: 0 0 auto;
   font-family: var(--font-display);
   font-size: 24px;
-  color: var(--paper-warm);
+  color: var(--on-dark);
   border-radius: 6px 12px 6px 12px;
   background: linear-gradient(145deg, #cf5945, #8f271f);
   box-shadow: 0 8px 24px rgba(176, 58, 46, 0.28);
@@ -3454,7 +3568,7 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
   padding: 16px 32px;
   border-radius: var(--radius-panel);
   background: linear-gradient(180deg, rgba(50, 46, 40, 0.96), rgba(28, 26, 23, 0.96));
-  color: var(--paper-warm);
+  color: var(--on-dark);
   box-shadow: var(--shadow-3);
   animation: banner-in var(--dur-slow) var(--ease-spring) both;
 }
@@ -3744,7 +3858,7 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
   font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.18em;
-  color: var(--paper-warm);
+  color: var(--on-dark);
   background: var(--red);
   border-radius: var(--radius-pill);
   animation: flag-pulse 1.4s var(--ease-standard) infinite;
@@ -4137,14 +4251,72 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
   stroke-linejoin: round;
 }
 
+.guest-name-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
 .guest-name {
+  height: auto;
+  max-width: 180px;
   padding: 0;
+  overflow: hidden;
   border: 0;
   border-radius: 0;
   background: transparent;
   font-family: var(--font-num);
   font-size: 11px;
   letter-spacing: 0.02em;
+  color: var(--soft-text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.guest-name:hover {
+  color: var(--ink);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.guest-name-input {
+  width: 140px;
+  height: 32px;
+  padding: 0 8px;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid rgba(188, 138, 61, 0.72);
+  border-radius: 2px;
+  outline: 0;
+  font: inherit;
+  font-family: var(--font-num);
+  font-size: 12px;
+}
+
+.guest-name-input:focus {
+  box-shadow: 0 0 0 2px rgba(188, 138, 61, 0.2);
+}
+
+.guest-name-input.invalid {
+  border-color: var(--red);
+}
+
+.nickname-inline-error {
+  position: absolute;
+  top: calc(100% + 7px);
+  right: 0;
+  z-index: 30;
+  width: max-content;
+  max-width: min(300px, calc(100vw - 28px));
+  padding: 6px 9px;
+  color: var(--red-deep);
+  background: var(--paper-warm);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow-2);
+  font-size: 11px;
+  line-height: 1.45;
 }
 
 .connection-state {
@@ -5073,7 +5245,7 @@ button:focus-visible {
 }
 
 .floating-message span {
-  color: var(--paper-warm);
+  color: var(--on-dark);
   background: transparent;
   font-family: var(--font-ui);
   font-size: 14px;
@@ -5178,6 +5350,44 @@ button:focus-visible {
 [data-theme="ink"] .undo-request-copy p,
 [data-theme="ink"] .undo-request-copy small {
   color: #c8bda9;
+}
+
+[data-theme="ink"] .room-overline,
+[data-theme="ink"] .seat-self,
+[data-theme="ink"] .chip.accent,
+[data-theme="ink"] .join-prompt-kicker,
+[data-theme="ink"] .mvp-badge,
+[data-theme="ink"] .mvp-title {
+  color: #ef9b90;
+}
+
+[data-theme="ink"] .mvp.draw .mvp-title {
+  color: #bfd1c1;
+  border-color: rgba(154, 186, 160, 0.3);
+  background: rgba(154, 186, 160, 0.12);
+}
+
+[data-theme="ink"] .join-prompt-error,
+[data-theme="ink"] .nickname-inline-error,
+[data-theme="ink"] .move-clock.urgent,
+[data-theme="ink"] .move-clock.urgent strong,
+[data-theme="ink"] .seat-strip-clock.low {
+  color: #ffb3a8;
+}
+
+[data-theme="ink"] .lock-badge {
+  color: #f0a095;
+  background: rgba(222, 128, 114, 0.14);
+}
+
+[data-theme="ink"] .status-playing .room-state {
+  color: #f0a095;
+  background: rgba(222, 128, 114, 0.12);
+  border-color: rgba(222, 128, 114, 0.34);
+}
+
+[data-theme="ink"] .seat-strip.active .avatar {
+  fill: #ef8b7f;
 }
 
 [data-theme="ink"] .seat,
@@ -5657,10 +5867,20 @@ button:focus-visible {
   }
 
   .guest-name {
-    display: none;
+    display: block;
+    max-width: min(96px, 20vw);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .guest-name-wrap {
+    max-width: min(116px, 28vw);
+  }
+
+  .guest-name-input {
+    width: 100%;
+    min-width: 92px;
   }
 
   .connection-state {

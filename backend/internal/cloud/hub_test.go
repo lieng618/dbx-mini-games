@@ -1,8 +1,11 @@
 package cloud
 
 import (
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/lieng618/dbx-mini-games/backend/internal/room"
 )
 
 func TestCloudRoomJoinSpectateAndStart(t *testing.T) {
@@ -57,6 +60,52 @@ func TestCloudRoomJoinSpectateAndStart(t *testing.T) {
 
 	if _, err := hub.Call(watchID, "game.move", map[string]any{"to": float64(0)}); err == nil {
 		t.Fatal("spectator must not be able to move")
+	}
+}
+
+func TestNicknameValidationAndOwnerRoomRename(t *testing.T) {
+	hub := NewHub()
+	ownerID, _ := hub.AddClient("nickname-owner-1", "创建者", func(string, any) {})
+
+	created, err := hub.Call(ownerID, "room.create", map[string]any{
+		"name": "旧房间名",
+		"game": "gomoku",
+		"seat": float64(0),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roomID := created.(map[string]any)["roomId"].(string)
+
+	saved, err := hub.Call(ownerID, "profile.save", map[string]any{"nickname": "新名字"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nickname := saved.(map[string]any)["nickname"]; nickname != "新名字" {
+		t.Fatalf("saved nickname = %v, want 新名字", nickname)
+	}
+
+	snapshotReply, err := hub.Call(ownerID, "room.snapshot", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := snapshotReply.(map[string]any)
+	if snapshot["roomId"] != roomID {
+		t.Fatalf("room id changed after rename: %v", snapshot["roomId"])
+	}
+	if name := snapshot["name"]; name != "新名字的五子棋室" {
+		t.Fatalf("room name = %v, want 新名字的五子棋室", name)
+	}
+	members := snapshot["members"].([]room.Member)
+	if len(members) != 1 || members[0].Nickname != "新名字" {
+		t.Fatalf("member nickname did not update: %#v", members)
+	}
+
+	invalid := []string{"a", strings.Repeat("棋", maxNicknameRunes+1), "名字 带空格", "管理员"}
+	for _, nickname := range invalid {
+		if _, err := hub.Call(ownerID, "profile.save", map[string]any{"nickname": nickname}); err == nil {
+			t.Fatalf("nickname %q was accepted", nickname)
+		}
 	}
 }
 

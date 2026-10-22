@@ -7,6 +7,7 @@
 
 const REQUEST_TIMEOUT_MS = 12_000;
 const CLIENT_ID_KEY = "dbxmg.clientId";
+const NICKNAME_KEY = "dbxmg.nickname";
 
 let singleton = null;
 
@@ -70,7 +71,7 @@ class CloudBridge {
     const requestedClientId = developmentParams.get("clientId");
     this.ephemeralIdentity = Boolean(requestedClientId);
     this.clientId = requestedClientId || loadOrCreateClientId();
-    this.nickname = randomNickname();
+    this.nickname = loadStoredNickname() || randomNickname();
     this.readyPromise = null;
     this.resolveReady = null;
     this.rejectReady = null;
@@ -173,7 +174,7 @@ class CloudBridge {
       if (controller.signal.aborted || this.pollController !== controller) return;
 
       if (session.clientId) this.clientId = session.clientId;
-      if (session.nickname) this.nickname = session.nickname;
+      if (session.nickname) this.rememberNickname(session.nickname);
       if (!this.ephemeralIdentity) persistClientId(this.clientId);
       this.retryDelay = 500;
       this.connected = true;
@@ -240,7 +241,7 @@ class CloudBridge {
 
     if (message.method === "session.ready") {
       if (message.params?.clientId) this.clientId = message.params.clientId;
-      if (message.params?.nickname) this.nickname = message.params.nickname;
+      if (message.params?.nickname) this.rememberNickname(message.params.nickname);
       if (!this.ephemeralIdentity) persistClientId(this.clientId);
     }
     for (const listener of this.listeners) {
@@ -262,13 +263,18 @@ class CloudBridge {
 
   async invoke(method, params = {}) {
     await this.ready();
+    let result;
     try {
-      return await this.invokeOnce(method, params);
+      result = await this.invokeOnce(method, params);
     } catch (error) {
       if (this.manualClose || !isSessionExpiredError(error)) throw error;
       await this.recoverSession();
-      return this.invokeOnce(method, params);
+      result = await this.invokeOnce(method, params);
     }
+    if (method === "profile.save" && result?.nickname) {
+      this.rememberNickname(result.nickname);
+    }
+    return result;
   }
 
   async invokeOnce(method, params = {}) {
@@ -346,6 +352,13 @@ class CloudBridge {
     this.socket?.close();
     this.socket = null;
   }
+
+  rememberNickname(nickname) {
+    const value = String(nickname || "").trim();
+    if (!value) return;
+    this.nickname = value;
+    persistNickname(value);
+  }
 }
 
 function isSessionExpiredError(error) {
@@ -398,6 +411,20 @@ function loadOrCreateClientId() {
   } catch {
     return `guest-${Math.random().toString(36).slice(2, 12)}`;
   }
+}
+
+function loadStoredNickname() {
+  try {
+    const stored = localStorage.getItem(NICKNAME_KEY)?.trim();
+    if (stored && stored.length <= 64) return stored;
+  } catch {}
+  return "";
+}
+
+function persistNickname(nickname) {
+  try {
+    localStorage.setItem(NICKNAME_KEY, nickname);
+  } catch {}
 }
 
 function randomNickname() {
