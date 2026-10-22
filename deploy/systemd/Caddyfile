@@ -1,0 +1,4 @@
+https://dbx-mini-games.duckdns.org {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:8787
+}

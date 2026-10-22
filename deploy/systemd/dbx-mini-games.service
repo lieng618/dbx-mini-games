@@ -1,0 +1,18 @@
+[Unit]
+Description=DBX Mini Games cloud server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dbx-mini-games
+Group=dbx-mini-games
+WorkingDirectory=/opt/dbx-mini-games
+ExecStart=/opt/dbx-mini-games/dbx-mini-games -addr 127.0.0.1:8787 -ui /opt/dbx-mini-games/ui
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
