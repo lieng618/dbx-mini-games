@@ -1,3 +1,7 @@
+{
+	default_sni {$PUBLIC_HOST}
+}
+
 {$PUBLIC_ORIGIN} {
 	tls /etc/caddy/certs/ip.crt /etc/caddy/certs/ip.key
 	encode zstd gzip
