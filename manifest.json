@@ -14,7 +14,7 @@
     "host_api": "1"
   },
   "permissions": [
-    "host.network:https://203.0.113.10"
+    "host.network:https://dbx-mini-games.duckdns.org"
   ],
   "entrypoints": {
     "ui": {
