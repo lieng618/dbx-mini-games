@@ -1,0 +1,9 @@
+[Unit]
+Description=Renew Let's Encrypt IP certificate
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/dbx-mini-games/deploy/systemd/certbot-renew.sh
+TimeoutStartSec=300
