@@ -1,5 +1,8 @@
 :443 {
 	tls /etc/caddy/certs/ip.crt /etc/caddy/certs/ip.key
 	encode zstd gzip
+	log {
+		output file /var/log/caddy/access.log
+	}
 	reverse_proxy 127.0.0.1:8787
 }
