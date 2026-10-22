@@ -24,6 +24,19 @@
 商店截图保存在 `screenshots/store-*.png`，覆盖大厅、建房、等待、五子棋、
 中国象棋、对手视角和结算卡。
 
+### 正式候选 Release
+
+- `v0.3.0`：发布工作流因官方模板中的失效引用 `plugin-sdk-v1` 在创建任务前失败，
+  未上传任何候选资产；保留 Tag 并标记为预发布，不改写已发布版本。
+- `v0.3.1`：复用工作流固定到 DBX 提交
+  `b160d130560f71c5c429be15cec6147f677a4b3a`，universal 构建和 Release
+  上传均成功。
+- 公网候选包 SHA-256：
+  `75eb9eae06729f51ee67c56e234373e53e358f81ec832a58a67bd6c7e06de7be`
+- 公网候选包大小：`246014` bytes。
+- `npm run verify:release -- --check-urls`：通过。
+- `store-submission` candidate schema、工作流 YAML 和 `actionlint`：通过。
+
 ## 验证环境
 
 - `dbx-plugin dev --path . --port <PORT> --data-dir /tmp/dbxbg-dev<N>`（官方开发宿主）
