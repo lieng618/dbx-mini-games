@@ -700,10 +700,13 @@ export class CheckEffect {
  * compete with the pieces.
  */
 export class LastMoveEffect {
-  constructor({ from, to, radius, lowMotion = false, seed }) {
+  constructor({ from, to, radius, lowMotion = false, seed, duration }) {
     this.lowMotion = lowMotion;
     this.age = 0;
-    this.duration = lowMotion ? 0.4 : 2.6;
+    // The automatic cue is intentionally brief. The manual "last move" control can request
+    // a longer replay without changing the normal move rhythm for every player.
+    this.duration =
+      Number.isFinite(duration) && duration > 0 ? duration : lowMotion ? 0.4 : 2.6;
     this.done = false;
     this.view = new Container();
     this.glow = new Graphics();

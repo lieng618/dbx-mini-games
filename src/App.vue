@@ -90,9 +90,15 @@ const clock = ref(null);
 const undoRequestedBy = ref("");
 const undoRequestedSeat = ref(-1);
 const undoRemainingMs = ref(0);
+const hasLastMove = computed(
+  () => !!lastMove.value && Number.isInteger(Number(lastMove.value.to)) && Number(lastMove.value.to) >= 0,
+);
+const lastMovePreviewActive = ref(false);
+const lastMoveAnnouncement = ref("");
 let clockBase = null;
 let clockBaseAt = 0;
 let undoTimer = null;
+let lastMovePreviewTimer = null;
 // The practice partner's seat, or -1. Kept separate from `seats` because the partner is
 // not a member: it has a seat but no id, no nickname and no connection.
 const aiSeat = ref(-1);
@@ -716,6 +722,24 @@ async function declineUndo(auto = false) {
   if (reply && auto) showFloatingMessage("悔棋请求已超时", "info", 2600);
 }
 
+/** Replays the authoritative last move without changing the game state. */
+function previewLastMove() {
+  if (!hasLastMove.value || !scene?.showLastMove(lastMove.value, { duration: 4 })) return;
+  lastMovePreviewActive.value = true;
+  clearTimeout(lastMovePreviewTimer);
+  lastMovePreviewTimer = setTimeout(() => {
+    lastMovePreviewTimer = null;
+    lastMovePreviewActive.value = false;
+  }, 4000);
+
+  // The canvas is not exposed to assistive technology, so announce the result beside the
+  // native button instead of relying on the visual ring alone.
+  lastMoveAnnouncement.value = "";
+  void nextTick(() => {
+    lastMoveAnnouncement.value = "已标出上一手，持续四秒";
+  });
+}
+
 async function rematch() {
   if (role.value !== "host") return;
   scene?.clearEffects();
@@ -1122,6 +1146,8 @@ onBeforeUnmount(() => {
   document.removeEventListener("visibilitychange", handleVisibilityChange);
   clearTimeout(undoTimer);
   undoTimer = null;
+  clearTimeout(lastMovePreviewTimer);
+  lastMovePreviewTimer = null;
   if (mvpTimer) clearTimeout(mvpTimer);
   mvpTimer = null;
   clearTimeout(floatingTimer);
@@ -1293,6 +1319,18 @@ watch(seats, (next, previous) => {
           开始对局
         </button>
         <button
+          v-if="phase === 'playing' || phase === 'practice' || phase === 'finished'"
+          class="ghost last-move-action"
+          :class="{ active: lastMovePreviewActive }"
+          type="button"
+          :disabled="!hasLastMove"
+          aria-label="标出上一手，持续高亮四秒"
+          title="高亮棋盘上的上一手，持续四秒"
+          @click="previewLastMove"
+        >
+          上一手
+        </button>
+        <button
           v-if="phase === 'playing' && isSeated"
           class="ghost undo-action"
           :disabled="!canRequestUndo"
@@ -1303,6 +1341,9 @@ watch(seats, (next, previous) => {
         <button v-if="phase === 'playing' && isSeated" class="ghost" @click="resign">认输</button>
         <button v-if="phase === 'finished' && role === 'host'" class="primary" @click="rematch">再来一局</button>
         <button class="ghost" @click="leaveRoom">{{ role === "host" ? "结束房间" : "离开" }}</button>
+        <span class="visually-hidden" role="status" aria-live="polite" aria-atomic="true">
+          {{ lastMoveAnnouncement }}
+        </span>
       </div>
 
     </aside>
@@ -5160,35 +5201,53 @@ button:focus-visible {
 }
 
 .room-invite-button {
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
   gap: 5px;
-  height: 30px;
-  padding: 0 8px;
+  height: 32px;
+  padding: 0 2px;
   color: var(--red-deep);
-  border-color: rgba(157, 48, 38, 0.34);
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0.07em;
+  text-decoration-line: underline;
+  text-decoration-style: dotted;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 4px;
+  text-decoration-color: rgba(157, 48, 38, 0.28);
   white-space: nowrap;
 }
 
 .room-invite-button:hover {
-  color: var(--red-deep);
-  border-color: var(--red-deep);
-  background: rgba(157, 48, 38, 0.06);
+  color: var(--red);
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+  text-decoration-color: currentColor;
 }
 
 .room-invite-button svg {
+  box-sizing: border-box;
   width: 14px;
   height: 14px;
+  padding: 0;
   fill: none;
+  color: currentColor;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
   stroke: currentColor;
   stroke-width: 1.4;
   stroke-linecap: round;
   stroke-linejoin: round;
+  opacity: 0.82;
 }
 
 .room-details {
@@ -5247,9 +5306,33 @@ button:focus-visible {
 }
 
 .rail-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex: 1 1 0;
   min-width: 0;
+  padding-top: 1px;
   padding-inline: 10px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.last-move-action.active {
+  color: var(--red-deep);
+  border-color: rgba(169, 121, 44, 0.58);
+  background: rgba(214, 177, 102, 0.14);
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .seat {
@@ -5594,13 +5677,18 @@ button:focus-visible {
 
 [data-theme="ink"] .room-invite-button {
   color: #ef9b90;
-  border-color: rgba(222, 128, 114, 0.36);
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  text-decoration-color: rgba(239, 155, 144, 0.34);
 }
 
 [data-theme="ink"] .room-invite-button:hover {
   color: #ffb3a8;
-  border-color: #ef9b90;
-  background: rgba(222, 128, 114, 0.1);
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  text-decoration-color: currentColor;
 }
 
 [data-theme="ink"] .seat-strip.active .avatar {
@@ -6082,7 +6170,7 @@ button:focus-visible {
 
   .workbench:not(.lobby-mode) .room-invite-button {
     height: 32px;
-    padding-inline: 10px;
+    padding-inline: 2px;
   }
 
   .workbench:not(.lobby-mode) .room-details {

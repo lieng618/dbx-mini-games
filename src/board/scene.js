@@ -41,8 +41,10 @@ export class BoardScene {
     this.effectsOff = false;
     this.effects = [];
     this.lastCells = null;
-    this.lastMove = null;
+    this.currentLastMove = null;
     this.lastMoveKey = null;
+    this.lastMoveAnchorKey = "";
+    this.lastMoveEffect = null;
     this.result = null;
     this.destroyed = false;
     this.audio = new BoardAudio();
@@ -80,6 +82,9 @@ export class BoardScene {
 
     this.root = new Container();
     this.boardLayer = new Container();
+    // A quiet last-move anchor stays under the pieces until the next move. It is positional
+    // information rather than a transient celebration, so it survives clock snapshots.
+    this.lastMoveLayer = new Container();
     this.pieces = new PieceLayer();
     this.pieceLayer = this.pieces.root;
     this.effectLayer = new Container();
@@ -88,7 +93,14 @@ export class BoardScene {
     this.underLayer = new Container();
     // Above the stones: seals and stamps land on the board, not behind it.
     this.overlayLayer = new Container();
-    this.root.addChild(this.boardLayer, this.underLayer, this.pieceLayer, this.effectLayer, this.overlayLayer);
+    this.root.addChild(
+      this.boardLayer,
+      this.lastMoveLayer,
+      this.underLayer,
+      this.pieceLayer,
+      this.effectLayer,
+      this.overlayLayer,
+    );
     this.app.stage.addChild(this.root);
 
     this.setGame(game);
@@ -107,6 +119,7 @@ export class BoardScene {
     // the winning line) are game-specific, so carrying them across a switch would strand
     // ink at meaningless positions.
     this.clearEffects();
+    this.clearLastMove();
     this.cued.check = false;
     this.cued.win = false;
     this.lastMoveKey = null;
@@ -137,6 +150,7 @@ export class BoardScene {
     // them on the wrong squares.
     this.clearEffects();
     this.lastMoveKey = null;
+    this.drawLastMoveAnchor(this.currentLastMove, { force: true });
   }
 
   /** Draws the static board: frame, grid, palace diagonals, river. */
@@ -311,6 +325,7 @@ export class BoardScene {
         : "";
     const lastMoveChanged = nextLastMoveKey !== this.lastMoveKey;
     this.lastMoveKey = nextLastMoveKey;
+    this.drawLastMoveAnchor(snapshot.lastMove);
 
     // The piece layer resolves identity and animates the move; it reports what it played.
     // Effects are then anchored to that timeline instead of to the snapshot's arrival, so
@@ -444,11 +459,7 @@ export class BoardScene {
       snapshot.lastMove.to >= 0 &&
       (positionChanged || lastMoveChanged)
     ) {
-      const to = cellCenter(lay2, snapshot.lastMove.to);
-      const from = snapshot.lastMove.from >= 0 ? cellCenter(lay2, snapshot.lastMove.from) : null;
-      this.effects.push(
-        new LastMoveEffect({ from, to, radius: lay2.step * 0.42, lowMotion: this.lowMotion }),
-      );
+      this.playLastMove(snapshot.lastMove, this.lowMotion ? 0.4 : 2.6);
     }
 
     // Check announcement. Only xiangqi has a general to threaten: a gomoku board that
@@ -592,6 +603,74 @@ export class BoardScene {
     const moves = this.pieces.sync(cells, this.lay, { animate: true });
     this.lastMoves = moves;
     return moves;
+  }
+
+  /**
+   * Leaves a faint destination ring until the next move. This is deliberately separate
+   * from transient ink: a missed two-second animation should not erase the answer.
+   */
+  drawLastMoveAnchor(lastMove, { force = false } = {}) {
+    if (!this.lastMoveLayer || !this.lay) return;
+    const valid = !!lastMove && Number.isInteger(Number(lastMove.to)) && Number(lastMove.to) >= 0;
+    const key = valid ? `${lastMove.from ?? -1}:${lastMove.to}` : "";
+    const fromIndex = lastMove?.from == null ? -1 : Number(lastMove.from);
+    this.currentLastMove = valid
+      ? { from: Number.isInteger(fromIndex) ? fromIndex : -1, to: Number(lastMove.to) }
+      : null;
+    if (!force && key === this.lastMoveAnchorKey) return;
+    this.lastMoveAnchorKey = key;
+    this.lastMoveLayer.removeChildren().forEach((child) => child.destroy({ children: true }));
+    if (!valid) return;
+
+    const lay = this.lay;
+    const to = cellCenter(lay, this.currentLastMove.to);
+    const radius = lay.step * 0.46;
+    const anchor = new Graphics();
+    anchor.circle(to.x, to.y, radius * 1.13).fill({ color: PALETTE.gold, alpha: 0.035 });
+    anchor.circle(to.x, to.y, radius).stroke({ width: 2.2, color: PALETTE.gold, alpha: 0.32 });
+    anchor.circle(to.x, to.y, radius * 0.16).fill({ color: PALETTE.gold, alpha: 0.2 });
+    this.lastMoveLayer.addChild(anchor);
+  }
+
+  clearLastMove() {
+    this.currentLastMove = null;
+    this.lastMoveAnchorKey = "";
+    if (this.lastMoveLayer) {
+      this.lastMoveLayer.removeChildren().forEach((child) => child.destroy({ children: true }));
+    }
+  }
+
+  /**
+   * Replays the from-to trace on demand. Repeated presses replace the current replay so
+   * effects cannot stack into a permanently busy board.
+   */
+  showLastMove(lastMove = this.currentLastMove, { duration = 4 } = {}) {
+    if (!lastMove || !this.lay) return false;
+    const toIndex = Number(lastMove.to);
+    if (!Number.isInteger(toIndex) || toIndex < 0) return false;
+    this.playLastMove(lastMove, duration);
+    return true;
+  }
+
+  playLastMove(lastMove, duration) {
+    if (this.lastMoveEffect) {
+      const index = this.effects.indexOf(this.lastMoveEffect);
+      if (index >= 0) this.effects.splice(index, 1);
+      this.lastMoveEffect.destroy();
+    }
+    const lay = this.lay;
+    const to = cellCenter(lay, Number(lastMove.to));
+    const fromIndex = lastMove.from == null ? -1 : Number(lastMove.from);
+    const from = Number.isInteger(fromIndex) && fromIndex >= 0 ? cellCenter(lay, fromIndex) : null;
+    const effect = new LastMoveEffect({
+      from,
+      to,
+      radius: lay.step * 0.42,
+      lowMotion: this.lowMotion || this.effectsOff,
+      duration,
+    });
+    this.lastMoveEffect = effect;
+    this.effects.push(effect);
   }
 
   /** Draws legal destination hints for the selected piece. */
@@ -755,6 +834,8 @@ export class BoardScene {
     }
     for (const effect of this.effects) effect.update(step);
 
+    if (this.lastMoveEffect?.done) this.lastMoveEffect = null;
+
     // Camera shake is owned by the check effect and applied to the board as a whole.
     let shake = { x: 0, y: 0 };
     for (const effect of this.effects) {
@@ -764,6 +845,7 @@ export class BoardScene {
       }
     }
     if (this.boardLayer) this.boardLayer.position.set(shake.x, shake.y);
+    if (this.lastMoveLayer) this.lastMoveLayer.position.set(shake.x, shake.y);
     if (this.pieceLayer) this.pieceLayer.position.set(shake.x, shake.y);
     if (this.effectLayer) this.effectLayer.position.set(shake.x, shake.y);
     if (this.underLayer) this.underLayer.position.set(shake.x, shake.y);
@@ -783,6 +865,7 @@ export class BoardScene {
 
     for (let i = this.effects.length - 1; i >= 0; i--) {
       if (this.effects[i].done) {
+        if (this.effects[i] === this.lastMoveEffect) this.lastMoveEffect = null;
         this.effects[i].destroy();
         this.effects.splice(i, 1);
       }
@@ -803,11 +886,13 @@ export class BoardScene {
     this.clearHand();
     this.pending.length = 0;
     clearTransient(this.effects);
+    this.lastMoveEffect = null;
     if (this.shock) {
       if (this.root) this.root.filters = null;
       this.shock = null;
     }
     if (this.boardLayer) this.boardLayer.position.set(0, 0);
+    if (this.lastMoveLayer) this.lastMoveLayer.position.set(0, 0);
     if (this.pieceLayer) this.pieceLayer.position.set(0, 0);
     if (this.effectLayer) this.effectLayer.position.set(0, 0);
     if (this.overlayLayer) this.overlayLayer.position.set(0, 0);
