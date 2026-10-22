@@ -1008,6 +1008,20 @@ watch([undoRequestedBy, moveCount, phase, undoRemainingMs], ([nextBy, nextMoves,
   }
 });
 
+// Membership IDs are stable across nickname edits and reconnects. Only announce members
+// that are genuinely new to this client, and never announce the viewer joining the room.
+watch(members, (next, previous) => {
+  if (role.value === "idle" || !selfId.value || !Array.isArray(previous) || !previous.length) return;
+  const previousIds = new Set(previous.map((member) => member.id));
+  const arrivals = next.filter((member) => member.id !== selfId.value && !previousIds.has(member.id));
+  if (!arrivals.length) return;
+  const messages = arrivals.map((member) => {
+    const who = member.nickname || "棋友";
+    return member.seat >= 0 ? `${who} 加入房间` : `${who} 进入观战`;
+  });
+  showFloatingMessage(messages.join(" · "), "info", 3600);
+});
+
 // A departure arrives as a normal room snapshot. Compare the seating table with its
 // previous value so the remaining player is told why their opponent vanished, while a
 // reconnect or a room change does not replay a stale notice.
@@ -1077,24 +1091,26 @@ watch(seats, (next, previous) => {
           <strong>{{ formatClock(clock.moveRemaining) }}</strong>
         </div>
 
-        <div class="actions">
-          <button v-if="phase === 'lobby' && role === 'host'" class="primary" @click="startMatch">
-            开始对局
-          </button>
-          <button
-            v-if="phase === 'playing' && isSeated"
-            class="ghost undo-action"
-            :disabled="!canRequestUndo"
-            @click="requestUndo"
-          >
-            {{ isUndoRequester ? "等待悔棋" : "悔棋" }}
-          </button>
-          <button v-if="phase === 'playing' && isSeated" class="ghost" @click="resign">认输</button>
-          <button v-if="phase === 'finished' && role === 'host'" class="primary" @click="rematch">再来一局</button>
-          <button class="ghost" @click="leaveRoom">{{ role === "host" ? "结束房间" : "离开" }}</button>
-        </div>
-
       </section>
+
+      <!-- Room actions stay outside the scrolling details so the primary next step is
+           always visible, especially when the browser viewport is short. -->
+      <div class="actions rail-actions">
+        <button v-if="phase === 'lobby' && role === 'host'" class="primary" @click="startMatch">
+          开始对局
+        </button>
+        <button
+          v-if="phase === 'playing' && isSeated"
+          class="ghost undo-action"
+          :disabled="!canRequestUndo"
+          @click="requestUndo"
+        >
+          {{ isUndoRequester ? "等待悔棋" : "悔棋" }}
+        </button>
+        <button v-if="phase === 'playing' && isSeated" class="ghost" @click="resign">认输</button>
+        <button v-if="phase === 'finished' && role === 'host'" class="primary" @click="rematch">再来一局</button>
+        <button class="ghost" @click="leaveRoom">{{ role === "host" ? "结束房间" : "离开" }}</button>
+      </div>
 
     </aside>
 
@@ -4683,9 +4699,18 @@ button:focus-visible {
   border-radius: 0;
 }
 
+.workbench:not(.lobby-mode) {
+  grid-template-rows: minmax(0, 1fr);
+  overflow: hidden;
+}
+
 .rail {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
   gap: 24px;
+  min-height: 0;
   padding: 28px 26px 30px;
+  overflow: hidden;
   border-right-color: rgba(42, 34, 24, 0.24);
   background-color: #e8decd;
   background-image: repeating-linear-gradient(0deg, transparent 0 3px, rgba(255, 255, 255, 0.04) 3px 4px);
@@ -4722,6 +4747,9 @@ button:focus-visible {
   flex: 1;
   min-height: 0;
   gap: 17px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .panel h2 {
@@ -4832,16 +4860,18 @@ button:focus-visible {
   margin-top: 8px;
 }
 
-.panel > .actions {
-  margin-top: auto;
+.rail-actions {
+  align-self: end;
+  gap: 8px;
+  flex-wrap: nowrap;
   padding-top: 18px;
   border-top: 1px solid var(--line);
 }
 
-.panel > .actions button {
+.rail-actions button {
   flex: 1 1 0;
   min-width: 0;
-  padding-inline: 12px;
+  padding-inline: 10px;
 }
 
 .seat {
@@ -5356,6 +5386,10 @@ button:focus-visible {
 }
 
 @media (max-width: 900px) {
+  .workbench:not(.lobby-mode) {
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
   .workbench:not(.lobby-mode) .floating-message {
     left: 50%;
   }
@@ -5437,8 +5471,32 @@ button:focus-visible {
     border-left: 0;
   }
 
-  .rail {
-    border-bottom-color: var(--line);
+  .workbench:not(.lobby-mode) .rail {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    gap: 12px 18px;
+    max-height: min(310px, 42dvh);
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .workbench:not(.lobby-mode) .rail-head {
+    grid-column: 1 / -1;
+    padding-bottom: 10px;
+  }
+
+  .workbench:not(.lobby-mode) .panel {
+    grid-column: 1;
+    grid-row: 2;
+    overflow-y: auto;
+  }
+
+  .workbench:not(.lobby-mode) .rail-actions {
+    grid-column: 1 / -1;
+    grid-row: 3;
+    align-self: end;
+    min-height: max-content;
+    padding-top: 10px;
   }
 }
 
@@ -5461,12 +5519,12 @@ button:focus-visible {
   }
 
   .workbench:not(.lobby-mode) .rail {
-    display: grid;
     grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr) auto;
     gap: 10px;
     max-height: 310px;
     padding: 12px 14px;
-    overflow-y: auto;
+    overflow: hidden;
   }
 
   .workbench:not(.lobby-mode) .rail-head {
@@ -5528,13 +5586,14 @@ button:focus-visible {
     text-align: left;
   }
 
-  .workbench:not(.lobby-mode) .panel > .actions {
-    margin-top: 0;
+  .workbench:not(.lobby-mode) .rail-actions {
+    flex-direction: row;
     padding-top: 9px;
+    border-top: 1px solid var(--line);
     gap: 8px;
   }
 
-  .workbench:not(.lobby-mode) .actions button {
+  .workbench:not(.lobby-mode) .rail-actions button {
     flex: 1 1 auto;
   }
 

@@ -325,7 +325,9 @@ export class BoardScene {
       // burst and the knock-back overlap instead of queueing.
       this.schedule(travel, () => {
         const turn = snapshot.turnSeat;
-        const colour = turn === 1 ? PALETTE.black : PALETTE.red;
+        // The snapshot already points at the next player. A move by seat zero therefore
+        // arrives with turnSeat=1, so invert it before choosing the landed ink's colour.
+        const colour = turn === 1 ? PALETTE.red : PALETTE.black;
         if (!this.effectsOff) {
           this.effects.push(
             new RippleEffect({
