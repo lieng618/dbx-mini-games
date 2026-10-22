@@ -11,7 +11,21 @@ const packageName = `${manifest.id}-${manifest.version}-${target}.dbxp`;
 const metadataName = `${manifest.id}-${manifest.version}-${target}.artifact.json`;
 const distDirectory = resolve(projectRoot, "dist");
 const packagePath = resolve(distDirectory, packageName);
-const metadata = JSON.parse(await readFile(resolve(distDirectory, metadataName), "utf8"));
+let metadata;
+let metadataFromRelease = false;
+try {
+  const published = JSON.parse(await readFile(resolve(distDirectory, "release-candidates.json"), "utf8"));
+  metadata = published.artifacts?.find(
+    (artifact) =>
+      artifact.target === target &&
+      artifact.url &&
+      (artifact.url === packageName || artifact.url.endsWith(`/${packageName}`)),
+  );
+  metadataFromRelease = Boolean(metadata);
+} catch {
+  // Local package builds before the first Release only have artifact metadata.
+}
+metadata ||= JSON.parse(await readFile(resolve(distDirectory, metadataName), "utf8"));
 const packageBytes = await readFile(packagePath);
 const sha256 = createHash("sha256").update(packageBytes).digest("hex");
 
@@ -78,31 +92,33 @@ await writeFile(
 );
 const candidatePath = resolve(submissionRoot, "candidates", `${manifest.id}.json`);
 await writeFile(candidatePath, `${JSON.stringify(candidate, null, 2)}\n`);
-await writeFile(
-  resolve(distDirectory, "release-candidates.json"),
-  `${JSON.stringify(
-    {
-      plugin: {
-        id: manifest.id,
-        name: manifest.name,
-        description: manifest.description,
-        publisher: manifest.publisher,
-        version: manifest.version,
-        permissions: [...manifest.permissions].sort(),
-      },
-      artifacts: [
-        {
-          target,
-          url: `${releaseBase}/${packageName}`,
-          sha256,
-          size: packageBytes.length,
+if (!metadataFromRelease) {
+  await writeFile(
+    resolve(distDirectory, "release-candidates.json"),
+    `${JSON.stringify(
+      {
+        plugin: {
+          id: manifest.id,
+          name: manifest.name,
+          description: manifest.description,
+          publisher: manifest.publisher,
+          version: manifest.version,
+          permissions: [...manifest.permissions].sort(),
         },
-      ],
-    },
-    null,
-    2,
-  )}\n`,
-);
+        artifacts: [
+          {
+            target,
+            url: `${releaseBase}/${packageName}`,
+            sha256,
+            size: packageBytes.length,
+          },
+        ],
+      },
+      null,
+      2,
+    )}\n`,
+  );
+}
 
 console.log(
   JSON.stringify(

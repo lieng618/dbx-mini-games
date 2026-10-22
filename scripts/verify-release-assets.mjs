@@ -9,9 +9,6 @@ const manifest = JSON.parse(await readFile(resolve(projectRoot, "manifest.json")
 const target = "universal";
 const packageName = `${manifest.id}-${manifest.version}-${target}.dbxp`;
 const packagePath = resolve(projectRoot, "dist", packageName);
-const artifact = JSON.parse(
-  await readFile(resolve(projectRoot, "dist", `${manifest.id}-${manifest.version}-${target}.artifact.json`), "utf8"),
-);
 const releaseCandidates = JSON.parse(
   await readFile(resolve(projectRoot, "dist", "release-candidates.json"), "utf8"),
 );
@@ -22,6 +19,7 @@ const bytes = await readFile(packagePath);
 const sha256 = createHash("sha256").update(bytes).digest("hex");
 const entries = execFileSync("tar", ["-tf", packagePath], { encoding: "utf8" }).split(/\r?\n/);
 const packagedManifest = JSON.parse(execFileSync("tar", ["-xOf", packagePath, "manifest.json"], { encoding: "utf8" }));
+const releaseArtifact = releaseCandidates.artifacts?.find((artifact) => artifact.target === target);
 
 const failures = [];
 function check(condition, message) {
@@ -29,10 +27,10 @@ function check(condition, message) {
 }
 
 check(!entries.includes("signature.json"), "candidate contains signature.json");
-check(artifact.signingKeyId === undefined, "artifact metadata declares signingKeyId");
-check(artifact.target === target, "artifact target is not universal");
-check(artifact.sha256.toLowerCase() === sha256, "artifact SHA-256 does not match package bytes");
-check(artifact.size === bytes.length, "artifact size does not match package bytes");
+check(releaseArtifact?.signingKeyId === undefined, "release candidate declares signingKeyId");
+check(Boolean(releaseArtifact), "release-candidates has no universal artifact");
+check(releaseArtifact?.sha256.toLowerCase() === sha256, "release-candidate SHA-256 does not match package bytes");
+check(releaseArtifact?.size === bytes.length, "release-candidate size does not match package bytes");
 check(packagedManifest.id === manifest.id, "packaged Manifest ID differs from source Manifest");
 check(packagedManifest.version === manifest.version, "packaged Manifest version differs from source Manifest");
 check(packagedManifest.publisher === manifest.publisher, "packaged Manifest publisher differs from source Manifest");
@@ -56,12 +54,15 @@ check(storeCandidate.targets?.[0]?.size === bytes.length, "store candidate size 
 
 if (process.argv.includes("--check-urls")) {
   for (const item of releaseCandidates.artifacts) {
-    const response = await fetch(item.url, { redirect: "follow" });
-    check(response.ok, `release URL is not reachable: ${item.url}`);
+    const url = item.url.startsWith("https://")
+      ? item.url
+      : `https://github.com/lieng618/dbx-mini-games/releases/download/v${manifest.version}/${item.url}`;
+    const response = await fetch(url, { redirect: "follow" });
+    check(response.ok, `release URL is not reachable: ${url}`);
     if (response.ok) {
       const remote = Buffer.from(await response.arrayBuffer());
       const remoteSha256 = createHash("sha256").update(remote).digest("hex");
-      check(remoteSha256 === item.sha256, `remote package SHA-256 is wrong: ${item.url}`);
+      check(remoteSha256 === item.sha256, `remote package SHA-256 is wrong: ${url}`);
     }
   }
 }
