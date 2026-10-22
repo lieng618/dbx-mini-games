@@ -3,7 +3,7 @@
  *
  * The scene is deliberately state-light: it is told what the position is and draws it.
  * It never validates moves or decides outcomes — the host is the only authority. Its
- * public surface is `update`, `flashEffects`, and `destroy`.
+ * public surface is `update`, `suspend`, `resume`, and `destroy`.
  */
 
 import { Application, Container, Graphics, Text, TextStyle } from "pixi.js";
@@ -42,6 +42,7 @@ export class BoardScene {
     this.effects = [];
     this.lastCells = null;
     this.lastMove = null;
+    this.lastMoveKey = null;
     this.result = null;
     this.destroyed = false;
     this.audio = new BoardAudio();
@@ -108,6 +109,7 @@ export class BoardScene {
     this.clearEffects();
     this.cued.check = false;
     this.cued.win = false;
+    this.lastMoveKey = null;
     this.game = game;
     this.lay = layout(game, this.flipped);
     this.drawBoard();
@@ -134,6 +136,7 @@ export class BoardScene {
     // Ink, seals and winning lines were placed with the old mapping; leaving them would put
     // them on the wrong squares.
     this.clearEffects();
+    this.lastMoveKey = null;
   }
 
   /** Draws the static board: frame, grid, palace diagonals, river. */
@@ -298,6 +301,16 @@ export class BoardScene {
     if (!lay) return;
     const cellCount = lay.cells;
     const prev = this.lastCells;
+    const positionChanged =
+      !!prev &&
+      prev.length === cells.length &&
+      prev.some((value, index) => value !== cells[index]);
+    const nextLastMoveKey =
+      snapshot.lastMove && snapshot.lastMove.to >= 0
+        ? `${snapshot.lastMove.from ?? -1}:${snapshot.lastMove.to}`
+        : "";
+    const lastMoveChanged = nextLastMoveKey !== this.lastMoveKey;
+    this.lastMoveKey = nextLastMoveKey;
 
     // The piece layer resolves identity and animates the move; it reports what it played.
     // Effects are then anchored to that timeline instead of to the snapshot's arrival, so
@@ -307,7 +320,7 @@ export class BoardScene {
 
     // A new position means the one-shot cues are live again. This is reset here rather than
     // on move, because a spectator has no move callback at all.
-    if (prev && prev.length === cells.length && prev.some((v, i) => v !== cells[i])) {
+    if (positionChanged) {
       this.cued.check = false;
       this.cued.win = false;
     }
@@ -423,7 +436,14 @@ export class BoardScene {
     }
 
     // Last-move marker.
-    if (!this.effectsOff && snapshot.lastMove && snapshot.lastMove.to >= 0) {
+    // Room snapshots also arrive for clocks and membership. Replaying the last-move marker
+    // on every one kept several copies alive and made an idle board look permanently busy.
+    if (
+      !this.effectsOff &&
+      snapshot.lastMove &&
+      snapshot.lastMove.to >= 0 &&
+      (positionChanged || lastMoveChanged)
+    ) {
       const to = cellCenter(lay2, snapshot.lastMove.to);
       const from = snapshot.lastMove.from >= 0 ? cellCenter(lay2, snapshot.lastMove.from) : null;
       this.effects.push(
@@ -679,11 +699,30 @@ export class BoardScene {
     }
   }
 
+  /** Stops animation while the page is hidden or suspended by the host. */
+  suspend() {
+    this.app?.ticker.stop();
+  }
+
+  /**
+   * Re-arms Pixi after the page becomes visible again. A long background stay can leave
+   * half-finished ink from an old move on screen, so callers may discard transient effects
+   * before the next authoritative snapshot is painted.
+   */
+  resume({ discardEffects = false } = {}) {
+    if (this.destroyed || !this.app) return;
+    if (discardEffects) this.clearEffects();
+    this.app.ticker.start();
+    this.app.renderer.render(this.app.stage);
+  }
+
   /** Advances all live effects. */
   tick(dt) {
     if (this.destroyed) return;
     // Cap dt so a background tab returning to focus cannot fast-forward every effect.
-    const step = Math.min(dt, 0.05);
+    // A throttled tab can also report a missing/NaN delta once; treating that as a normal
+    // frame prevents every effect age from becoming permanently NaN.
+    const step = Number.isFinite(dt) ? Math.min(Math.max(0, dt), 0.05) : 1 / 60;
     this.pieces.update(step);
     this.updateHand(step);
 
@@ -776,6 +815,7 @@ export class BoardScene {
 
   destroy() {
     this.destroyed = true;
+    this.app?.ticker.stop();
     this.clearEffects();
     this.audio.destroy();
     if (this.app) {

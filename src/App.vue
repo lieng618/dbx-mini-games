@@ -111,6 +111,8 @@ const boardHost = ref(null);
 const canvasFailed = ref(false);
 let scene = null;
 let sceneInitPromise = null;
+let hiddenAt = 0;
+let resumeInFlight = false;
 let floatingTimer = null;
 let floatingSerial = 0;
 
@@ -1015,6 +1017,45 @@ function stopEventListening() {
   lobbyRefreshTimer = null;
 }
 
+async function resumeAfterBackground(awayMs) {
+  if (resumeInFlight) return;
+  resumeInFlight = true;
+  try {
+    await ensureScene();
+    if (!scene) return;
+    // Animations are decorative state. Drop a half-finished move or check effect after a
+    // long absence, then let the authoritative snapshot paint the current position.
+    scene.resume({ discardEffects: awayMs >= 1500 });
+    if (!ready.value) return;
+    const snapshot = await call("room.snapshot");
+    if (snapshot) {
+      applySnapshot(snapshot);
+    }
+    if (role.value === "idle") await scan();
+  } catch {
+    // Connection state events own retry and error reporting. The board stays interactive.
+  } finally {
+    resumeInFlight = false;
+  }
+}
+
+function handleVisibilityChange() {
+  if (document.visibilityState === "hidden") {
+    hiddenAt = Date.now();
+    scene?.suspend();
+    return;
+  }
+  if (document.visibilityState !== "visible") return;
+  const awayMs = hiddenAt ? Date.now() - hiddenAt : 0;
+  hiddenAt = 0;
+  if (ready.value) void resumeAfterBackground(awayMs);
+  else scene?.resume();
+}
+
+function handleWindowFocus() {
+  if (document.visibilityState === "visible") scene?.resume();
+}
+
 async function ensureScene() {
   if (scene) return scene;
   if (sceneInitPromise) return sceneInitPromise;
@@ -1025,6 +1066,7 @@ async function ensureScene() {
       const created = new BoardScene({ onCell });
       await created.init(boardHost.value, game.value);
       created.setFlipped(shouldFlipBoard(game.value, mySeat.value));
+      if (document.visibilityState === "hidden") created.suspend();
       scene = created;
       canvasFailed.value = false;
       if (typeof window !== "undefined" && window.__DBX_DEBUG_FX) {
@@ -1044,6 +1086,10 @@ async function ensureScene() {
 }
 
 onMounted(async () => {
+  document.addEventListener("visibilitychange", handleVisibilityChange);
+  window.addEventListener("focus", handleWindowFocus);
+  window.addEventListener("pageshow", handleVisibilityChange);
+
   await whenReady();
   ready.value = true;
 
@@ -1071,6 +1117,9 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", closeResultOnEscape);
+  window.removeEventListener("focus", handleWindowFocus);
+  window.removeEventListener("pageshow", handleVisibilityChange);
+  document.removeEventListener("visibilitychange", handleVisibilityChange);
   clearTimeout(undoTimer);
   undoTimer = null;
   if (mvpTimer) clearTimeout(mvpTimer);
@@ -1923,6 +1972,7 @@ watch(seats, (next, previous) => {
 .workbench {
   display: grid;
   grid-template-columns: 336px 1fr;
+  --board-fit: 0.9;
   height: 100vh;
   margin: 0;
   font-family: var(--font-ui);
@@ -3534,8 +3584,8 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
    the workbench has while never cropping the board. */
 .canvas-host canvas {
   display: block;
-  max-width: 100%;
-  max-height: 100%;
+  max-width: calc(100% * var(--board-fit));
+  max-height: calc(100% * var(--board-fit));
   width: auto !important;
   height: auto !important;
   filter: drop-shadow(0 18px 42px rgba(28, 26, 23, 0.16));
@@ -5318,16 +5368,16 @@ button:focus-visible {
   transition: transform var(--dur-base) var(--ease-standard);
 }
 
-.workbench[data-board-size="compact"] .canvas-host canvas {
-  transform: scale(1);
+.workbench[data-board-size="compact"] {
+  --board-fit: 0.8;
 }
 
-.workbench[data-board-size="standard"] .canvas-host canvas {
-  transform: scale(1.14);
+.workbench[data-board-size="standard"] {
+  --board-fit: 0.9;
 }
 
-.workbench[data-board-size="large"] .canvas-host canvas {
-  transform: scale(1.28);
+.workbench[data-board-size="large"] {
+  --board-fit: 1;
 }
 
 .controls {
