@@ -72,10 +72,6 @@ export async function loadGameServerConfig() {
     "PUBLIC_ORIGIN",
     ["https:"],
   );
-  const publicHost = requiredValue(values, "PUBLIC_HOST");
-  if (publicHost !== publicUrl.hostname) {
-    throw new Error("PUBLIC_HOST must match the hostname in PUBLIC_ORIGIN");
-  }
   const localUrl = parseOrigin(
     requiredValue(values, "LOCAL_ORIGIN"),
     "LOCAL_ORIGIN",

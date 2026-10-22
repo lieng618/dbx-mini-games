@@ -1,8 +1,4 @@
-{
-	default_sni {$PUBLIC_HOST}
-}
-
-{$PUBLIC_ORIGIN} {
+:443 {
 	tls /etc/caddy/certs/ip.crt /etc/caddy/certs/ip.key
 	encode zstd gzip
 	reverse_proxy 127.0.0.1:8787

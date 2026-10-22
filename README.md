@@ -83,7 +83,6 @@ node scripts/cloud-smoke.mjs
 
 ```text
 PUBLIC_ORIGIN=https://play.example.com
-PUBLIC_HOST=play.example.com
 WEBSOCKET_PATH=/ws
 LOCAL_ORIGIN=http://127.0.0.1:8787
 ```
