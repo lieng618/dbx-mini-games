@@ -3,7 +3,7 @@
   "manifest_version": 1,
   "id": "io.github.lieng618.dbx-mini-games",
   "name": "DBX Mini Games",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "publisher": "lieng618",
   "description": "A quiet online parlour for Chinese chess and Gomoku, with rooms, spectators, and match clocks.",
   "icon": "assets/plugin.svg",

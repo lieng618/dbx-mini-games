@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   release:
-    uses: t8y2/dbx/.github/workflows/plugin-release-reusable.yml@plugin-sdk-v1
+    uses: t8y2/dbx/.github/workflows/plugin-release-reusable.yml@b160d130560f71c5c429be15cec6147f677a4b3a
     with:
       release-tag: ${{ github.event.release.tag_name }}
       package-command: npm ci && npm run build && dbx-plugin package .

@@ -1,6 +1,7 @@
-# DBX Mini Games 0.3.0
+# DBX Mini Games 0.3.1
 
-Initial public release of the anonymous online board-game lobby.
+First public release of the anonymous online board-game lobby, with the
+release workflow pinned to a valid DBX plugin SDK revision.
 
 ## Highlights
 

@@ -1,15 +1,15 @@
 ## Plugin submission
 
 - Plugin ID: `io.github.lieng618.dbx-mini-games`
-- Version: `0.3.0`
+- Version: `0.3.1`
 - Publisher ID: `lieng618`
 
 ## Source repository and tag
 
-https://github.com/lieng618/dbx-mini-games/tree/v0.3.0
+https://github.com/lieng618/dbx-mini-games/tree/v0.3.1
 
 The unsigned universal candidate is built from this tag and published under
-the repository's `v0.3.0` GitHub Release.
+the repository's `v0.3.1` GitHub Release.
 
 ## Capabilities and user workflow
 
@@ -37,11 +37,11 @@ advertising, telemetry, or persistent replay data is used.
 
 Privacy policy:
 
-https://github.com/lieng618/dbx-mini-games/blob/v0.3.0/PRIVACY.md
+https://github.com/lieng618/dbx-mini-games/blob/v0.3.1/PRIVACY.md
 
 Screenshots:
 
-https://github.com/lieng618/dbx-mini-games/tree/v0.3.0/screenshots
+https://github.com/lieng618/dbx-mini-games/tree/v0.3.1/screenshots
 
 ## Native sidecar behavior
 
