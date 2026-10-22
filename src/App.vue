@@ -1188,7 +1188,12 @@ watch(seats, (next, previous) => {
 </script>
 
 <template>
-  <div class="workbench" :class="{ 'lobby-mode': role === 'idle' }" :data-board-size="boardSize">
+  <div
+    class="workbench"
+    :class="{ 'lobby-mode': role === 'idle' }"
+    :data-board-size="boardSize"
+    :data-game="game"
+  >
     <aside v-show="role !== 'idle'" class="rail">
       <header class="rail-head">
         <div class="brand">棋牌小馆</div>
@@ -5865,85 +5870,211 @@ button:focus-visible {
   .workbench:not(.lobby-mode) {
     grid-template-rows: auto minmax(0, 1fr);
     height: 100dvh;
+    --mobile-board-height: 1.12;
+    --mobile-board-width-guard: 0.79;
+  }
+
+  .workbench[data-game="gomoku"]:not(.lobby-mode) {
+    --mobile-board-width-guard: 0.895;
+  }
+
+  .workbench[data-board-size="compact"]:not(.lobby-mode) {
+    --mobile-board-height: 1.04;
+  }
+
+  .workbench[data-board-size="large"]:not(.lobby-mode) {
+    --mobile-board-height: 1.16;
   }
 
   .workbench:not(.lobby-mode) .rail {
-    grid-template-columns: 1fr;
-    grid-template-rows: auto minmax(0, 1fr) auto;
-    gap: 10px;
-    max-height: 310px;
-    padding: 12px 14px;
-    overflow: hidden;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-rows: auto auto;
+    grid-template-areas:
+      "head actions"
+      "panel panel";
+    gap: 6px 10px;
+    max-height: none;
+    padding: 8px 12px 10px;
+    overflow: visible;
   }
 
   .workbench:not(.lobby-mode) .rail-head {
+    grid-area: head;
     display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 12px;
-    padding-bottom: 9px;
+    flex-direction: row;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 8px;
+    min-width: 0;
+    padding: 0;
+    border-bottom: 0;
   }
 
   .workbench:not(.lobby-mode) .brand {
-    font-size: 18px;
-    letter-spacing: 0.12em;
+    gap: 8px;
+    overflow: hidden;
+    font-size: 16px;
+    letter-spacing: 0.1em;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .workbench:not(.lobby-mode) .brand::before {
-    height: 18px;
+    width: 5px;
+    height: 16px;
   }
 
   .workbench:not(.lobby-mode) .brand-sub {
-    padding-left: 0;
+    display: none;
   }
 
   .workbench:not(.lobby-mode) .panel {
-    display: flex;
-    flex-direction: column;
-    gap: 9px;
+    grid-area: panel;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      "summary"
+      "details"
+      "spectators"
+      "clock";
+    gap: 3px;
     min-width: 0;
+    overflow: visible;
+    scrollbar-gutter: auto;
   }
 
   .workbench:not(.lobby-mode) .room-summary {
-    padding-bottom: 9px;
+    grid-area: summary;
+    padding: 0 0 5px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .workbench:not(.lobby-mode) .room-summary-meta {
+    justify-content: flex-start;
+    gap: 8px;
+  }
+
+  .workbench:not(.lobby-mode) .room-overline {
+    font-size: 9px;
+    letter-spacing: 0.14em;
+  }
+
+  .workbench:not(.lobby-mode) .room-phase {
+    padding: 3px 6px;
+    font-size: 9px;
   }
 
   .workbench:not(.lobby-mode) .room-summary h2 {
-    margin: 5px 0 2px;
-    font-size: 18px;
+    margin: 3px 0 2px;
+    overflow: hidden;
+    font-size: 16px;
+    line-height: 1.35;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .workbench:not(.lobby-mode) .room-meta {
+    overflow: hidden;
+    font-size: 11px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .workbench:not(.lobby-mode) .room-invite-button {
+    height: 32px;
+    padding-inline: 10px;
   }
 
   .workbench:not(.lobby-mode) .room-details {
+    grid-area: details;
     grid-template-columns: 1fr 1fr;
+    align-self: center;
+    border-bottom: 0;
   }
 
   .workbench:not(.lobby-mode) .room-details > div {
-    align-items: flex-start;
-    flex-direction: column;
-    gap: 4px;
-    padding: 6px 0;
+    align-items: baseline;
+    flex-direction: row;
+    gap: 5px;
+    padding: 3px 0;
   }
 
   .workbench:not(.lobby-mode) .room-details > div + div {
-    padding-left: 12px;
+    padding-left: 8px;
     border-top: 0;
     border-left: 1px solid var(--line-soft);
+  }
+
+  .workbench:not(.lobby-mode) .room-details dt {
+    font-size: 9px;
+    letter-spacing: 0.05em;
+    white-space: nowrap;
   }
 
   .workbench:not(.lobby-mode) .room-details dd {
     font-size: 12px;
     text-align: left;
+    white-space: nowrap;
+  }
+
+  .workbench:not(.lobby-mode) .spectators {
+    grid-area: spectators;
+    align-self: center;
+    flex-wrap: nowrap;
+    width: 100%;
+    min-width: 0;
+    gap: 6px;
+    padding: 3px 0;
+  }
+
+  .workbench:not(.lobby-mode) .spectator-label {
+    flex: 0 0 auto;
+    font-size: 9px;
+    white-space: nowrap;
+  }
+
+  .workbench:not(.lobby-mode) .spectator-names {
+    flex: 1;
+    min-width: 0;
+    flex-wrap: nowrap;
+    margin: 0;
+    padding: 2px 0;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+  }
+
+  .workbench:not(.lobby-mode) .spectator-names::-webkit-scrollbar {
+    display: none;
+  }
+
+  .workbench:not(.lobby-mode) .chip {
+    height: 24px;
+    padding-inline: 8px;
+    font-size: 10px;
+    white-space: nowrap;
+  }
+
+  .workbench:not(.lobby-mode) .move-clock {
+    grid-area: clock;
+    justify-self: end;
   }
 
   .workbench:not(.lobby-mode) .rail-actions {
+    grid-area: actions;
+    align-self: center;
     flex-direction: row;
-    padding-top: 9px;
-    border-top: 1px solid var(--line);
-    gap: 8px;
+    flex-wrap: nowrap;
+    padding: 0;
+    border-top: 0;
+    gap: 6px;
   }
 
   .workbench:not(.lobby-mode) .rail-actions button {
-    flex: 1 1 auto;
+    flex: 0 1 auto;
+    min-height: 44px;
+    padding-inline: 12px;
+    font-size: 12px;
   }
 
   .workbench:not(.lobby-mode) .toggle {
@@ -5951,38 +6082,58 @@ button:focus-visible {
   }
 
   .workbench:not(.lobby-mode) .board-col {
-    gap: 6px;
-    padding: 8px 10px;
+    gap: 4px;
+    padding: 4px 8px 8px;
   }
 
   .workbench:not(.lobby-mode) .seat-strip {
-    padding: 5px 10px;
+    gap: 8px;
+    min-width: min(220px, 70vw);
+    min-height: 38px;
+    padding: 4px 12px;
+  }
+
+  .workbench:not(.lobby-mode) .avatar {
+    width: 20px;
+    height: 24px;
+  }
+
+  .workbench:not(.lobby-mode) .seat-panel-name {
+    font-size: 13px;
+  }
+
+  .workbench:not(.lobby-mode) .seat-panel-tag {
+    font-size: 10px;
+  }
+
+  .workbench:not(.lobby-mode) .seat-strip-clock {
+    font-size: 13px;
   }
 
   .workbench:not(.lobby-mode) .canvas-host {
-    padding: 6px;
+    position: relative;
+    container-type: size;
+    width: 100%;
+    min-width: 0;
+    padding: 0;
+    overflow: hidden;
   }
 
-  /* The Pixi scene uses a fixed 16:9 logical surface. Scaling that surface up and
-     clipping its empty side margins keeps the square board readable on a phone
-     without stretching pieces or changing hit testing. */
+  /* Fit the 16:9 scene by height. The board is centred inside the scene, so the
+     unused side margins are clipped while the whole board remains visible. */
   .workbench:not(.lobby-mode) .canvas-host canvas {
-    width: 200% !important;
-    height: auto !important;
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: auto !important;
+    height: 100% !important;
+    height: min(
+      calc(100cqh * var(--mobile-board-height)),
+      calc(100cqw / var(--mobile-board-width-guard))
+    ) !important;
     max-width: none !important;
     max-height: none !important;
-  }
-
-  .workbench[data-board-size="compact"] .canvas-host canvas {
-    transform: scale(0.96);
-  }
-
-  .workbench[data-board-size="standard"] .canvas-host canvas {
-    transform: scale(1.02);
-  }
-
-  .workbench[data-board-size="large"] .canvas-host canvas {
-    transform: scale(1.06);
+    transform: translate(-50%, -50%);
   }
 
   .lobby-screen {
