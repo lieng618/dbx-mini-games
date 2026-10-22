@@ -8,6 +8,12 @@ Plugin ID: io.github.lieng618.dbx-mini-games
 Source:    https://github.com/lieng618/dbx-mini-games
 ```
 
+## 来源与衍生说明
+
+本项目基于 [southernMortals/dbx-board-games](https://github.com/southernMortals/dbx-board-games) 继续开发，并保留了上游的 Git 历史。当前 `main` 分支中早于 `lieng618` 维护阶段的提交主要由 GitHub 用户 [jzj2621899857](https://github.com/jzj2621899857) 编写。
+
+本仓库不是 GitHub 上的 Fork，而是将上游项目的内容及其提交历史迁入 [lieng618/dbx-mini-games](https://github.com/lieng618/dbx-mini-games) 后继续维护。保留这些提交是为了准确记录项目来源和演进过程。
+
 ## 当前能力
 
 - 公共云端大厅，实时推送房间变化；
