@@ -38,6 +38,7 @@ export class BoardScene {
     // Whether the board is drawn from seat two's side of the table.
     this.flipped = false;
     this.lowMotion = false;
+    this.effectsOff = false;
     this.effects = [];
     this.lastCells = null;
     this.lastMove = null;
@@ -284,8 +285,13 @@ export class BoardScene {
     if (this.destroyed || !this.app) return;
     const cells = snapshot.cells || [];
     const lowMotion = !!snapshot.lowMotion;
+    const effectsOff = !!snapshot.effectsOff;
     if (lowMotion !== this.lowMotion) {
       this.lowMotion = lowMotion;
+    }
+    if (effectsOff !== this.effectsOff) {
+      this.effectsOff = effectsOff;
+      if (effectsOff) this.clearEffects();
     }
 
     const lay = this.lay;
@@ -311,7 +317,7 @@ export class BoardScene {
       const travel = move.duration || 0;
       // One hand, on the first move of the update. A scenario replay produces several
       // moves in one snapshot, and a hand per move would look like a crowd at the table.
-      if (!this.lowMotion && !this.hand && travel > 0) {
+      if (!this.effectsOff && !this.lowMotion && !this.hand && travel > 0) {
         const carrier = this.pieces.nodeAt(move.toCell);
         if (carrier) this.startHand(carrier, travel, move);
       }
@@ -320,16 +326,18 @@ export class BoardScene {
       this.schedule(travel, () => {
         const turn = snapshot.turnSeat;
         const colour = turn === 1 ? PALETTE.black : PALETTE.red;
-        this.effects.push(
-          new RippleEffect({
-            x: move.to.x,
-            y: move.to.y,
-            radius: lay2.step * 0.34,
-            colour,
-            heavy: this.game === "xiangqi",
-            lowMotion: this.lowMotion,
-          }),
-        );
+        if (!this.effectsOff) {
+          this.effects.push(
+            new RippleEffect({
+              x: move.to.x,
+              y: move.to.y,
+              radius: lay2.step * 0.34,
+              colour,
+              heavy: this.game === "xiangqi",
+              lowMotion: this.lowMotion,
+            }),
+          );
+        }
         this.audio.play(this.game === "xiangqi" ? "landHeavy" : "land", {
           pitch: (move.to.x + move.to.y) % 2 < 1 ? 1.02 : 0.97,
         });
@@ -338,13 +346,15 @@ export class BoardScene {
         // The piece is set down, so the board answers it. A short, tight wave at the square
         // the piece landed on, plus the faintest lift in brightness — enough that a quiet
         // move still lands with weight, without competing with a capture or a check.
-        this.pulseShock(move.to, {
-          amplitude: 18,
-          wavelength: 90,
-          speed: 760,
-          duration: 0.42,
-        });
-        if (this.boardBounds && !this.lowMotion) {
+        if (!this.effectsOff) {
+          this.pulseShock(move.to, {
+            amplitude: 18,
+            wavelength: 90,
+            speed: 760,
+            duration: 0.42,
+          });
+        }
+        if (!this.effectsOff && this.boardBounds && !this.lowMotion) {
           this.effects.push(
             new FlashEffect({
               x: this.boardBounds.left,
@@ -364,44 +374,46 @@ export class BoardScene {
         this.schedule(Math.max(0, travel - 0.06), () => {
           // The victim's own colour, so a capture looks like that piece breaking.
           const broken = move.victimColour ?? (this.game === "xiangqi" ? PALETTE.red : PALETTE.ink);
-          this.effects.push(
-            // The disc comes apart first; the dust trails it.
-            new ShatterEffect({
-              x: move.to.x,
-              y: move.to.y,
-              radius: lay2.step * 0.44,
-              colour: broken,
-              lowMotion: this.lowMotion,
-            }),
-            new CaptureBurstEffect({
-              x: move.to.x,
-              y: move.to.y,
-              radius: lay2.step * 0.36,
-              colour: broken,
-              lowMotion: this.lowMotion,
-            }),
-          );
-          if (this.boardBounds) {
+          if (!this.effectsOff) {
             this.effects.push(
-              new FlashEffect({
-                x: this.boardBounds.left,
-                y: this.boardBounds.top,
-                width: this.boardBounds.width,
-                height: this.boardBounds.height,
-                colour: 0xfff1d0,
-                peak: 0.3,
-                duration: 0.38,
+              // The disc comes apart first; the dust trails it.
+              new ShatterEffect({
+                x: move.to.x,
+                y: move.to.y,
+                radius: lay2.step * 0.44,
+                colour: broken,
+                lowMotion: this.lowMotion,
+              }),
+              new CaptureBurstEffect({
+                x: move.to.x,
+                y: move.to.y,
+                radius: lay2.step * 0.36,
+                colour: broken,
                 lowMotion: this.lowMotion,
               }),
             );
+            if (this.boardBounds) {
+              this.effects.push(
+                new FlashEffect({
+                  x: this.boardBounds.left,
+                  y: this.boardBounds.top,
+                  width: this.boardBounds.width,
+                  height: this.boardBounds.height,
+                  colour: 0xfff1d0,
+                  peak: 0.3,
+                  duration: 0.38,
+                  lowMotion: this.lowMotion,
+                }),
+              );
+            }
+            // A short, tight wave on the struck square: the board takes the hit locally.
+            this.pulseShock(move.to, {
+              amplitude: 26,
+              wavelength: 120,
+              speed: 900,
+              duration: 0.5,
+            });
           }
-          // A short, tight wave on the struck square: the board takes the hit locally.
-          this.pulseShock(move.to, {
-            amplitude: 26,
-            wavelength: 120,
-            speed: 900,
-            duration: 0.5,
-          });
           this.audio.play("capture");
           tap([10, 24, 14]);
         });
@@ -409,7 +421,7 @@ export class BoardScene {
     }
 
     // Last-move marker.
-    if (snapshot.lastMove && snapshot.lastMove.to >= 0) {
+    if (!this.effectsOff && snapshot.lastMove && snapshot.lastMove.to >= 0) {
       const to = cellCenter(lay2, snapshot.lastMove.to);
       const from = snapshot.lastMove.from >= 0 ? cellCenter(lay2, snapshot.lastMove.from) : null;
       this.effects.push(
@@ -425,7 +437,7 @@ export class BoardScene {
     // a fresh translucent 将 on top of the last one on every update, so a check read as a
     // muddy blur instead of one decisive slam. The edge also has to be re-armed when check
     // clears, otherwise only the first check of a session would ever be announced.
-    if (snapshot.inCheck && this.boardBounds && this.game === "xiangqi") {
+    if (!this.effectsOff && snapshot.inCheck && this.boardBounds && this.game === "xiangqi") {
       if (!this.cued.check) {
         this.cued.check = true;
         const focus = snapshot.checkFocus != null ? cellCenter(lay2, snapshot.checkFocus) : null;
@@ -459,7 +471,7 @@ export class BoardScene {
     // Terminal result.
     if (snapshot.result && snapshot.result.finished && !this.result) {
       this.result = snapshot.result;
-      this.playWin(snapshot, cells);
+      if (!this.effectsOff) this.playWin(snapshot, cells);
     }
     if (!snapshot.result || !snapshot.result.finished) {
       this.result = null;
@@ -643,7 +655,7 @@ export class BoardScene {
    * every frame a render-to-texture.
    */
   pulseShock(point, { amplitude = 26, wavelength = 150, speed = 700, duration = 0.62 } = {}) {
-    if (this.lowMotion || !this.root) return;
+    if (this.effectsOff || this.lowMotion || !this.root) return;
     if (!point) return;
     try {
       const filter = new ShockwaveFilter({
@@ -750,6 +762,10 @@ export class BoardScene {
     this.clearHand();
     this.pending.length = 0;
     clearTransient(this.effects);
+    if (this.shock) {
+      if (this.root) this.root.filters = null;
+      this.shock = null;
+    }
     if (this.boardLayer) this.boardLayer.position.set(0, 0);
     if (this.pieceLayer) this.pieceLayer.position.set(0, 0);
     if (this.effectLayer) this.effectLayer.position.set(0, 0);

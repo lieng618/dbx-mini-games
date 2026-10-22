@@ -155,13 +155,19 @@ func TestReconnectWithTicket(t *testing.T) {
 	ticket := first.Ticket()
 	_ = first.Close()
 
-	// Wait for the server to notice the drop.
+	// Wait for the server to notice the drop and mark the retained seat disconnected.
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if r.Count() == 1 {
-			break
+		for _, member := range r.Members() {
+			if member.ID == "guest" && !member.Connected {
+				goto disconnected
+			}
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+disconnected:
+	if seats := r.Seats(); seats[1] != "guest" {
+		t.Fatalf("a temporary disconnect must retain the seat, seats=%v", seats)
 	}
 
 	second, err := Join(JoinOptions{
@@ -175,8 +181,56 @@ func TestReconnectWithTicket(t *testing.T) {
 		t.Fatalf("reconnect with a ticket must succeed: %v", err)
 	}
 	defer second.Close()
-	if second.Ticket() == "" {
-		t.Fatal("reconnect must issue a fresh ticket")
+	if second.Ticket() != ticket {
+		t.Fatal("reconnect must preserve the ticket until its grace window expires")
+	}
+	if second.Snapshot()["selfId"] != "guest" {
+		t.Fatalf("reconnect lost the member identity: %#v", second.Snapshot())
+	}
+	if seats := r.Seats(); seats[1] != "guest" {
+		t.Fatalf("reconnect did not restore the retained seat, seats=%v", seats)
+	}
+}
+
+func TestTicketExpiresAfterReconnectGrace(t *testing.T) {
+	previous := lanReconnectGrace
+	lanReconnectGrace = 80 * time.Millisecond
+	defer func() { lanReconnectGrace = previous }()
+
+	r, srv := newHostedRoom(t, "gomoku", "s3cret")
+	first, err := Join(JoinOptions{
+		Address:  addrOf(srv),
+		HostKey:  srv.PublicKey(),
+		RoomID:   r.ID(),
+		Profile:  Profile{ID: "guest", Nickname: "客人"},
+		Password: "s3cret",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ticket := first.Ticket()
+	_ = first.Close()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if r.Count() == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if r.Count() != 1 {
+		t.Fatal("the expired guest was not removed from the room")
+	}
+
+	_, err = Join(JoinOptions{
+		Address: addrOf(srv),
+		HostKey: srv.PublicKey(),
+		RoomID:  r.ID(),
+		Profile: Profile{ID: "guest", Nickname: "客人"},
+		Ticket:  ticket,
+	})
+	if !errors.Is(err, ErrBadPassword) {
+		t.Fatalf("an expired ticket must require the room password, got %v", err)
 	}
 }
 

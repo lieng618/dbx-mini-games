@@ -57,6 +57,7 @@ const lowMotion = ref(Boolean(settings.value.lowMotion));
 const effectsLevel = ref(settings.value.effectsLevel || "full");
 const boardSize = ref(settings.value.boardSize || "standard");
 const theme = ref(settings.value.theme || "paper");
+const reducedMotion = computed(() => lowMotion.value || effectsLevel.value !== "full");
 const lobbyRooms = ref([]);
 const lobbyOnline = ref(0);
 const scanning = ref(false);
@@ -68,6 +69,10 @@ const serverUrl = ref(bridge.serverUrl || "");
 const lobbyTab = ref("rooms");
 const nickname = ref("");
 const joinPassword = ref("");
+const joinPrompt = ref(null);
+const joinPasswordError = ref("");
+const joinSubmitting = ref(false);
+const joinPasswordInput = ref(null);
 const lobbyNow = ref(Date.now());
 
 const cells = ref([]);
@@ -79,6 +84,7 @@ const winLine = ref([]);
 const clock = ref(null);
 const undoRequestedBy = ref("");
 const undoRequestedSeat = ref(-1);
+const undoRemainingMs = ref(0);
 let clockBase = null;
 let clockBaseAt = 0;
 let undoTimer = null;
@@ -240,6 +246,14 @@ function applySnapshot(snapshot) {
     moveCount.value = 0;
     undoRequestedBy.value = "";
     undoRequestedSeat.value = -1;
+    undoRemainingMs.value = 0;
+    result.value = null;
+    winLine.value = [];
+    lastMove.value = null;
+    clock.value = null;
+    clockBase = null;
+    cells.value = [];
+    aiSeat.value = -1;
     return;
   }
   if (Array.isArray(snapshot.members)) members.value = snapshot.members;
@@ -266,9 +280,26 @@ function applySnapshot(snapshot) {
     undoRequestedSeat.value = Number.isFinite(Number(snapshot.undoRequestedSeat))
       ? Number(snapshot.undoRequestedSeat)
       : -1;
+    undoRemainingMs.value = Number.isFinite(Number(snapshot.undoRemainingMs))
+      ? Math.max(0, Number(snapshot.undoRemainingMs))
+      : snapshot.undoRequestedBy
+        ? 20000
+        : 0;
     inCheck.value = snapshot.inCheck === true;
     checkFocus.value = snapshot.checkFocus ?? null;
-    result.value = snapshot.result ?? null;
+    const nextResult = snapshot.result ?? null;
+    // Room snapshots are rebuilt on every push. Keep the same reactive value when the
+    // result itself is unchanged, otherwise closing the result card is undone by the next
+    // clock/member push and the card pops back up.
+    if (
+      !result.value ||
+      !nextResult ||
+      result.value.finished !== nextResult.finished ||
+      result.value.outcome !== nextResult.outcome ||
+      result.value.reason !== nextResult.reason
+    ) {
+      result.value = nextResult;
+    }
     winLine.value = snapshot.winLine ?? [];
   }
   paint();
@@ -289,7 +320,8 @@ function paint() {
     checkFocus: checkFocus.value,
     result: result.value,
     winLine: winLine.value,
-    lowMotion: lowMotion.value,
+    lowMotion: reducedMotion.value,
+    effectsOff: effectsLevel.value === "off",
   });
 }
 
@@ -328,6 +360,16 @@ function describeError(raw) {
     ["only the opponent can answer an undo request", "只有对手可以处理这次悔棋请求"],
     ["not hosting a room", "当前没有房间，请先开桌"],
     ["already hosting or joined a room", "你已经在一个房间里了"],
+    ["you are already in a room", "你已经在一个房间里了"],
+    ["join a room first", "请先加入房间"],
+    ["leave the current room before creating another", "请先离开当前房间再创建新房间"],
+    ["room no longer exists", "房间已关闭或不存在"],
+    ["server room capacity reached", "服务器房间已满，请稍后再试"],
+    ["only the room creator can start the match", "只有房主可以开始对局"],
+    ["only the room creator can rematch", "只有房主可以再来一局"],
+    ["session was replaced by a newer connection", "连接已更新，正在恢复"],
+    ["session is not connected", "连接已失效，正在恢复"],
+    ["poll session does not exist", "连接已失效，正在恢复"],
     ["wrong room password", "房间密码不正确"],
     [
       "a valid host key is required",
@@ -389,27 +431,76 @@ async function call(method, params = {}) {
 
 async function createRoom() {
   const roomName = `${nickname.value || "棋友"}的${game.value === "xiangqi" ? "象棋室" : "五子棋室"}`;
-  if (passwordEnabled.value && !inputPassword.value.trim()) {
+  const roomPassword = String(inputPassword.value || "").trim();
+  if (passwordEnabled.value && !roomPassword) {
     error.value = "请输入房间密码，或切换为公开房间";
     return;
   }
   await call("room.create", {
     name: roomName,
     game: game.value,
-    password: passwordEnabled.value ? inputPassword.value : "",
+    password: passwordEnabled.value ? roomPassword : "",
     minutes: Number(inputMinutes.value) || 0,
     moveSeconds: Number(inputMoveSeconds.value) || 0,
     seat: Number(inputSeat.value),
   });
 }
 
-async function joinRoom(room, joinRole = "player") {
-  await call("room.join", {
-    roomId: room.roomId,
-    role: joinRole,
-    password: joinPassword.value,
-  });
+function requestJoin(room, joinRole = "player") {
+  if (!room || joinSubmitting.value) return;
+  if (!room.locked) {
+    void performJoin(room, joinRole, "");
+    return;
+  }
+  joinPrompt.value = { room, role: joinRole };
   joinPassword.value = "";
+  joinPasswordError.value = "";
+  void nextTick(() => joinPasswordInput.value?.focus());
+}
+
+async function performJoin(room, joinRole, password) {
+  joinSubmitting.value = true;
+  joinPasswordError.value = "";
+  error.value = "";
+  try {
+    const reply = await bridge.invoke("room.join", {
+      roomId: room.roomId,
+      role: joinRole,
+      password: String(password || "").trim(),
+    });
+    if (reply && typeof reply === "object") applySnapshot(reply);
+    joinSubmitting.value = false;
+    closeJoinPrompt();
+    return true;
+  } catch (joinError) {
+    joinSubmitting.value = false;
+    const message = describeError(joinError?.message || joinError);
+    if (joinPrompt.value) {
+      joinPasswordError.value = message;
+    } else {
+      error.value = message;
+    }
+    return false;
+  }
+}
+
+async function submitJoinPassword() {
+  const prompt = joinPrompt.value;
+  if (!prompt || joinSubmitting.value) return;
+  const password = String(joinPassword.value || "").trim();
+  if (!password) {
+    joinPasswordError.value = "请输入房间密码";
+    joinPasswordInput.value?.focus();
+    return;
+  }
+  await performJoin(prompt.room, prompt.role, password);
+}
+
+function closeJoinPrompt() {
+  if (joinSubmitting.value) return;
+  joinPrompt.value = null;
+  joinPassword.value = "";
+  joinPasswordError.value = "";
 }
 
 async function scan() {
@@ -528,11 +619,7 @@ async function toggleLowMotion() {
 }
 
 function updateEffectsLevel() {
-  if (effectsLevel.value === "off") {
-    lowMotion.value = true;
-  } else if (effectsLevel.value === "reduced") {
-    lowMotion.value = true;
-  }
+  if (effectsLevel.value === "off") scene?.clearEffects();
   persistSettings();
   paint();
 }
@@ -589,6 +676,21 @@ function outcomeText(outcome) {
   return "对局结束";
 }
 
+function resultReasonLabel(reason) {
+  const labels = {
+    "five in a row": "五子连珠",
+    checkmate: "将死",
+    stalemate: "困毙",
+    resign: "认输",
+    timeout: "超时",
+    forfeit: "掉线判负",
+    "sixty-move rule": "六十回合无吃子",
+    repetition: "三次重复局面",
+    "board full": "棋盘已满",
+  };
+  return labels[reason] || reason || "对局结束";
+}
+
 // ── MVP panel ───────────────────────────────────────────────────────────────────────
 // The win screen is theatre on purpose: a bare "先手胜" says who won but not that anything
 // happened. Titles key off the engine's own reason string, so the wording can never drift
@@ -639,7 +741,7 @@ const mvp = computed(() => {
   return {
     name: draw ? "两位棋手" : seatLabel(winnerSeat),
     title,
-    reason: res.reason || "",
+    reason: resultReasonLabel(res.reason),
     draw,
     stats,
   };
@@ -656,7 +758,7 @@ watch(result, (next) => {
     mvpTimer = setTimeout(() => {
       mvpReady.value = true;
       mvpTimer = null;
-    }, lowMotion.value ? 1000 : 2300);
+    }, effectsLevel.value === "off" ? 300 : reducedMotion.value ? 1000 : 2300);
   }
 });
 
@@ -665,7 +767,12 @@ function dismissMvp() {
 }
 
 function closeResultOnEscape(event) {
-  if (event.key === "Escape" && mvp.value) dismissMvp();
+  if (event.key !== "Escape") return;
+  if (joinPrompt.value) {
+    closeJoinPrompt();
+    return;
+  }
+  if (mvp.value) dismissMvp();
 }
 
 // Fixed pseudo-random placement: the ribbons must not jump around when the panel re-renders.
@@ -878,7 +985,7 @@ watch(mySeat, (seat) => {
   scene?.setFlipped(shouldFlipBoard(game.value, seat));
 });
 
-watch([undoRequestedBy, moveCount, phase], ([nextBy, nextMoves, nextPhase], [previousBy, previousMoves]) => {
+watch([undoRequestedBy, moveCount, phase, undoRemainingMs], ([nextBy, nextMoves, nextPhase], [previousBy, previousMoves]) => {
   clearTimeout(undoTimer);
   undoTimer = null;
 
@@ -887,7 +994,8 @@ watch([undoRequestedBy, moveCount, phase], ([nextBy, nextMoves, nextPhase], [pre
       undoTimer = setTimeout(() => {
         undoTimer = null;
         void declineUndo(true);
-      }, 20000);
+        // The server expires the request first. This fallback only covers a missed push.
+      }, Math.max(250, undoRemainingMs.value + 1000));
     }
     return;
   }
@@ -1052,11 +1160,6 @@ watch(seats, (next, previous) => {
 
         <main class="lobby-main">
         <section v-show="lobbyTab === 'rooms'" class="lobby-view">
-          <label v-if="visibleLobbyRooms.some((room) => room.locked)" class="lobby-password">
-            <span>房间密码</span>
-            <input v-model="joinPassword" type="password" placeholder="输入密码后加入" />
-          </label>
-
           <div v-if="visibleLobbyRooms.length" class="lobby-room-grid">
             <article
               v-for="roomItem in visibleLobbyRooms"
@@ -1103,7 +1206,7 @@ watch(seats, (next, previous) => {
                 <button
                   class="primary"
                   :disabled="roomItem.players >= roomItem.capacity || roomItem.phase === 'finished'"
-                  @click="joinRoom(roomItem, 'player')"
+                  @click="requestJoin(roomItem, 'player')"
                 >
                   {{ roomItem.phase === "finished" ? "已结束" : roomItem.players >= roomItem.capacity ? "满桌" : "加入" }}
                 </button>
@@ -1111,7 +1214,7 @@ watch(seats, (next, previous) => {
                   v-if="roomItem.phase === 'playing'"
                   class="ghost"
                   :disabled="roomItem.spectators >= roomItem.spectatorCap"
-                  @click="joinRoom(roomItem, 'spectator')"
+                  @click="requestJoin(roomItem, 'spectator')"
                 >
                   观战
                 </button>
@@ -1438,19 +1541,19 @@ watch(seats, (next, previous) => {
       <!-- MVP 面板显示时让出横幅，关掉面板后横幅接回，免得同一句话出现两遍。 -->
       <div v-if="result && result.finished && !mvp" class="result-banner">
         <strong>{{ outcomeText(result.outcome) }}</strong>
-        <span>{{ result.reason }}</span>
+        <span>{{ resultReasonLabel(result.reason) }}</span>
       </div>
 
       <!-- 结算整活。低动效模式只留淡入：不撒彩带、不旋转，符合本项目的降级约定。
            等棋盘的连线、印章演完后，居中的结算卡再出现。 -->
-      <div v-if="mvp && !lowMotion" class="mvp-confetti" aria-hidden="true">
+      <div v-if="mvp && !reducedMotion" class="mvp-confetti" aria-hidden="true">
         <i v-for="n in 26" :key="n" :style="confettiStyle(n)"></i>
       </div>
 
       <div
         v-if="mvp"
         class="mvp"
-        :class="{ calm: lowMotion, draw: mvp.draw }"
+        :class="{ calm: reducedMotion, draw: mvp.draw }"
         role="dialog"
         aria-modal="true"
         aria-labelledby="mvp-title"
@@ -1483,6 +1586,59 @@ watch(seats, (next, previous) => {
 
       </div>
     </main>
+
+    <Transition name="join-prompt">
+      <div
+        v-if="joinPrompt"
+        class="join-prompt"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="join-prompt-title"
+        @click.self="closeJoinPrompt"
+      >
+        <form class="join-prompt-card" @submit.prevent="submitJoinPassword">
+          <button
+            class="join-prompt-close"
+            type="button"
+            aria-label="关闭密码输入"
+            :disabled="joinSubmitting"
+            @click="closeJoinPrompt"
+          >×</button>
+          <span class="join-prompt-kicker">私房验证</span>
+          <h2 id="join-prompt-title">{{ joinPrompt.room.name }}</h2>
+          <p>
+            输入房主设置的密码后{{ joinPrompt.role === "spectator" ? "观战" : "加入" }}。
+          </p>
+          <label class="join-prompt-field">
+            <span>房间密码</span>
+            <input
+              ref="joinPasswordInput"
+              v-model="joinPassword"
+              type="password"
+              name="room-join-password"
+              autocomplete="new-password"
+              autocapitalize="off"
+              spellcheck="false"
+              placeholder="请输入密码"
+              :aria-invalid="Boolean(joinPasswordError)"
+              :aria-describedby="joinPasswordError ? 'join-prompt-error' : undefined"
+              :disabled="joinSubmitting"
+            />
+          </label>
+          <p v-if="joinPasswordError" id="join-prompt-error" class="join-prompt-error" role="alert">
+            {{ joinPasswordError }}
+          </p>
+          <div class="join-prompt-actions">
+            <button type="button" class="ghost" :disabled="joinSubmitting" @click="closeJoinPrompt">
+              取消
+            </button>
+            <button type="submit" class="primary" :disabled="joinSubmitting">
+              {{ joinSubmitting ? "正在进入…" : joinPrompt.role === "spectator" ? "进入观战" : "加入房间" }}
+            </button>
+          </div>
+        </form>
+      </div>
+    </Transition>
 
     <Transition name="floating-message">
       <div
@@ -1968,6 +2124,142 @@ watch(seats, (next, previous) => {
 
 .lobby-password span { font-size: 12px; color: var(--soft-text); }
 .lobby-password input { flex: 1; }
+
+.join-prompt {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(28, 26, 23, 0.46);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+}
+
+.join-prompt-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: min(420px, 100%);
+  padding: 28px;
+  color: var(--ink);
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.62), transparent 48%),
+    var(--paper-warm);
+  border: 1px solid rgba(91, 70, 44, 0.28);
+  border-radius: 4px 18px 4px 18px;
+  box-shadow: 8px 8px 0 rgba(28, 26, 23, 0.12), var(--shadow-3);
+}
+
+.join-prompt-card::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 5px;
+  background: linear-gradient(180deg, var(--red), var(--red-deep));
+}
+
+.join-prompt-close {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  width: 32px;
+  height: 32px;
+  min-width: 32px;
+  padding: 0;
+  color: var(--soft-text);
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  font-size: 22px;
+  line-height: 1;
+}
+
+.join-prompt-kicker {
+  color: var(--red-deep);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+}
+
+.join-prompt-card h2 {
+  margin: 8px 34px 6px 0;
+  font-family: var(--font-display);
+  font-size: 24px;
+  letter-spacing: 0.04em;
+}
+
+.join-prompt-card > p {
+  margin: 0 0 20px;
+  color: var(--soft-text);
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.join-prompt-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.join-prompt-field span {
+  color: var(--muted-text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.join-prompt-field input {
+  width: 100%;
+  height: 44px;
+  padding: 0 14px;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-btn);
+  box-shadow: var(--shadow-1);
+  font: inherit;
+}
+
+.join-prompt-field input:focus-visible {
+  outline: 3px solid rgba(212, 162, 74, 0.36);
+  outline-offset: 1px;
+  border-color: var(--wood);
+}
+
+.join-prompt-card > .join-prompt-error {
+  margin: 9px 0 0;
+  color: var(--red-deep);
+  font-size: 12px;
+}
+
+.join-prompt-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 22px;
+}
+
+.join-prompt-enter-active,
+.join-prompt-leave-active {
+  transition: opacity var(--dur-base) var(--ease-standard);
+}
+
+.join-prompt-enter-active .join-prompt-card,
+.join-prompt-leave-active .join-prompt-card {
+  transition: transform var(--dur-base) var(--ease-spring), opacity var(--dur-base) var(--ease-standard);
+}
+
+.join-prompt-enter-from,
+.join-prompt-leave-to {
+  opacity: 0;
+}
+
+.join-prompt-enter-from .join-prompt-card,
+.join-prompt-leave-to .join-prompt-card {
+  opacity: 0;
+  transform: translateY(12px) scale(0.97);
+}
 
 .notice {
   margin: 0;

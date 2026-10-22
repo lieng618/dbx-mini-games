@@ -49,6 +49,7 @@ func NewServer(hub *Hub, logger *slog.Logger, uiDirectory string) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	hub.startClockLoop()
 	server := &Server{hub: hub, logger: logger, poll: newPollManager(hub)}
 
 	mux := http.NewServeMux()
@@ -122,12 +123,12 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			// rather than slowing the room broadcast down.
 		}
 	}
-	clientID, nickname := s.hub.AddClient(
+	clientID, nickname, connectionToken := s.hub.AddClientSession(
 		r.URL.Query().Get("clientId"),
 		r.URL.Query().Get("nickname"),
 		send,
 	)
-	defer s.hub.RemoveClient(clientID)
+	defer s.hub.RemoveClientSession(clientID, connectionToken)
 	defer conn.Close()
 
 	writerDone := make(chan struct{})
@@ -191,7 +192,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			request.Params = map[string]any{}
 		}
 
-		result, callErr := s.hub.Call(clientID, request.Method, request.Params)
+		result, callErr := s.hub.CallSession(clientID, connectionToken, request.Method, request.Params)
 		if callErr != nil {
 			s.writeError(outgoing, request.ID, -32000, callErr.Error())
 			continue

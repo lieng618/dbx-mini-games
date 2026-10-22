@@ -1,6 +1,9 @@
 package cloud
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestCloudRoomJoinSpectateAndStart(t *testing.T) {
 	hub := NewHub()
@@ -57,6 +60,90 @@ func TestCloudRoomJoinSpectateAndStart(t *testing.T) {
 	}
 }
 
+func TestLockedRoomSpectatingRequiresTheRoomPassword(t *testing.T) {
+	hub := NewHub()
+	ownerID, _ := hub.AddClient("locked-owner", "房主", func(string, any) {})
+	guestID, _ := hub.AddClient("locked-guest", "棋手", func(string, any) {})
+	watcherID, _ := hub.AddClient("locked-watcher", "观战者", func(string, any) {})
+
+	created, err := hub.Call(ownerID, "room.create", map[string]any{
+		"name":     "密码房",
+		"game":     "gomoku",
+		"password": "s3cret",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roomID := created.(map[string]any)["roomId"].(string)
+	if _, err := hub.Call(guestID, "room.join", map[string]any{
+		"roomId":   roomID,
+		"role":     "player",
+		"password": "s3cret",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hub.Call(ownerID, "room.start", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := hub.Call(watcherID, "room.join", map[string]any{
+		"roomId":   roomID,
+		"role":     "spectator",
+		"password": "wrong",
+	}); err == nil {
+		t.Fatal("spectator joined a locked room with the wrong password")
+	}
+
+	watched, err := hub.Call(watcherID, "room.join", map[string]any{
+		"roomId":   roomID,
+		"role":     "spectator",
+		"password": "s3cret",
+	})
+	if err != nil {
+		t.Fatalf("spectator could not join with the correct password: %v", err)
+	}
+	if seat := watched.(map[string]any)["selfSeat"]; seat != -1 {
+		t.Fatalf("spectator seat = %v, want -1", seat)
+	}
+}
+
+func TestCloudClockTimeoutEndsTheMatch(t *testing.T) {
+	hub := NewHub()
+	ownerID, _ := hub.AddClient("timeout-owner", "先手", func(string, any) {})
+	guestID, _ := hub.AddClient("timeout-guest", "后手", func(string, any) {})
+
+	created, err := hub.Call(ownerID, "room.create", map[string]any{
+		"name":    "限时房",
+		"game":    "gomoku",
+		"minutes": float64(1),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roomID := created.(map[string]any)["roomId"].(string)
+	if _, err := hub.Call(guestID, "room.join", map[string]any{"roomId": roomID}); err != nil {
+		t.Fatal(err)
+	}
+	startedAt := time.Now()
+	if _, err := hub.Call(ownerID, "room.start", nil); err != nil {
+		t.Fatal(err)
+	}
+	hub.expireClocks(startedAt.Add(61 * time.Second))
+
+	view, err := hub.Call(guestID, "room.snapshot", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := view.(map[string]any)
+	if snapshot["phase"] != "finished" {
+		t.Fatalf("phase = %v, want finished", snapshot["phase"])
+	}
+	result, ok := snapshot["result"].(map[string]any)
+	if !ok || result["reason"] != "timeout" || result["outcome"] != 2 {
+		t.Fatalf("unexpected timeout result: %#v", snapshot["result"])
+	}
+}
+
 func TestCloudUndoRequestIsVisibleAndConsentRewinds(t *testing.T) {
 	hub := NewHub()
 	ownerID, _ := hub.AddClient("undo-owner", "先手", func(string, any) {})
@@ -110,6 +197,51 @@ func TestCloudUndoRequestIsVisibleAndConsentRewinds(t *testing.T) {
 	}
 	if paused := rewound["clock"].(map[string]any)["paused"]; paused != false {
 		t.Fatal("consented undo did not resume the clock")
+	}
+}
+
+func TestCloudUndoRequestExpiresOnTheServer(t *testing.T) {
+	hub := NewHub()
+	ownerID, _ := hub.AddClient("undo-expiry-owner", "先手", func(string, any) {})
+	guestID, _ := hub.AddClient("undo-expiry-guest", "后手", func(string, any) {})
+	created, err := hub.Call(ownerID, "room.create", map[string]any{
+		"name": "悔棋超时房",
+		"game": "gomoku",
+		"seat": float64(0),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roomID := created.(map[string]any)["roomId"].(string)
+	if _, err := hub.Call(guestID, "room.join", map[string]any{"roomId": roomID}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hub.Call(ownerID, "room.start", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hub.Call(ownerID, "game.move", map[string]any{"to": float64(0)}); err != nil {
+		t.Fatal(err)
+	}
+	requested, err := hub.Call(ownerID, "game.undo.request", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if remaining := requested.(map[string]any)["undoRemainingMs"]; remaining == nil {
+		t.Fatal("undo snapshot did not expose its server deadline")
+	}
+
+	hub.expireClocks(time.Now().Add(undoDecisionTimeout + time.Second))
+	view, err := hub.Call(guestID, "room.snapshot", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := view.(map[string]any)
+	if snapshot["undoRequestedBy"] != nil {
+		t.Fatalf("expired undo request is still visible: %#v", snapshot)
+	}
+	clock := snapshot["clock"].(map[string]any)
+	if clock["paused"] != false || clock["running"] == -1 {
+		t.Fatalf("clock did not resume after undo expired: %#v", clock)
 	}
 }
 
@@ -268,6 +400,31 @@ func TestReconnectKeepsSeatDuringGraceWindow(t *testing.T) {
 	}
 }
 
+func TestOldConnectionCleanupCannotDisconnectReplacementSession(t *testing.T) {
+	hub := NewHub()
+	clientID, _, oldToken := hub.AddClientSession("stale-reconnect", "重连者", func(string, any) {})
+	clientID, _, newToken := hub.AddClientSession(clientID, "重连者", func(string, any) {})
+
+	if _, err := hub.CallSession(clientID, oldToken, "profile.get", nil); err == nil {
+		t.Fatal("a replaced connection could still submit requests")
+	}
+	if _, err := hub.CallSession(clientID, newToken, "profile.get", nil); err != nil {
+		t.Fatalf("the current connection was rejected: %v", err)
+	}
+
+	hub.RemoveClientSession(clientID, oldToken)
+	hub.expireClientSession(clientID, oldToken)
+	if _, err := hub.Call(clientID, "profile.get", nil); err != nil {
+		t.Fatalf("stale cleanup removed the replacement session: %v", err)
+	}
+
+	hub.RemoveClientSession(clientID, newToken)
+	hub.expireClientSession(clientID, newToken)
+	if _, err := hub.Call(clientID, "profile.get", nil); err == nil {
+		t.Fatal("removing the current connection did not expire its session")
+	}
+}
+
 func TestOpponentLeavingEndsMatchWithVisibleResult(t *testing.T) {
 	hub := NewHub()
 	ownerID, _ := hub.AddClient("leave-owner-1", "留下的人", func(string, any) {})
@@ -308,5 +465,11 @@ func TestOpponentLeavingEndsMatchWithVisibleResult(t *testing.T) {
 	}
 	if result["reason"] != "forfeit" || result["outcome"] != 1 {
 		t.Fatalf("unexpected result: %#v", result)
+	}
+	if snapshot["roomFinishedAt"] == int64(0) {
+		t.Fatal("forfeit did not record the match end time")
+	}
+	if running := snapshot["clock"].(map[string]any)["running"]; running != -1 {
+		t.Fatalf("forfeit clock running = %v, want -1", running)
 	}
 }

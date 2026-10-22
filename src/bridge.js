@@ -64,6 +64,7 @@ class CloudBridge {
     this.requestSeq = 0;
     this.retryTimer = null;
     this.retryDelay = 500;
+    this.recoveryPromise = null;
     this.manualClose = false;
     const developmentParams = new URLSearchParams(window.location.search);
     const requestedClientId = developmentParams.get("clientId");
@@ -123,6 +124,7 @@ class CloudBridge {
     const socket = new WebSocket(url);
     this.socket = socket;
     socket.addEventListener("open", () => {
+      if (this.socket !== socket) return;
       this.retryDelay = 500;
       this.connected = true;
       this.resolveReady?.();
@@ -130,9 +132,14 @@ class CloudBridge {
       this.rejectReady = null;
       this.emitConnection({ connected: true, serverUrl: this.serverUrl });
     });
-    socket.addEventListener("message", (event) => this.handleMessage(event.data));
+    socket.addEventListener("message", (event) => {
+      if (this.socket === socket) this.handleMessage(event.data);
+    });
     socket.addEventListener("close", () => {
-      if (this.socket === socket) this.socket = null;
+      // A replacement socket can already be connected when an old socket finishes closing.
+      // Its late close event must not mark the new connection offline.
+      if (this.socket !== socket) return;
+      this.socket = null;
       this.connected = false;
       if (!this.resolveReady) this.readyPromise = null;
       const error = new Error("云端连接已断开");
@@ -155,12 +162,12 @@ class CloudBridge {
     this.pollController = controller;
     const base = apiBase(this.serverUrl);
     try {
-      const response = await fetch(new URL("connect", base), {
+      const response = await fetchWithTimeout(new URL("connect", base), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ clientId: this.clientId, nickname: this.nickname }),
         signal: controller.signal,
-      });
+      }, REQUEST_TIMEOUT_MS);
       const session = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(session.error || "无法建立云端会话");
       if (controller.signal.aborted || this.pollController !== controller) return;
@@ -255,9 +262,19 @@ class CloudBridge {
 
   async invoke(method, params = {}) {
     await this.ready();
+    try {
+      return await this.invokeOnce(method, params);
+    } catch (error) {
+      if (this.manualClose || !isSessionExpiredError(error)) throw error;
+      await this.recoverSession();
+      return this.invokeOnce(method, params);
+    }
+  }
+
+  async invokeOnce(method, params = {}) {
     if (this.usePolling) {
       const base = apiBase(this.serverUrl);
-      const response = await fetch(new URL("request", base), {
+      const response = await fetchWithTimeout(new URL("request", base), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -265,7 +282,7 @@ class CloudBridge {
           method,
           params: params || {},
         }),
-      });
+      }, REQUEST_TIMEOUT_MS);
       const payload = await response.json().catch(() => ({}));
       if (!response.ok || payload.error) {
         throw new Error(payload.error || "云端请求失败");
@@ -293,6 +310,34 @@ class CloudBridge {
     });
   }
 
+  async recoverSession() {
+    if (this.recoveryPromise) return this.recoveryPromise;
+    this.recoveryPromise = (async () => {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = null;
+      if (this.usePolling) {
+        const controller = this.pollController;
+        this.pollController = null;
+        controller?.abort();
+      } else {
+        const socket = this.socket;
+        this.socket = null;
+        socket?.close();
+      }
+      this.connected = false;
+      this.readyPromise = null;
+      this.resolveReady = null;
+      this.rejectReady = null;
+      this.retryDelay = 500;
+      this.emitConnection({ connected: false, serverUrl: this.serverUrl });
+      this.connect();
+      await this.ready();
+    })().finally(() => {
+      this.recoveryPromise = null;
+    });
+    return this.recoveryPromise;
+  }
+
   close() {
     this.manualClose = true;
     clearTimeout(this.retryTimer);
@@ -303,9 +348,40 @@ class CloudBridge {
   }
 }
 
+function isSessionExpiredError(error) {
+  const message = String(error?.message || error || "");
+  return (
+    message.includes("session is not connected") ||
+    message.includes("session was replaced by a newer connection") ||
+    message.includes("poll session does not exist")
+  );
+}
+
+async function fetchWithTimeout(url, options, timeoutMs) {
+  const controller = new AbortController();
+  const externalSignal = options?.signal;
+  const abortFromExternal = () => controller.abort();
+  if (externalSignal) {
+    if (externalSignal.aborted) controller.abort();
+    else externalSignal.addEventListener("abort", abortFromExternal, { once: true });
+  }
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (error) {
+    if (controller.signal.aborted && !externalSignal?.aborted) {
+      throw new Error("云端请求超时，请检查网络后重试");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    externalSignal?.removeEventListener("abort", abortFromExternal);
+  }
+}
+
 function apiBase(serverUrl) {
   const url = new URL(serverUrl);
-  url.protocol = "https:";
+  url.protocol = url.protocol === "wss:" || url.protocol === "https:" ? "https:" : "http:";
   url.pathname = "/api/";
   url.search = "";
   url.hash = "";

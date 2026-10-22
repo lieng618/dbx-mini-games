@@ -15,38 +15,42 @@ import (
 )
 
 const (
-	defaultBudget  = 10 * time.Minute
-	maxBudget      = 180 * time.Minute
-	maxMoveTime    = 10 * time.Minute
-	maxNameRunes   = 32
-	maxRooms       = 250
-	lobbyEventName = "lobby.updated"
-	roomEventName  = "room.state"
+	defaultBudget       = 10 * time.Minute
+	maxBudget           = 180 * time.Minute
+	maxMoveTime         = 10 * time.Minute
+	undoDecisionTimeout = 20 * time.Second
+	maxNameRunes        = 32
+	maxRooms            = 250
+	lobbyEventName      = "lobby.updated"
+	roomEventName       = "room.state"
 )
 
 type clientState struct {
-	id       string
-	nickname string
-	lobby    bool
-	roomID   string
-	send     func(method string, params any)
-	timer    *time.Timer
+	id              string
+	nickname        string
+	lobby           bool
+	roomID          string
+	send            func(method string, params any)
+	timer           *time.Timer
+	connectionToken string
 }
 
 type cloudRoom struct {
-	room      *room.Room
-	ownerID   string
-	createdAt time.Time
-	startedAt time.Time
-	finished  time.Time
-	clock     *matchClock
+	room         *room.Room
+	ownerID      string
+	createdAt    time.Time
+	startedAt    time.Time
+	finished     time.Time
+	undoDeadline time.Time
+	clock        *matchClock
 }
 
 // Hub is the in-memory public lobby. No user, room, or match data is persisted.
 type Hub struct {
-	mu      sync.Mutex
-	clients map[string]*clientState
-	rooms   map[string]*cloudRoom
+	mu        sync.Mutex
+	clients   map[string]*clientState
+	rooms     map[string]*cloudRoom
+	clockOnce sync.Once
 }
 
 func NewHub() *Hub {
@@ -58,6 +62,13 @@ func NewHub() *Hub {
 
 // AddClient registers one live WebSocket session and returns its ephemeral identity.
 func (h *Hub) AddClient(requestedID, nickname string, send func(string, any)) (string, string) {
+	id, resolvedNickname, _ := h.AddClientSession(requestedID, nickname, send)
+	return id, resolvedNickname
+}
+
+// AddClientSession also returns a connection generation. A late cleanup from an older
+// socket or poll request must not detach the replacement session that reused the same id.
+func (h *Hub) AddClientSession(requestedID, nickname string, send func(string, any)) (string, string, string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -69,6 +80,7 @@ func (h *Hub) AddClient(requestedID, nickname string, send func(string, any)) (s
 	if nickname == "" {
 		nickname = "棋友-" + id[:4]
 	}
+	connectionToken := randomID()
 	if existing := h.clients[id]; existing != nil {
 		if existing.timer != nil {
 			existing.timer.Stop()
@@ -76,28 +88,39 @@ func (h *Hub) AddClient(requestedID, nickname string, send func(string, any)) (s
 		}
 		existing.send = send
 		existing.nickname = nickname
+		existing.connectionToken = connectionToken
 		if record := h.rooms[existing.roomID]; record != nil {
 			record.room.SetConnected(id, true)
 			h.notifyRoomLocked(record)
 		}
-		return id, nickname
+		return id, nickname, connectionToken
 	}
 	h.clients[id] = &clientState{
-		id:       id,
-		nickname: nickname,
-		lobby:    true,
-		send:     send,
+		id:              id,
+		nickname:        nickname,
+		lobby:           true,
+		send:            send,
+		connectionToken: connectionToken,
 	}
-	return id, nickname
+	return id, nickname, connectionToken
 }
 
 // RemoveClient keeps the seat for a short reconnect window. The public network is less
 // stable than a LAN socket, so a brief drop should not forfeit a live game immediately.
 func (h *Hub) RemoveClient(clientID string) {
+	h.RemoveClientSession(clientID, "")
+}
+
+// RemoveClientSession only detaches the connection generation that stopped. A reconnect
+// can legitimately replace it while an old socket is still unwinding.
+func (h *Hub) RemoveClientSession(clientID, connectionToken string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	client := h.clients[clientID]
 	if client == nil || client.timer != nil {
+		return
+	}
+	if connectionToken != "" && client.connectionToken != connectionToken {
 		return
 	}
 	client.send = nil
@@ -107,15 +130,22 @@ func (h *Hub) RemoveClient(clientID string) {
 	}
 	h.notifyLobbyLocked()
 	client.timer = time.AfterFunc(25*time.Second, func() {
-		h.expireClient(clientID)
+		h.expireClientSession(clientID, connectionToken)
 	})
 }
 
 func (h *Hub) expireClient(clientID string) {
+	h.expireClientSession(clientID, "")
+}
+
+func (h *Hub) expireClientSession(clientID, connectionToken string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	client := h.clients[clientID]
 	if client == nil || client.send != nil {
+		return
+	}
+	if connectionToken != "" && client.connectionToken != connectionToken {
 		return
 	}
 	h.leaveRoomLocked(client)
@@ -124,12 +154,22 @@ func (h *Hub) expireClient(clientID string) {
 }
 
 func (h *Hub) Call(clientID, method string, params map[string]any) (any, error) {
+	return h.CallSession(clientID, "", method, params)
+}
+
+// CallSession accepts a request only from the current connection generation. Replacing
+// an old socket or poll session must also revoke its authority to act for the seat.
+func (h *Hub) CallSession(clientID, connectionToken, method string, params map[string]any) (any, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.expireClocksLocked(time.Now())
 
 	client := h.clients[clientID]
 	if client == nil {
 		return nil, errors.New("session is not connected")
+	}
+	if connectionToken != "" && client.connectionToken != connectionToken {
+		return nil, errors.New("session was replaced by a newer connection")
 	}
 
 	switch method {
@@ -177,6 +217,76 @@ func (h *Hub) Call(clientID, method string, params map[string]any) (any, error) 
 		return h.legalLocked(client, params)
 	default:
 		return nil, fmt.Errorf("unknown method %q", method)
+	}
+}
+
+// startClockLoop makes room clocks authoritative even when nobody sends another request.
+// A turn that runs out of time must end the match without waiting for a move attempt.
+func (h *Hub) startClockLoop() {
+	h.clockOnce.Do(func() {
+		go func() {
+			ticker := time.NewTicker(500 * time.Millisecond)
+			defer ticker.Stop()
+			for now := range ticker.C {
+				h.expireClocks(now)
+			}
+		}()
+	})
+}
+
+func (h *Hub) expireClocks(now time.Time) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.expireClocksLocked(now)
+}
+
+func (h *Hub) expireClocksLocked(now time.Time) {
+	var undoExpired []*cloudRoom
+	var clockExpired []*cloudRoom
+	for _, record := range h.rooms {
+		if !record.undoDeadline.IsZero() && !now.Before(record.undoDeadline) {
+			proposer, _ := record.room.UndoRequest()
+			if proposer != "" {
+				for _, member := range record.room.Members() {
+					if member.IsSeated() && member.ID != proposer {
+						if err := record.room.DeclineUndo(member.ID); err == nil {
+							record.undoDeadline = time.Time{}
+							record.clock.resume(now, record.room.TurnSeat(), false)
+							undoExpired = append(undoExpired, record)
+						}
+						break
+					}
+				}
+			} else {
+				record.undoDeadline = time.Time{}
+			}
+		}
+		if record.room.Phase() != room.PhasePlaying {
+			continue
+		}
+		seat := record.clock.expiredSeat(now)
+		if seat < 0 {
+			continue
+		}
+		if err := record.room.Timeout(seat); err != nil {
+			continue
+		}
+		record.finished = now
+		record.clock.stop(now)
+		record.undoDeadline = time.Time{}
+		clockExpired = append(clockExpired, record)
+	}
+	if len(undoExpired) == 0 && len(clockExpired) == 0 {
+		return
+	}
+	for _, record := range undoExpired {
+		h.notifyRoomLocked(record)
+	}
+	for _, record := range clockExpired {
+		h.notifyRoomLocked(record)
+	}
+	if len(clockExpired) > 0 {
+		h.notifyLobbyLocked()
 	}
 }
 
@@ -299,7 +409,14 @@ func (h *Hub) leaveRoomLocked(client *clientState) {
 		client.lobby = true
 		return
 	}
+	wasPlaying := record.room.Phase() == room.PhasePlaying
 	_ = record.room.LeaveForCloud(client.id)
+	record.undoDeadline = time.Time{}
+	if wasPlaying && record.room.Phase() == room.PhaseFinished {
+		now := time.Now()
+		record.finished = now
+		record.clock.stop(now)
+	}
 	client.roomID = ""
 	client.lobby = true
 
@@ -366,6 +483,7 @@ func (h *Hub) actLocked(client *clientState, method string, params map[string]an
 		}
 		record.startedAt = now
 		record.finished = time.Time{}
+		record.undoDeadline = time.Time{}
 		record.clock.start(now)
 	case "room.seat":
 		seat := intParam(params, "seat", -1)
@@ -395,21 +513,25 @@ func (h *Hub) actLocked(client *clientState, method string, params map[string]an
 			return nil, err
 		}
 		record.clock.pause(now)
+		record.undoDeadline = now.Add(undoDecisionTimeout)
 	case "game.undo.consent":
 		if err := record.room.ConsentUndo(client.id); err != nil {
 			return nil, err
 		}
+		record.undoDeadline = time.Time{}
 		record.clock.resume(now, record.room.TurnSeat(), true)
 	case "game.undo.decline":
 		if err := record.room.DeclineUndo(client.id); err != nil {
 			return nil, err
 		}
+		record.undoDeadline = time.Time{}
 		record.clock.resume(now, record.room.TurnSeat(), false)
 	case "game.resign":
 		if err := record.room.Resign(client.id); err != nil {
 			return nil, err
 		}
 		record.finished = now
+		record.undoDeadline = time.Time{}
 		record.clock.stop(now)
 	case "game.rematch":
 		if client.id != record.ownerID {
@@ -420,6 +542,7 @@ func (h *Hub) actLocked(client *clientState, method string, params map[string]an
 		}
 		record.startedAt = time.Time{}
 		record.finished = time.Time{}
+		record.undoDeadline = time.Time{}
 	case "room.practice.start", "room.practice.end", "room.ai.start", "room.ai.move":
 		return nil, errors.New("practice tools are not available in cloud rooms")
 	default:
@@ -490,6 +613,13 @@ func (h *Hub) snapshotForMemberLocked(record *cloudRoom, clientID string, member
 		moveCount = len(rec.Moves)
 	}
 	view["moveCount"] = moveCount
+	if !record.undoDeadline.IsZero() {
+		remaining := record.undoDeadline.Sub(now).Milliseconds()
+		if remaining < 0 {
+			remaining = 0
+		}
+		view["undoRemainingMs"] = remaining
+	}
 	for key, value := range boardView(record.room) {
 		view[key] = value
 	}

@@ -18,10 +18,11 @@ const (
 )
 
 type pollSession struct {
-	id       string
-	nickname string
-	events   chan wireEvent
-	lastSeen time.Time
+	id              string
+	nickname        string
+	events          chan wireEvent
+	lastSeen        time.Time
+	connectionToken string
 }
 
 type pollManager struct {
@@ -44,7 +45,7 @@ func (m *pollManager) connect(requestedID, nickname string) (string, string) {
 		events:   make(chan wireEvent, pollEventBacklog),
 		lastSeen: time.Now(),
 	}
-	clientID, resolvedNickname := m.hub.AddClient(requestedID, nickname, func(method string, params any) {
+	clientID, resolvedNickname, connectionToken := m.hub.AddClientSession(requestedID, nickname, func(method string, params any) {
 		select {
 		case session.events <- wireEvent{Type: "event", Method: method, Params: params}:
 		default:
@@ -52,6 +53,7 @@ func (m *pollManager) connect(requestedID, nickname string) (string, string) {
 	})
 	session.id = clientID
 	session.nickname = resolvedNickname
+	session.connectionToken = connectionToken
 
 	m.mu.Lock()
 	m.sessions[clientID] = session
@@ -84,10 +86,11 @@ func (m *pollManager) session(clientID string) (*pollSession, error) {
 }
 
 func (m *pollManager) request(clientID, method string, params map[string]any) (any, error) {
-	if _, err := m.session(clientID); err != nil {
+	session, err := m.session(clientID)
+	if err != nil {
 		return nil, err
 	}
-	return m.hub.Call(clientID, method, params)
+	return m.hub.CallSession(clientID, session.connectionToken, method, params)
 }
 
 func (m *pollManager) wait(ctx context.Context, clientID string) ([]wireEvent, error) {
@@ -122,17 +125,17 @@ func (m *pollManager) cleanupLoop() {
 	defer ticker.Stop()
 	for range ticker.C {
 		now := time.Now()
-		var expired []string
+		var expired []*pollSession
 		m.mu.Lock()
 		for id, session := range m.sessions {
 			if now.Sub(session.lastSeen) > pollIdleTimeout {
-				expired = append(expired, id)
+				expired = append(expired, session)
 				delete(m.sessions, id)
 			}
 		}
 		m.mu.Unlock()
-		for _, id := range expired {
-			m.hub.RemoveClient(id)
+		for _, session := range expired {
+			m.hub.RemoveClientSession(session.id, session.connectionToken)
 		}
 	}
 }

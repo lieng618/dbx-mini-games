@@ -10,13 +10,13 @@ import "github.com/lieng618/dbx-mini-games/backend/internal/game"
 // Piece codes. Sign marks the owner: positive is red (seat one), negative is black
 // (seat two). Zero is an empty point.
 const (
-	King   int8 = 1
-	Advisor int8 = 2
+	King     int8 = 1
+	Advisor  int8 = 2
 	Elephant int8 = 3
-	Horse   int8 = 4
-	Rook    int8 = 5
-	Cannon  int8 = 6
-	Pawn    int8 = 7
+	Horse    int8 = 4
+	Rook     int8 = 5
+	Cannon   int8 = 6
+	Pawn     int8 = 7
 
 	Rows  = 10
 	Cols  = 9
@@ -56,12 +56,15 @@ func seatOf(code int8) game.Seat {
 
 // Engine is the authoritative xiangqi rule machine.
 type Engine struct {
-	board     [Cells]int8
-	turn      game.Seat
-	history   []game.Move
-	captured  []int8
-	result    game.Result
-	noCapture int
+	board    [Cells]int8
+	turn     game.Seat
+	history  []game.Move
+	captured []int8
+	// noCaptureBefore stores the exact counter value preceding each move so Undo can restore
+	// rule state, not just the board.
+	noCaptureBefore []int
+	result          game.Result
+	noCapture       int
 	// positions counts repeated board keys, used for the repetition guard.
 	positions map[string]int
 }
@@ -91,6 +94,7 @@ func (e *Engine) reset() {
 	}
 	e.history = nil
 	e.captured = nil
+	e.noCaptureBefore = nil
 	e.result = game.Result{}
 	e.noCapture = 0
 	e.positions = map[string]int{}
@@ -122,6 +126,8 @@ func (e *Engine) Clone() game.Engine {
 	copy(clone.history, e.history)
 	clone.captured = make([]int8, len(e.captured))
 	copy(clone.captured, e.captured)
+	clone.noCaptureBefore = make([]int, len(e.noCaptureBefore))
+	copy(clone.noCaptureBefore, e.noCaptureBefore)
 	clone.positions = make(map[string]int, len(e.positions))
 	for k, v := range e.positions {
 		clone.positions[k] = v
@@ -185,6 +191,7 @@ func (e *Engine) Apply(m game.Move) error {
 
 	e.history = append(e.history, m)
 	e.captured = append(e.captured, target)
+	e.noCaptureBefore = append(e.noCaptureBefore, e.noCapture)
 
 	if target != 0 {
 		e.noCapture = 0
@@ -207,16 +214,20 @@ func (e *Engine) Undo() bool {
 	code := e.board[last.To]
 	captured := e.captured[len(e.captured)-1]
 
-	delete(e.positions, e.key())
+	positionKey := e.key()
+	if e.positions[positionKey] <= 1 {
+		delete(e.positions, positionKey)
+	} else {
+		e.positions[positionKey]--
+	}
 	e.board[last.From] = code
 	e.board[last.To] = captured
 	e.history = e.history[:len(e.history)-1]
 	e.captured = e.captured[:len(e.captured)-1]
+	e.noCapture = e.noCaptureBefore[len(e.noCaptureBefore)-1]
+	e.noCaptureBefore = e.noCaptureBefore[:len(e.noCaptureBefore)-1]
 	e.turn = e.turn.Other()
 	e.result = game.Result{}
-	if len(e.history) == 0 {
-		e.noCapture = 0
-	}
 	return true
 }
 

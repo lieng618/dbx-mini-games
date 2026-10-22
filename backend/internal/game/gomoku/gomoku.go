@@ -8,13 +8,13 @@ import "github.com/lieng618/dbx-mini-games/backend/internal/game"
 
 // Side identifies a stone colour on the board.
 const (
-	Empty   int8 = 0
-	Black   int8 = 1
-	White   int8 = 2
-	Rows         = 15
-	Cols         = 15
-	Cells        = Rows * Cols
-	WinLength    = 5
+	Empty     int8 = 0
+	Black     int8 = 1
+	White     int8 = 2
+	Rows           = 15
+	Cols           = 15
+	Cells          = Rows * Cols
+	WinLength      = 5
 )
 
 // Engine is the authoritative gomoku rule machine.
@@ -118,8 +118,8 @@ func (e *Engine) LegalFrom(from int) []int {
 	return []int{from}
 }
 
-// WinLine satisfies game.WinLineReporter. It returns the exact five squares that ended
-// the match, so the seal and the line land on the stones the player actually made.
+// WinLine satisfies game.WinLineReporter. It returns five contiguous stones containing
+// the winning move, so the seal and the line land only on legal connected stones.
 func (e *Engine) WinLine() []int {
 	if !e.result.Finished || len(e.history) == 0 {
 		return nil
@@ -131,19 +131,38 @@ func (e *Engine) WinLine() []int {
 	}
 	row, col := last.To/Cols, last.To%Cols
 	for _, dir := range [4][2]int{{0, 1}, {1, 0}, {1, 1}, {1, -1}} {
-		var run []int
-		for step := -4; step <= 4; step++ {
+		negative := []int{}
+		for step := 1; ; step++ {
+			r := row - dir[0]*step
+			c := col - dir[1]*step
+			if r < 0 || r >= Rows || c < 0 || c >= Cols || e.board[r*Cols+c] != colour {
+				break
+			}
+			negative = append(negative, r*Cols+c)
+		}
+		run := make([]int, 0, 9)
+		for i := len(negative) - 1; i >= 0; i-- {
+			run = append(run, negative[i])
+		}
+		lastAt := len(run)
+		run = append(run, last.To)
+		for step := 1; ; step++ {
 			r := row + dir[0]*step
 			c := col + dir[1]*step
-			if r < 0 || r >= Rows || c < 0 || c >= Cols {
-				continue
+			if r < 0 || r >= Rows || c < 0 || c >= Cols || e.board[r*Cols+c] != colour {
+				break
 			}
-			if e.board[r*Cols+c] == colour {
-				run = append(run, r*Cols+c)
-			}
+			run = append(run, r*Cols+c)
 		}
 		if len(run) >= WinLength {
-			return run
+			start := lastAt - 2
+			if start < 0 {
+				start = 0
+			}
+			if start+WinLength > len(run) {
+				start = len(run) - WinLength
+			}
+			return run[start : start+WinLength]
 		}
 	}
 	return nil

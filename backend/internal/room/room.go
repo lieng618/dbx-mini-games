@@ -195,8 +195,8 @@ func (r *Room) join(id, nickname string, allowSeat bool) (Member, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if _, exists := r.members[id]; exists {
-		return Member{}, ErrAlreadyJoined
+	if existing, exists := r.members[id]; exists {
+		return *existing, ErrAlreadyJoined
 	}
 	if len(r.members) >= MaxParticipants {
 		return Member{}, ErrRoomFull

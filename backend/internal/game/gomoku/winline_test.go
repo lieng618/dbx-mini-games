@@ -82,3 +82,46 @@ func TestWinLineStopsAtTheWinningMove(t *testing.T) {
 		t.Fatalf("expected exactly five squares, got %v", line)
 	}
 }
+
+func TestWinLineDoesNotBridgeGaps(t *testing.T) {
+	e := New()
+	// Horizontal stones exist within five columns of the winning stone but are split by
+	// gaps. The vertical run is the only real five-in-a-row.
+	for _, col := range []int{3, 4, 7, 8} {
+		e.board[7*Cols+col] = Black
+	}
+	for _, row := range []int{3, 4, 5, 6, 7} {
+		e.board[row*Cols+7] = Black
+	}
+	e.history = []game.Move{{From: -1, To: 7*Cols + 7}}
+	e.result = game.Result{Finished: true, Outcome: game.OutcomeSeatOneWin, Reason: "five in a row"}
+
+	line := e.WinLine()
+	if len(line) != 5 {
+		t.Fatalf("expected five squares, got %v", line)
+	}
+	for i := 1; i < len(line); i++ {
+		if line[i]-line[i-1] != Cols {
+			t.Fatalf("win line bridged a gap: %v", line)
+		}
+	}
+}
+
+func TestWinLineUsesFiveFromOverline(t *testing.T) {
+	e := New()
+	for _, col := range []int{3, 4, 5, 6, 7, 8} {
+		e.board[7*Cols+col] = Black
+	}
+	e.history = []game.Move{{From: -1, To: 7*Cols + 7}}
+	e.result = game.Result{Finished: true, Outcome: game.OutcomeSeatOneWin, Reason: "five in a row"}
+
+	line := e.WinLine()
+	if len(line) != WinLength {
+		t.Fatalf("overline returned %d squares, want %d: %v", len(line), WinLength, line)
+	}
+	for i := 1; i < len(line); i++ {
+		if line[i]-line[i-1] != 1 {
+			t.Fatalf("overline segment is not contiguous: %v", line)
+		}
+	}
+}

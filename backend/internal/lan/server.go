@@ -15,17 +15,17 @@ import (
 
 // Message is the single wire envelope for every frame in both directions.
 type Message struct {
-	Type     string          `json:"type"`
-	Protocol int             `json:"protocol"`
-	RoomID   string          `json:"roomId,omitempty"`
-	Nonce    []byte          `json:"nonce,omitempty"`
-	PublicKey []byte         `json:"publicKey,omitempty"`
-	Signature []byte         `json:"signature,omitempty"`
-	Password string          `json:"password,omitempty"`
-	Ticket   string          `json:"ticket,omitempty"`
-	Profile  *Profile        `json:"profile,omitempty"`
-	Snapshot json.RawMessage `json:"snapshot,omitempty"`
-	Error    string          `json:"error,omitempty"`
+	Type      string          `json:"type"`
+	Protocol  int             `json:"protocol"`
+	RoomID    string          `json:"roomId,omitempty"`
+	Nonce     []byte          `json:"nonce,omitempty"`
+	PublicKey []byte          `json:"publicKey,omitempty"`
+	Signature []byte          `json:"signature,omitempty"`
+	Password  string          `json:"password,omitempty"`
+	Ticket    string          `json:"ticket,omitempty"`
+	Profile   *Profile        `json:"profile,omitempty"`
+	Snapshot  json.RawMessage `json:"snapshot,omitempty"`
+	Error     string          `json:"error,omitempty"`
 	// Request lets a guest ask the host to perform an action on its behalf. The host is the
 	// only authority, so a guest never mutates state locally.
 	RequestID string          `json:"requestId,omitempty"`
@@ -48,6 +48,14 @@ type hostConn struct {
 	memberID  string
 }
 
+type ticketState struct {
+	memberID   string
+	timer      *time.Timer
+	generation uint64
+}
+
+var lanReconnectGrace = 25 * time.Second
+
 // RequestHandler applies one guest request against the authoritative room.
 //
 // It is supplied by the app layer so the transport stays free of game and seat rules.
@@ -61,6 +69,7 @@ type Server struct {
 
 	mu      sync.Mutex
 	peers   map[string]*hostConn
+	tickets map[string]*ticketState
 	handler RequestHandler
 	// onChange fires after a peer joins or leaves. Seating is decided inside Room.Join, so
 	// the host's own view is stale until it re-reads the room; without this the lobby never
@@ -138,7 +147,13 @@ func NewServer(r *room.Room) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{identity: identity, listener: listener, room: r, peers: map[string]*hostConn{}}
+	s := &Server{
+		identity: identity,
+		listener: listener,
+		room:     r,
+		peers:    map[string]*hostConn{},
+		tickets:  map[string]*ticketState{},
+	}
 	go s.acceptLoop()
 	return s, nil
 }
@@ -156,7 +171,13 @@ func (s *Server) Close() error {
 	for _, p := range s.peers {
 		_ = p.conn.Close()
 	}
+	for _, state := range s.tickets {
+		if state.timer != nil {
+			state.timer.Stop()
+		}
+	}
 	s.peers = map[string]*hostConn{}
+	s.tickets = map[string]*ticketState{}
 	s.mu.Unlock()
 	return err
 }
@@ -219,13 +240,34 @@ func (s *Server) handle(conn net.Conn) {
 		return
 	}
 
-	ticket, err := newToken()
-	if err != nil {
-		return
+	ticket := auth.Ticket
+	if !reconnect {
+		ticket, err = newToken()
+		if err != nil {
+			return
+		}
 	}
+	peer := &hostConn{conn: conn, publicKey: pub, ticket: ticket, memberID: member.ID}
 	s.mu.Lock()
-	s.peers[ticket] = &hostConn{conn: conn, publicKey: pub, ticket: ticket, memberID: member.ID}
+	state := s.tickets[ticket]
+	if state == nil {
+		state = &ticketState{memberID: member.ID}
+		s.tickets[ticket] = state
+	}
+	state.memberID = member.ID
+	state.generation++
+	if state.timer != nil {
+		state.timer.Stop()
+		state.timer = nil
+	}
+	previous := s.peers[ticket]
+	s.peers[ticket] = peer
 	s.mu.Unlock()
+	if previous != nil && previous.conn != conn {
+		_ = previous.conn.Close()
+	}
+	defer s.disconnectPeer(ticket, conn, member.ID)
+	s.room.SetConnected(member.ID, true)
 
 	snapshot, err := json.Marshal(snapshotOf(s.room, member.ID))
 	if err != nil {
@@ -245,12 +287,6 @@ func (s *Server) handle(conn net.Conn) {
 	for {
 		message, err := s.read(conn)
 		if err != nil {
-			s.mu.Lock()
-			delete(s.peers, ticket)
-			s.mu.Unlock()
-			_ = s.room.Leave(member.ID)
-			// Leaving vacates a seat, which can reopen the lobby or hand the turn over.
-			s.notifyMembership()
 			return
 		}
 		if message.Type != "request" || message.Method == "" {
@@ -278,8 +314,53 @@ func (s *Server) handle(conn net.Conn) {
 func (s *Server) ticketValid(ticket, memberID string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	peer, ok := s.peers[ticket]
-	return ok && peer.memberID == memberID
+	state := s.tickets[ticket]
+	return state != nil && state.memberID == memberID
+}
+
+// disconnectPeer keeps the membership for a short reconnect window while the old
+// connection unwinds. The ticket remains valid until this generation's timer expires.
+func (s *Server) disconnectPeer(ticket string, conn net.Conn, memberID string) {
+	s.mu.Lock()
+	current := s.peers[ticket]
+	if current == nil || current.conn != conn {
+		s.mu.Unlock()
+		return
+	}
+	delete(s.peers, ticket)
+	state := s.tickets[ticket]
+	if state == nil {
+		s.mu.Unlock()
+		_ = s.room.Leave(memberID)
+		s.notifyMembership()
+		return
+	}
+	state.generation++
+	generation := state.generation
+	if state.timer != nil {
+		state.timer.Stop()
+	}
+	state.timer = time.AfterFunc(lanReconnectGrace, func() {
+		s.expireTicket(ticket, generation)
+	})
+	s.mu.Unlock()
+
+	s.room.SetConnected(memberID, false)
+	s.notifyMembership()
+}
+
+func (s *Server) expireTicket(ticket string, generation uint64) {
+	s.mu.Lock()
+	state := s.tickets[ticket]
+	if state == nil || state.generation != generation || s.peers[ticket] != nil {
+		s.mu.Unlock()
+		return
+	}
+	delete(s.tickets, ticket)
+	s.mu.Unlock()
+
+	_ = s.room.Leave(state.memberID)
+	s.notifyMembership()
 }
 
 func (s *Server) read(conn net.Conn) (Message, error) {

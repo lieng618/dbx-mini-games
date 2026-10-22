@@ -191,6 +191,42 @@ func TestCaptureAndUndo(t *testing.T) {
 	}
 }
 
+func TestUndoRestoresNoCaptureCounter(t *testing.T) {
+	e := New()
+	e.noCapture = NoCaptureLimitDraw - 1
+	move := game.Move{From: idx(7, 1), To: idx(7, 4)}
+	if err := e.Apply(move); err != nil {
+		t.Fatal(err)
+	}
+	if e.Result().Reason != "sixty-move rule" {
+		t.Fatalf("expected the next non-capture to draw, got %+v", e.Result())
+	}
+	if !e.Undo() {
+		t.Fatal("expected undo to succeed")
+	}
+	if e.noCapture != NoCaptureLimitDraw-1 {
+		t.Fatalf("undo restored noCapture=%d, want %d", e.noCapture, NoCaptureLimitDraw-1)
+	}
+	if e.Result().Finished {
+		t.Fatalf("undo must clear the draw, got %+v", e.Result())
+	}
+}
+
+func TestUndoDecrementsRepetitionCount(t *testing.T) {
+	e := New()
+	if err := e.Apply(game.Move{From: idx(7, 1), To: idx(7, 4)}); err != nil {
+		t.Fatal(err)
+	}
+	positionKey := e.key()
+	e.positions[positionKey] = 2
+	if !e.Undo() {
+		t.Fatal("expected undo to succeed")
+	}
+	if got := e.positions[positionKey]; got != 1 {
+		t.Fatalf("repetition count after undo = %d, want 1", got)
+	}
+}
+
 func TestCheckmateIsTerminal(t *testing.T) {
 	e := New()
 	e.board = [Cells]int8{}

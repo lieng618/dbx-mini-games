@@ -117,6 +117,24 @@ func (c *matchClock) consumeLocked(now time.Time) {
 	}
 }
 
+// expiredSeat reports the active seat whose total or per-move budget has run out, or -1.
+// An undo request pauses both limits, so a waiting player is never timed out.
+func (c *matchClock) expiredSeat(now time.Time) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.consumeLocked(now)
+	if c.paused || c.running < 0 || c.running >= len(c.remaining) {
+		return -1
+	}
+	if c.budget > 0 && c.remaining[c.running] <= 0 {
+		return c.running
+	}
+	if c.perMove > 0 && !c.since.IsZero() && now.Sub(c.since) >= c.perMove {
+		return c.running
+	}
+	return -1
+}
+
 func (c *matchClock) snapshot(now time.Time) map[string]any {
 	c.mu.Lock()
 	defer c.mu.Unlock()
