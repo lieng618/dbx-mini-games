@@ -1,8 +1,8 @@
 /**
  * Cloud bridge for the DBX Mini Games workbench.
  *
- * The plugin is frontend-only. It talks to the public Go service directly over a compact
- * JSON WebSocket protocol; no local native sidecar is started by DBX.
+ * The plugin is frontend-only. Browsers use the compact JSON WebSocket protocol. DBX only
+ * exposes HTTPS origins to the plugin CSP, so the workbench uses HTTPS long polling there.
  */
 
 const REQUEST_TIMEOUT_MS = 12_000;
@@ -55,6 +55,9 @@ class CloudBridge {
   constructor() {
     this.live = true;
     this.socket = null;
+    this.connected = false;
+    this.pollController = null;
+    this.usePolling = hasHost();
     this.pending = new Map();
     this.listeners = new Set();
     this.connectionListeners = new Set();
@@ -79,7 +82,7 @@ class CloudBridge {
   }
 
   ready() {
-    if (this.socket?.readyState === WebSocket.OPEN) return Promise.resolve();
+    if (this.connected) return Promise.resolve();
     if (!this.readyPromise) {
       this.readyPromise = new Promise((resolve, reject) => {
         this.resolveReady = resolve;
@@ -98,7 +101,7 @@ class CloudBridge {
     this.connectionListeners.add(handler);
     queueMicrotask(() =>
       handler({
-        connected: this.socket?.readyState === WebSocket.OPEN,
+        connected: this.connected,
         serverUrl: this.serverUrl,
       }),
     );
@@ -106,8 +109,13 @@ class CloudBridge {
   }
 
   connect() {
-    if (this.manualClose || this.socket?.readyState === WebSocket.CONNECTING) return;
+    if (this.manualClose) return;
     clearTimeout(this.retryTimer);
+    if (this.usePolling) {
+      void this.connectPolling();
+      return;
+    }
+    if (this.socket?.readyState === WebSocket.CONNECTING) return;
     const url = new URL(this.serverUrl);
     url.searchParams.set("clientId", this.clientId);
     url.searchParams.set("nickname", this.nickname);
@@ -116,6 +124,7 @@ class CloudBridge {
     this.socket = socket;
     socket.addEventListener("open", () => {
       this.retryDelay = 500;
+      this.connected = true;
       this.resolveReady?.();
       this.resolveReady = null;
       this.rejectReady = null;
@@ -124,6 +133,7 @@ class CloudBridge {
     socket.addEventListener("message", (event) => this.handleMessage(event.data));
     socket.addEventListener("close", () => {
       if (this.socket === socket) this.socket = null;
+      this.connected = false;
       if (!this.resolveReady) this.readyPromise = null;
       const error = new Error("云端连接已断开");
       for (const pending of this.pending.values()) {
@@ -139,6 +149,63 @@ class CloudBridge {
     });
   }
 
+  async connectPolling() {
+    if (this.manualClose || this.pollController) return;
+    const controller = new AbortController();
+    this.pollController = controller;
+    const base = apiBase(this.serverUrl);
+    try {
+      const response = await fetch(new URL("connect", base), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ clientId: this.clientId, nickname: this.nickname }),
+        signal: controller.signal,
+      });
+      const session = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(session.error || "无法建立云端会话");
+      if (controller.signal.aborted || this.pollController !== controller) return;
+
+      if (session.clientId) this.clientId = session.clientId;
+      if (session.nickname) this.nickname = session.nickname;
+      if (!this.ephemeralIdentity) persistClientId(this.clientId);
+      this.retryDelay = 500;
+      this.connected = true;
+      this.resolveReady?.();
+      this.resolveReady = null;
+      this.rejectReady = null;
+      this.emitConnection({ connected: true, serverUrl: this.serverUrl });
+      void this.pollEvents(controller, base);
+    } catch (error) {
+      if (!controller.signal.aborted) this.connectionLost(error);
+    }
+  }
+
+  async pollEvents(controller, base) {
+    try {
+      while (!this.manualClose && this.pollController === controller) {
+        const url = new URL("events", base);
+        url.searchParams.set("clientId", this.clientId);
+        const response = await fetch(url, { signal: controller.signal });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload.error || "云端事件连接已断开");
+        for (const event of payload.events || []) this.handleEvent(event);
+      }
+    } catch (error) {
+      if (!controller.signal.aborted) this.connectionLost(error);
+    }
+  }
+
+  connectionLost() {
+    this.pollController = null;
+    this.connected = false;
+    if (!this.resolveReady) this.readyPromise = null;
+    this.emitConnection({ connected: false, serverUrl: this.serverUrl });
+    if (!this.manualClose) {
+      this.retryTimer = setTimeout(() => this.connect(), this.retryDelay);
+      this.retryDelay = Math.min(10_000, this.retryDelay * 2);
+    }
+  }
+
   handleMessage(raw) {
     let message;
     try {
@@ -146,7 +213,10 @@ class CloudBridge {
     } catch {
       return;
     }
+    this.handleEvent(message);
+  }
 
+  handleEvent(message) {
     if (message.type === "response") {
       const pending = this.pending.get(message.id);
       if (!pending) return;
@@ -185,6 +255,23 @@ class CloudBridge {
 
   async invoke(method, params = {}) {
     await this.ready();
+    if (this.usePolling) {
+      const base = apiBase(this.serverUrl);
+      const response = await fetch(new URL("request", base), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          clientId: this.clientId,
+          method,
+          params: params || {},
+        }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || payload.error) {
+        throw new Error(payload.error || "云端请求失败");
+      }
+      return payload.result;
+    }
     if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
       throw new Error("尚未连接到游戏服务器");
     }
@@ -209,9 +296,20 @@ class CloudBridge {
   close() {
     this.manualClose = true;
     clearTimeout(this.retryTimer);
+    this.pollController?.abort();
+    this.pollController = null;
     this.socket?.close();
     this.socket = null;
   }
+}
+
+function apiBase(serverUrl) {
+  const url = new URL(serverUrl);
+  url.protocol = "https:";
+  url.pathname = "/api/";
+  url.search = "";
+  url.hash = "";
+  return url;
 }
 
 function loadOrCreateClientId() {

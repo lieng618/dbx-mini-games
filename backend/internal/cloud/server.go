@@ -42,13 +42,14 @@ type Server struct {
 	hub     *Hub
 	logger  *slog.Logger
 	handler http.Handler
+	poll    *pollManager
 }
 
 func NewServer(hub *Hub, logger *slog.Logger, uiDirectory string) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	server := &Server{hub: hub, logger: logger}
+	server := &Server{hub: hub, logger: logger, poll: newPollManager(hub)}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -69,6 +70,9 @@ func NewServer(hub *Hub, logger *slog.Logger, uiDirectory string) *Server {
 	mux.HandleFunc("GET /api/lobby", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, hub.LobbySnapshot())
 	})
+	mux.HandleFunc("POST /api/connect", server.handlePollConnect)
+	mux.HandleFunc("GET /api/events", server.handlePollEvents)
+	mux.HandleFunc("POST /api/request", server.handlePollRequest)
 	mux.HandleFunc("GET /ws", server.handleWebSocket)
 
 	if strings.TrimSpace(uiDirectory) != "" {
@@ -234,6 +238,16 @@ func withSecurityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+			w.Header().Set("Cache-Control", "no-store")
+		}
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		if strings.HasPrefix(r.URL.Path, "/ws") {
 			w.Header().Set("Cache-Control", "no-store")
 		}
