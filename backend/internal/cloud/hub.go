@@ -170,7 +170,8 @@ func (h *Hub) Call(clientID, method string, params map[string]any) (any, error) 
 		return map[string]any{"role": "idle"}, nil
 	case "room.start", "room.seat", "room.release", "room.practice.start",
 		"room.practice.end", "room.ai.start", "room.ai.move",
-		"game.move", "game.undo.request", "game.undo.consent", "game.resign", "game.rematch":
+		"game.move", "game.undo.request", "game.undo.consent", "game.undo.decline",
+		"game.resign", "game.rematch":
 		return h.actLocked(client, method, params)
 	case "game.legal":
 		return h.legalLocked(client, params)
@@ -393,10 +394,17 @@ func (h *Hub) actLocked(client *clientState, method string, params map[string]an
 		if err := record.room.RequestUndo(client.id); err != nil {
 			return nil, err
 		}
+		record.clock.pause(now)
 	case "game.undo.consent":
 		if err := record.room.ConsentUndo(client.id); err != nil {
 			return nil, err
 		}
+		record.clock.resume(now, record.room.TurnSeat(), true)
+	case "game.undo.decline":
+		if err := record.room.DeclineUndo(client.id); err != nil {
+			return nil, err
+		}
+		record.clock.resume(now, record.room.TurnSeat(), false)
 	case "game.resign":
 		if err := record.room.Resign(client.id); err != nil {
 			return nil, err
@@ -596,6 +604,10 @@ func boardView(r *room.Room) map[string]any {
 	view := map[string]any{
 		"cells":    engine.Cells(),
 		"turnSeat": int(engine.Turn()),
+	}
+	if requestedBy, requestedSeat := r.UndoRequest(); requestedBy != "" {
+		view["undoRequestedBy"] = requestedBy
+		view["undoRequestedSeat"] = requestedSeat
 	}
 	if lastMove != nil {
 		view["lastMove"] = map[string]any{"from": lastMove.From, "to": lastMove.To}

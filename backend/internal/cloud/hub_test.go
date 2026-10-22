@@ -57,6 +57,62 @@ func TestCloudRoomJoinSpectateAndStart(t *testing.T) {
 	}
 }
 
+func TestCloudUndoRequestIsVisibleAndConsentRewinds(t *testing.T) {
+	hub := NewHub()
+	ownerID, _ := hub.AddClient("undo-owner", "先手", func(string, any) {})
+	guestID, _ := hub.AddClient("undo-guest", "后手", func(string, any) {})
+	created, err := hub.Call(ownerID, "room.create", map[string]any{
+		"name": "悔棋房",
+		"game": "gomoku",
+		"seat": float64(0),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roomID := created.(map[string]any)["roomId"].(string)
+	if _, err := hub.Call(guestID, "room.join", map[string]any{"roomId": roomID}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hub.Call(ownerID, "room.start", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hub.Call(ownerID, "game.move", map[string]any{"to": float64(112)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hub.Call(ownerID, "game.undo.request", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	guestView, err := hub.Call(guestID, "room.snapshot", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := guestView.(map[string]any)
+	if pending["undoRequestedBy"] != ownerID || pending["undoRequestedSeat"] != 0 {
+		t.Fatalf("undo request missing from guest snapshot: %#v", pending)
+	}
+	if paused := pending["clock"].(map[string]any)["paused"]; paused != true {
+		t.Fatalf("undo request must pause the clock, got %#v", pending["clock"])
+	}
+	if _, err := hub.Call(guestID, "game.undo.consent", nil); err != nil {
+		t.Fatal(err)
+	}
+	after, err := hub.Call(guestID, "room.snapshot", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rewound := after.(map[string]any)
+	if _, ok := rewound["undoRequestedBy"]; ok {
+		t.Fatal("completed undo left a stale request in the snapshot")
+	}
+	if rewound["moveCount"] != 0 || rewound["turnSeat"] != 0 {
+		t.Fatalf("undo did not restore the opening position: %#v", rewound)
+	}
+	if paused := rewound["clock"].(map[string]any)["paused"]; paused != false {
+		t.Fatal("consented undo did not resume the clock")
+	}
+}
+
 func TestLobbyOnlineCountTracksOnlyConnectedLobbyClients(t *testing.T) {
 	hub := NewHub()
 	firstID, _ := hub.AddClient("lobby-count-owner", "甲", func(string, any) {})

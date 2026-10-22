@@ -105,7 +105,8 @@ func (a *App) Call(method string, params map[string]any) (any, error) {
 	case "room.start", "room.practice.start", "room.practice.end",
 		"room.ai.start", "room.ai.move",
 		"room.seat", "room.release",
-		"game.move", "game.undo.request", "game.undo.consent", "game.resign", "game.rematch":
+		"game.move", "game.undo.request", "game.undo.consent", "game.undo.decline",
+		"game.resign", "game.rematch":
 		return a.act(method, params)
 	case "room.leave":
 		return a.leaveRoom()
@@ -450,6 +451,10 @@ func (a *App) boardViewLocked() map[string]any {
 		"cells":    engine.Cells(),
 		"turnSeat": int(engine.Turn()),
 	}
+	if requestedBy, requestedSeat := a.room.UndoRequest(); requestedBy != "" {
+		view["undoRequestedBy"] = requestedBy
+		view["undoRequestedSeat"] = requestedSeat
+	}
 	// Last move and check state drive the presentation layer's effects. They are derived
 	// from authoritative state, so a spectator sees the same ink as the player.
 	if lastMove != nil {
@@ -696,12 +701,35 @@ func (a *App) applyHostAction(method string, params map[string]any) error {
 		if err := needSeat(); err != nil {
 			return err
 		}
-		return a.room.RequestUndo(a.localID)
+		if err := a.room.RequestUndo(a.localID); err != nil {
+			return err
+		}
+		if a.clock != nil {
+			a.clock.pause(time.Now())
+		}
+		return nil
 	case "game.undo.consent":
 		if err := needSeat(); err != nil {
 			return err
 		}
-		return a.room.ConsentUndo(a.localID)
+		if err := a.room.ConsentUndo(a.localID); err != nil {
+			return err
+		}
+		if a.clock != nil {
+			a.clock.resume(time.Now(), a.room.TurnSeat(), true)
+		}
+		return nil
+	case "game.undo.decline":
+		if err := needSeat(); err != nil {
+			return err
+		}
+		if err := a.room.DeclineUndo(a.localID); err != nil {
+			return err
+		}
+		if a.clock != nil {
+			a.clock.resume(time.Now(), a.room.TurnSeat(), false)
+		}
+		return nil
 	case "game.resign":
 		if err := needSeat(); err != nil {
 			return err

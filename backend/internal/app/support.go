@@ -213,10 +213,12 @@ type Clock struct {
 	// since marks the start of the current turn, which is what the per-move limit measures.
 	// consumed marks how far the budget has been deducted; the two cannot be the same field,
 	// or deducting time would also reset the move timer.
-	since    time.Time
-	consumed time.Time
-	budget   time.Duration
-	perMove  time.Duration
+	since             time.Time
+	consumed          time.Time
+	budget            time.Duration
+	perMove           time.Duration
+	paused            bool
+	pausedMoveElapsed time.Duration
 }
 
 // DefaultBudget is the total time each seat receives when the host does not choose one.
@@ -239,6 +241,8 @@ func (c *Clock) reset(now time.Time) {
 	c.running = 0
 	c.since = now
 	c.consumed = now
+	c.paused = false
+	c.pausedMoveElapsed = 0
 }
 
 // switchTurn hands the clock to the other seat, and restarts the per-move limit.
@@ -255,6 +259,49 @@ func (c *Clock) switchTurn(now time.Time) {
 	}
 	c.since = now
 	c.consumed = now
+	c.paused = false
+	c.pausedMoveElapsed = 0
+}
+
+// pause freezes both the total and per-move clocks while an undo request is decided.
+func (c *Clock) pause(now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.consumeLocked(now)
+	if c.running < 0 {
+		return
+	}
+	if c.perMove > 0 && !c.since.IsZero() {
+		c.pausedMoveElapsed = now.Sub(c.since)
+		if c.pausedMoveElapsed < 0 {
+			c.pausedMoveElapsed = 0
+		}
+	}
+	c.running = -1
+	c.consumed = time.Time{}
+	c.paused = true
+}
+
+// resume restarts the clock for seat. A successful undo gives the restored turn a fresh
+// per-move limit; a declined request continues with the time already spent before it.
+func (c *Clock) resume(now time.Time, seat int, freshMoveTimer bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.paused {
+		return
+	}
+	if seat < 0 || seat >= len(c.remaining) {
+		seat = 0
+	}
+	c.running = seat
+	c.consumed = now
+	if freshMoveTimer {
+		c.since = now
+	} else {
+		c.since = now.Add(-c.pausedMoveElapsed)
+	}
+	c.paused = false
+	c.pausedMoveElapsed = 0
 }
 
 // consumeLocked deducts elapsed time from the running seat.
@@ -292,15 +339,23 @@ func (c *Clock) view() map[string]any {
 	c.consumeLocked(now)
 
 	moveLeft := int64(-1)
-	if c.perMove > 0 && c.running >= 0 && !c.since.IsZero() {
-		moveLeft = int64((c.perMove - now.Sub(c.since)).Milliseconds())
-		if moveLeft < 0 {
-			moveLeft = 0
+	if c.perMove > 0 {
+		elapsed := c.pausedMoveElapsed
+		active := !c.paused && c.running >= 0 && !c.since.IsZero()
+		if active {
+			elapsed = now.Sub(c.since)
+		}
+		if c.paused || active {
+			moveLeft = int64((c.perMove - elapsed).Milliseconds())
+			if moveLeft < 0 {
+				moveLeft = 0
+			}
 		}
 	}
 	return map[string]any{
 		"remaining":     [2]int64{int64(c.remaining[0].Milliseconds()), int64(c.remaining[1].Milliseconds())},
 		"running":       c.running,
+		"paused":        c.paused,
 		"budget":        int64(c.budget.Milliseconds()),
 		"perMove":       int64(c.perMove.Milliseconds()),
 		"moveRemaining": moveLeft,
@@ -313,6 +368,9 @@ func (c *Clock) TimeoutSeat() int {
 	defer c.mu.Unlock()
 	now := time.Now()
 	c.consumeLocked(now)
+	if c.paused {
+		return -1
+	}
 	if c.running < 0 || c.running >= len(c.remaining) {
 		return -1
 	}

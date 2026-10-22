@@ -77,8 +77,11 @@ const checkFocus = ref(null);
 const result = ref(null);
 const winLine = ref([]);
 const clock = ref(null);
+const undoRequestedBy = ref("");
+const undoRequestedSeat = ref(-1);
 let clockBase = null;
 let clockBaseAt = 0;
+let undoTimer = null;
 // The practice partner's seat, or -1. Kept separate from `seats` because the partner is
 // not a member: it has a seat but no id, no nickname and no connection.
 const aiSeat = ref(-1);
@@ -149,6 +152,21 @@ const seatMembers = computed(() =>
   seats.value.map((id) => members.value.find((m) => m.id === id) || null),
 );
 const spectators = computed(() => members.value.filter((m) => !seats.value.includes(m.id)));
+const undoPending = computed(() => Boolean(undoRequestedBy.value));
+const isUndoRequester = computed(() => undoRequestedBy.value === selfId.value);
+const isUndoRecipient = computed(() => undoPending.value && isSeated.value && !isUndoRequester.value);
+const undoRequesterName = computed(() => {
+  if (undoRequestedSeat.value < 0) return "对手";
+  return seatMembers.value[undoRequestedSeat.value]?.nickname || seatLabel(undoRequestedSeat.value);
+});
+const canRequestUndo = computed(
+  () =>
+    phase.value === "playing" &&
+    isSeated.value &&
+    !undoPending.value &&
+    moveCount.value > 0 &&
+    (cells.value.turnSeat ?? -1) !== mySeat.value,
+);
 const phaseLabel = computed(() => {
   if (phase.value === "playing") return "对局中";
   if (phase.value === "practice") return "练习中";
@@ -220,6 +238,8 @@ function applySnapshot(snapshot) {
     members.value = [];
     seats.value = ["", ""];
     moveCount.value = 0;
+    undoRequestedBy.value = "";
+    undoRequestedSeat.value = -1;
     return;
   }
   if (Array.isArray(snapshot.members)) members.value = snapshot.members;
@@ -242,6 +262,10 @@ function applySnapshot(snapshot) {
   const isRoomSnapshot = Array.isArray(snapshot.members) && typeof snapshot.phase === "string";
   if (isRoomSnapshot) {
     aiSeat.value = typeof snapshot.aiSeat === "number" ? snapshot.aiSeat : -1;
+    undoRequestedBy.value = typeof snapshot.undoRequestedBy === "string" ? snapshot.undoRequestedBy : "";
+    undoRequestedSeat.value = Number.isFinite(Number(snapshot.undoRequestedSeat))
+      ? Number(snapshot.undoRequestedSeat)
+      : -1;
     inCheck.value = snapshot.inCheck === true;
     checkFocus.value = snapshot.checkFocus ?? null;
     result.value = snapshot.result ?? null;
@@ -298,6 +322,10 @@ function describeError(raw) {
     ["not your turn", "还没轮到你走棋"],
     ["illegal move", "这一步不合规则"],
     ["only seated players may do that", "你在观战，坐下后才能操作"],
+    ["an undo request is already pending", "已有悔棋请求等待处理"],
+    ["no move to undo", "现在没有可以撤回的棋"],
+    ["only the player who made the last move may request an undo", "只能撤回自己刚下的最后一手"],
+    ["only the opponent can answer an undo request", "只有对手可以处理这次悔棋请求"],
     ["not hosting a room", "当前没有房间，请先开桌"],
     ["already hosting or joined a room", "你已经在一个房间里了"],
     ["wrong room password", "房间密码不正确"],
@@ -455,6 +483,22 @@ async function resign() {
   await call("game.resign");
 }
 
+async function requestUndo() {
+  if (!canRequestUndo.value) return;
+  await call("game.undo.request");
+}
+
+async function consentUndo() {
+  if (!isUndoRecipient.value) return;
+  await call("game.undo.consent");
+}
+
+async function declineUndo(auto = false) {
+  if (!isUndoRecipient.value) return;
+  const reply = await call("game.undo.decline");
+  if (reply && auto) showFloatingMessage("悔棋请求已超时", "info", 2600, true);
+}
+
 async function rematch() {
   scene?.clearEffects();
   await call("game.rematch");
@@ -471,6 +515,8 @@ async function leaveRoom() {
   result.value = null;
   members.value = [];
   seats.value = ["", ""];
+  undoRequestedBy.value = "";
+  undoRequestedSeat.value = -1;
   lobbyTab.value = "rooms";
   await scan();
 }
@@ -494,7 +540,7 @@ function updateEffectsLevel() {
 /** Handles a click on a board intersection. */
 async function onCell(index) {
   const canMove = (phase.value === "playing" && isMyTurn.value) || phase.value === "practice";
-  if (!canMove || !isSeated.value) return;
+  if (!canMove || !isSeated.value || undoPending.value) return;
   // While the partner owns the turn the board is read-only: otherwise the player could
   // move twice, and the partner's own move would then be rejected as out of turn.
   if (aiThinking.value || isAiTurn.value) return;
@@ -647,7 +693,7 @@ function startClockTimers() {
   if (syncTimer) return;
   syncTimer = setInterval(() => {
     lobbyNow.value = Date.now();
-    if (phase.value !== "playing" || !clockBase || clockBase.running < 0) return;
+    if (phase.value !== "playing" || !clockBase || clockBase.running < 0 || undoPending.value) return;
     const elapsed = Date.now() - clockBaseAt;
     const next = JSON.parse(JSON.stringify(clockBase));
     if (next.budget > 0) {
@@ -792,6 +838,8 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", closeResultOnEscape);
+  clearTimeout(undoTimer);
+  undoTimer = null;
   if (mvpTimer) clearTimeout(mvpTimer);
   mvpTimer = null;
   clearTimeout(floatingTimer);
@@ -828,6 +876,28 @@ watch(
 // so the same coordinate is visible in the same place on both screens.
 watch(mySeat, (seat) => {
   scene?.setFlipped(shouldFlipBoard(game.value, seat));
+});
+
+watch([undoRequestedBy, moveCount, phase], ([nextBy, nextMoves, nextPhase], [previousBy, previousMoves]) => {
+  clearTimeout(undoTimer);
+  undoTimer = null;
+
+  if (nextBy) {
+    if (nextBy !== selfId.value && isSeated.value) {
+      undoTimer = setTimeout(() => {
+        undoTimer = null;
+        void declineUndo(true);
+      }, 20000);
+    }
+    return;
+  }
+  if (!previousBy) return;
+
+  if (nextMoves < previousMoves) {
+    showFloatingMessage("悔棋成功，棋局已回退一手", "info", 3000, true);
+  } else if (nextPhase === "playing") {
+    showFloatingMessage("悔棋请求未通过", "info", 3000, true);
+  }
 });
 
 // A departure arrives as a normal room snapshot. Compare the seating table with its
@@ -902,6 +972,14 @@ watch(seats, (next, previous) => {
         <div class="actions">
           <button v-if="phase === 'lobby' && role === 'host'" class="primary" @click="startMatch">
             开始对局
+          </button>
+          <button
+            v-if="phase === 'playing' && isSeated"
+            class="ghost undo-action"
+            :disabled="!canRequestUndo"
+            @click="requestUndo"
+          >
+            {{ isUndoRequester ? "等待悔棋" : "悔棋" }}
           </button>
           <button v-if="phase === 'playing' && isSeated" class="ghost" @click="resign">认输</button>
           <button v-if="phase === 'finished' && role === 'host'" class="primary" @click="rematch">再来一局</button>
@@ -1330,6 +1408,32 @@ watch(seats, (next, previous) => {
         <div ref="boardHost" class="canvas-host" :class="{ hidden: canvasFailed }"></div>
       </div>
       <div v-if="canvasFailed" class="fallback">渲染器不可用，已切换到简化视图。</div>
+
+      <Transition name="undo-request">
+        <div
+          v-if="undoPending"
+          class="undo-request"
+          :class="{ waiting: isUndoRequester, spectator: !isSeated }"
+          role="dialog"
+          aria-live="polite"
+          aria-labelledby="undo-request-title"
+        >
+          <div class="undo-request-copy">
+            <span>悔棋请求</span>
+            <strong id="undo-request-title">
+              {{ isUndoRequester ? "等待对手确认" : isSeated ? "对手请求悔棋" : "棋手请求悔棋" }}
+            </strong>
+            <p v-if="isUndoRequester">请求已发送，确认前双方暂停落子。</p>
+            <p v-else-if="isSeated">{{ undoRequesterName }} 想撤回上一手，是否同意？</p>
+            <p v-else>{{ undoRequesterName }} 请求撤回上一手，等待对手处理。</p>
+            <small v-if="isSeated">20 秒未处理将自动拒绝</small>
+          </div>
+          <div v-if="isUndoRecipient" class="undo-request-actions">
+            <button class="ghost" type="button" @click="declineUndo(false)">拒绝</button>
+            <button class="primary" type="button" @click="consentUndo">同意</button>
+          </div>
+        </div>
+      </Transition>
 
       <!-- MVP 面板显示时让出横幅，关掉面板后横幅接回，免得同一句话出现两遍。 -->
       <div v-if="result && result.finished && !mvp" class="result-banner">
@@ -2945,6 +3049,87 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
   place-items: center;
   font-size: 13px;
   color: var(--soft-text);
+}
+
+/* ── Undo request ────────────────────────────────────────────────────────── */
+
+.undo-request {
+  position: fixed;
+  top: 92px;
+  left: calc(50% + 152px);
+  z-index: 55;
+  width: min(400px, calc(100vw - 40px));
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 15px 18px;
+  border: 1px solid rgba(157, 48, 38, 0.26);
+  border-radius: 2px;
+  background: rgba(248, 242, 231, 0.78);
+  backdrop-filter: blur(12px) saturate(1.18);
+  -webkit-backdrop-filter: blur(12px) saturate(1.18);
+  box-shadow: 0 16px 38px rgba(34, 28, 20, 0.16);
+  transform: translateX(-50%);
+}
+
+.undo-request-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.undo-request-copy > span {
+  color: var(--red-deep);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.2em;
+}
+
+.undo-request-copy strong {
+  color: var(--ink);
+  font-family: var(--font-display);
+  font-size: 18px;
+  letter-spacing: 0.04em;
+}
+
+.undo-request-copy p,
+.undo-request-copy small {
+  margin: 0;
+  color: var(--soft-text);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.undo-request-copy small {
+  color: var(--muted-text);
+  font-size: 10px;
+}
+
+.undo-request-actions {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 7px;
+}
+
+.undo-request-actions button {
+  min-width: 62px;
+  min-height: 34px;
+  padding: 6px 12px;
+}
+
+.undo-request-enter-active,
+.undo-request-leave-active {
+  transition:
+    opacity var(--dur-base) var(--ease-standard),
+    transform var(--dur-base) var(--ease-standard);
+}
+
+.undo-request-enter-from,
+.undo-request-leave-to {
+  opacity: 0;
+  transform: translate(-50%, -8px);
 }
 
 /* ── Result banner ──────────────────────────────────────────────────────── */
@@ -4699,6 +4884,25 @@ button:focus-visible {
   background: rgba(9, 8, 7, 0.7);
 }
 
+[data-theme="ink"] .undo-request {
+  border-color: rgba(222, 128, 114, 0.34);
+  background: rgba(43, 39, 33, 0.8);
+  box-shadow: 0 16px 38px rgba(0, 0, 0, 0.3);
+}
+
+[data-theme="ink"] .undo-request-copy > span {
+  color: #ef9b90;
+}
+
+[data-theme="ink"] .undo-request-copy strong {
+  color: #f3ead9;
+}
+
+[data-theme="ink"] .undo-request-copy p,
+[data-theme="ink"] .undo-request-copy small {
+  color: #c8bda9;
+}
+
 [data-theme="ink"] .seat,
 [data-theme="ink"] .clock-side,
 [data-theme="ink"] .seat-strip,
@@ -4932,6 +5136,11 @@ button:focus-visible {
     left: 50%;
   }
 
+  .undo-request {
+    left: 50%;
+    top: 76px;
+  }
+
   .lobby-screen {
     gap: 14px;
     padding: 14px 20px 36px;
@@ -5012,6 +5221,18 @@ button:focus-visible {
 @media (max-width: 620px) {
   .workbench:not(.lobby-mode) .floating-message {
     top: 69%;
+  }
+
+  .undo-request {
+    top: 68px;
+    align-items: stretch;
+    flex-direction: column;
+    gap: 12px;
+    padding: 14px;
+  }
+
+  .undo-request-actions button {
+    flex: 1;
   }
 
   .workbench:not(.lobby-mode) {

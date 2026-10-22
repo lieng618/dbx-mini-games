@@ -40,6 +40,9 @@ var (
 	ErrNotSeated       = errors.New("only seated players may do that")
 	ErrNotYourTurn     = errors.New("not your turn")
 	ErrUnknownMember   = errors.New("unknown member")
+	ErrUndoPending     = errors.New("an undo request is already pending")
+	ErrUndoNotLastMove = errors.New("only the player who made the last move may request an undo")
+	ErrUndoNotOpponent = errors.New("only the opponent can answer an undo request")
 )
 
 // Phase is the Room's lifecycle state.
@@ -562,6 +565,9 @@ func (r *Room) Move(id string, m game.Move, now int64) error {
 	if member.Seat < 0 {
 		return ErrNotSeated
 	}
+	if r.match.UndoRequestedBy != "" {
+		return ErrUndoPending
+	}
 	seat := game.Seat(member.Seat)
 	if r.match.Engine.Turn() != seat {
 		return ErrNotYourTurn
@@ -588,6 +594,7 @@ func (r *Room) finishLocked(res game.Result) {
 	r.match.Finished = true
 	r.match.Record.Outcome = res.Outcome
 	r.match.Record.Reason = res.Reason
+	r.match.UndoRequestedBy = ""
 	r.phase = PhaseFinished
 	if rep, err := replay.New(r.match.Record); err == nil {
 		r.replay = rep
@@ -599,7 +606,7 @@ func (r *Room) RequestUndo(id string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if r.match == nil {
+	if r.phase != PhasePlaying || r.match == nil {
 		return ErrMatchInProgress
 	}
 	m, ok := r.members[id]
@@ -612,6 +619,16 @@ func (r *Room) RequestUndo(id string) error {
 	if len(r.match.Record.Moves) == 0 {
 		return game.ErrNoHistory
 	}
+	if r.match.UndoRequestedBy != "" {
+		return ErrUndoPending
+	}
+	lastSeat := game.SeatTwo
+	if len(r.match.Record.Moves)%2 == 1 {
+		lastSeat = game.SeatOne
+	}
+	if game.Seat(m.Seat) != lastSeat {
+		return ErrUndoNotLastMove
+	}
 	r.match.UndoRequestedBy = id
 	return nil
 }
@@ -622,11 +639,11 @@ func (r *Room) ConsentUndo(id string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if r.match == nil || r.match.UndoRequestedBy == "" {
+	if r.phase != PhasePlaying || r.match == nil || r.match.UndoRequestedBy == "" {
 		return game.ErrNoHistory
 	}
 	if r.match.UndoRequestedBy == id {
-		return errors.New("the proposer cannot consent to their own undo")
+		return ErrUndoNotOpponent
 	}
 	m, ok := r.members[id]
 	if !ok {
@@ -641,11 +658,53 @@ func (r *Room) ConsentUndo(id string) error {
 	r.match.Record.Moves = r.match.Record.Moves[:len(r.match.Record.Moves)-1]
 	r.match.Revision++
 	r.match.UndoRequestedBy = ""
-	// An undo can revive a finished match, so return to playing.
-	r.phase = PhasePlaying
-	r.match.Finished = false
-	r.match.Result = game.Result{}
 	return nil
+}
+
+// DeclineUndo dismisses the pending request without changing the board.
+func (r *Room) DeclineUndo(id string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.phase != PhasePlaying || r.match == nil || r.match.UndoRequestedBy == "" {
+		return game.ErrNoHistory
+	}
+	if r.match.UndoRequestedBy == id {
+		return ErrUndoNotOpponent
+	}
+	m, ok := r.members[id]
+	if !ok {
+		return ErrNotMember
+	}
+	if m.Seat < 0 {
+		return ErrNotSeated
+	}
+	r.match.UndoRequestedBy = ""
+	return nil
+}
+
+// UndoRequest reports the member and seat waiting for an undo decision.
+func (r *Room) UndoRequest() (string, int) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.phase != PhasePlaying || r.match == nil || r.match.UndoRequestedBy == "" {
+		return "", -1
+	}
+	member := r.members[r.match.UndoRequestedBy]
+	if member == nil {
+		return "", -1
+	}
+	return member.ID, member.Seat
+}
+
+// TurnSeat reports whose turn it is, or -1 when there is no live board.
+func (r *Room) TurnSeat() int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.match == nil || r.match.Engine == nil {
+		return -1
+	}
+	return int(r.match.Engine.Turn())
 }
 
 // Resign ends the match in the opponent's favour.

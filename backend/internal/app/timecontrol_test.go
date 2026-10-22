@@ -175,3 +175,29 @@ func TestReadingDoesNotResetThePerMoveTimer(t *testing.T) {
 		t.Fatalf("the per-move limit must still have expired, got %d", seat)
 	}
 }
+
+func TestClockPausesWhileUndoIsPending(t *testing.T) {
+	c := newClock(10*time.Minute, 30*time.Second)
+	base := time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)
+	c.reset(base)
+	c.mu.Lock()
+	c.since = base.Add(-8 * time.Second)
+	c.consumed = base.Add(-8 * time.Second)
+	c.mu.Unlock()
+
+	c.pause(base)
+	if !c.paused || c.running != -1 {
+		t.Fatal("pause must stop the active clock")
+	}
+	if c.pausedMoveElapsed != 8*time.Second {
+		t.Fatalf("paused move elapsed = %v, want 8s", c.pausedMoveElapsed)
+	}
+
+	c.resume(base.Add(time.Minute), 1, false)
+	if c.paused || c.running != 1 {
+		t.Fatal("resume must restart the requested seat")
+	}
+	if got := base.Add(time.Minute).Sub(c.since); got != 8*time.Second {
+		t.Fatalf("resume changed the move elapsed time to %v", got)
+	}
+}

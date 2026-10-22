@@ -311,6 +311,85 @@ func TestUndoWithoutRequestRejected(t *testing.T) {
 	}
 }
 
+func TestUndoMustBeRequesterLastMove(t *testing.T) {
+	r := newRoom(t, "gomoku")
+	mustJoin(t, r, "host", "a")
+	if err := r.Start(1); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Move("host", game.Move{From: -1, To: 112}, 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Move("a", game.Move{From: -1, To: 113}, 3); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.RequestUndo("host"); err != ErrUndoNotLastMove {
+		t.Fatalf("host did not make the last move, got %v", err)
+	}
+	if err := r.RequestUndo("a"); err != nil {
+		t.Fatalf("the last mover should be able to request undo: %v", err)
+	}
+}
+
+func TestUndoPendingBlocksMovesAndCanBeDeclined(t *testing.T) {
+	r := newRoom(t, "gomoku")
+	mustJoin(t, r, "host", "a")
+	if err := r.Start(1); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Move("host", game.Move{From: -1, To: 112}, 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.RequestUndo("host"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Move("a", game.Move{From: -1, To: 113}, 3); err != ErrUndoPending {
+		t.Fatalf("a pending undo must freeze the board, got %v", err)
+	}
+	if err := r.RequestUndo("host"); err != ErrUndoPending {
+		t.Fatalf("a second pending request must be rejected, got %v", err)
+	}
+	if err := r.DeclineUndo("a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Move("a", game.Move{From: -1, To: 113}, 4); err != nil {
+		t.Fatalf("the board should resume after a decline: %v", err)
+	}
+	rec, _ := r.Replay()
+	if len(rec.Moves) != 2 {
+		t.Fatalf("a decline must leave both moves intact, got %d", len(rec.Moves))
+	}
+}
+
+func TestUndoRejectedAfterMatchFinishes(t *testing.T) {
+	r := newRoom(t, "gomoku")
+	mustJoin(t, r, "host", "a")
+	if err := r.Start(1); err != nil {
+		t.Fatal(err)
+	}
+	script := []struct {
+		id string
+		to int
+	}{
+		{"host", 7*15 + 3}, {"a", 8*15 + 0},
+		{"host", 7*15 + 4}, {"a", 8*15 + 1},
+		{"host", 7*15 + 5}, {"a", 8*15 + 2},
+		{"host", 7*15 + 6}, {"a", 8*15 + 3},
+		{"host", 7*15 + 7},
+	}
+	for i, step := range script {
+		if err := r.Move(step.id, game.Move{From: -1, To: step.to}, int64(i+2)); err != nil {
+			t.Fatalf("move %d: %v", i, err)
+		}
+	}
+	if r.Phase() != PhaseFinished {
+		t.Fatalf("expected a finished match, got %s", r.Phase())
+	}
+	if err := r.RequestUndo("host"); err != ErrMatchInProgress {
+		t.Fatalf("a finished match must not accept undo, got %v", err)
+	}
+}
+
 func TestResignAwardsOpponent(t *testing.T) {
 	r := newRoom(t, "gomoku")
 	mustJoin(t, r, "host", "a")
