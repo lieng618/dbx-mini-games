@@ -311,7 +311,7 @@ function describeError(raw) {
   const table = [
     // "Not enough players" is the opposite of "full". These two used to share one error,
     // so a lone host pressing 开始对局 was told the room was full.
-    ["both seats must be filled", "还差一位对手才能开始，等朋友加入，或先摆一摆"],
+    ["both seats must be filled", "还差一位对手，等朋友加入后即可开始"],
     ["both seats are already taken by players", "两个座位都坐着真人，陪练没位置了"],
     ["no seated player to start practice", "没有人在座位上，无法开始练习"],
     ["seat already occupied", "这个座位已经有人了"],
@@ -352,13 +352,12 @@ function describeError(raw) {
   return text || "操作失败";
 }
 
-function showFloatingMessage(text, tone = "info", duration = 3200, compact = false) {
+function showFloatingMessage(text, tone = "info", duration = 3200) {
   const message = String(text || "").trim();
   if (!message) return;
   floatingMessage.value = {
     text: message,
     tone,
-    compact,
     serial: ++floatingSerial,
   };
   clearTimeout(floatingTimer);
@@ -496,7 +495,7 @@ async function consentUndo() {
 async function declineUndo(auto = false) {
   if (!isUndoRecipient.value) return;
   const reply = await call("game.undo.decline");
-  if (reply && auto) showFloatingMessage("悔棋请求已超时", "info", 2600, true);
+  if (reply && auto) showFloatingMessage("悔棋请求已超时", "info", 2600);
 }
 
 async function rematch() {
@@ -895,9 +894,9 @@ watch([undoRequestedBy, moveCount, phase], ([nextBy, nextMoves, nextPhase], [pre
   if (!previousBy) return;
 
   if (nextMoves < previousMoves) {
-    showFloatingMessage("悔棋成功，棋局已回退一手", "info", 3000, true);
+    showFloatingMessage("悔棋成功，棋局已回退一手", "info", 3000);
   } else if (nextPhase === "playing") {
-    showFloatingMessage("悔棋请求未通过", "info", 3000, true);
+    showFloatingMessage("悔棋请求未通过", "info", 3000);
   }
 });
 
@@ -917,7 +916,7 @@ watch(seats, (next, previous) => {
   if (result.value?.finished && result.value.reason === "forfeit") {
     message = "对手已离开，本局判你胜";
   }
-  showFloatingMessage(message, "info", 3600, true);
+  showFloatingMessage(message, "info", 3600);
 });
 </script>
 
@@ -1490,7 +1489,7 @@ watch(seats, (next, previous) => {
         v-if="floatingMessage"
         :key="floatingMessage.serial"
         class="floating-message"
-        :class="[`is-${floatingMessage.tone}`, { compact: floatingMessage.compact }]"
+        :class="`is-${floatingMessage.tone}`"
         :role="floatingMessage.tone === 'error' ? 'alert' : 'status'"
         :aria-live="floatingMessage.tone === 'error' ? 'assertive' : 'polite'"
         aria-atomic="true"
@@ -4728,81 +4727,37 @@ button:focus-visible {
 
 .floating-message {
   position: fixed;
-  top: 50%;
+  top: 40px;
   left: 50%;
   z-index: 120;
   display: flex;
-  flex-direction: column;
   align-items: center;
-  gap: 9px;
+  justify-content: center;
   width: max-content;
   max-width: min(560px, calc(100vw - 40px));
-  padding: 0 20px;
+  min-height: 44px;
+  padding: 10px 20px;
+  border: 1px solid rgba(247, 240, 228, 0.18);
+  border-radius: 2px;
+  background: rgba(32, 29, 24, 0.94);
+  box-shadow: 0 10px 28px rgba(28, 26, 23, 0.24);
   text-align: center;
   pointer-events: none;
-  transform: translate(-50%, -50%);
+  transform: translateX(-50%);
 }
 
 .workbench:not(.lobby-mode) .floating-message {
   left: calc(50% + 152px);
 }
 
-.workbench:not(.lobby-mode) .floating-message span {
-  text-shadow: 0 1px 1px rgba(255, 248, 235, 0.72);
-}
-
-.floating-message::before {
-  content: "";
-  width: 34px;
-  height: 2px;
-  background: var(--red-deep);
-}
-
 .floating-message span {
-  padding: 0;
-  color: var(--ink);
-  background: transparent;
-  font-family: var(--font-display);
-  font-size: clamp(18px, 1.8vw, 25px);
-  font-weight: 700;
-  line-height: 1.55;
-  letter-spacing: 0.055em;
-  text-shadow:
-    0 1px 2px var(--paper-warm),
-    0 0 14px var(--paper-warm);
-}
-
-.floating-message.is-error::before {
-  background: #b33e32;
-}
-
-.floating-message.is-error span {
-  color: var(--red-deep);
-}
-
-.floating-message.compact {
-  top: 96px;
-  gap: 0;
-  padding: 9px 16px;
-  border: 1px solid rgba(247, 240, 228, 0.18);
-  border-radius: 2px;
-  background: rgba(32, 29, 24, 0.92);
-  box-shadow: 0 10px 28px rgba(28, 26, 23, 0.24);
-  transform: translate(-50%, 0);
-}
-
-.floating-message.compact::before {
-  display: none;
-}
-
-.floating-message.compact span,
-[data-theme="ink"] .workbench:not(.lobby-mode) .floating-message.compact span {
   color: var(--paper-warm);
+  background: transparent;
   font-family: var(--font-ui);
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
-  line-height: 1.45;
-  letter-spacing: 0.06em;
+  line-height: 1.55;
+  letter-spacing: 0.045em;
   text-shadow: none;
 }
 
@@ -4815,20 +4770,10 @@ button:focus-visible {
 
 .floating-message-enter-from {
   opacity: 0;
-  transform: translate(-50%, calc(-50% + 14px)) scale(0.98);
+  transform: translate(-50%, -12px) scale(0.98);
 }
 
 .floating-message-leave-to {
-  opacity: 0;
-  transform: translate(-50%, calc(-50% - 10px)) scale(0.99);
-}
-
-.floating-message.compact.floating-message-enter-from {
-  opacity: 0;
-  transform: translate(-50%, -8px) scale(0.98);
-}
-
-.floating-message.compact.floating-message-leave-to {
   opacity: 0;
   transform: translate(-50%, -8px) scale(0.99);
 }
@@ -5045,28 +4990,6 @@ button:focus-visible {
   box-shadow: 3px 3px 0 #080706;
 }
 
-[data-theme="ink"] .floating-message span {
-  color: #f3ead9;
-  background: transparent;
-  text-shadow:
-    0 1px 2px #181613,
-    0 0 16px #181613;
-}
-
-[data-theme="ink"] .floating-message.is-error span {
-  color: #ffb3a8;
-}
-
-/* Messages over the ink-theme board still sit on the light paper canvas. */
-[data-theme="ink"] .workbench:not(.lobby-mode) .floating-message span {
-  color: #201d18;
-  text-shadow: 0 1px 1px rgba(255, 248, 235, 0.72);
-}
-
-[data-theme="ink"] .workbench:not(.lobby-mode) .floating-message.is-error span {
-  color: #9d3026;
-}
-
 [data-theme="ink"] button:disabled {
   opacity: 0.62;
 }
@@ -5142,7 +5065,6 @@ button:focus-visible {
 
 @media (max-width: 900px) {
   .workbench:not(.lobby-mode) .floating-message {
-    top: 64%;
     left: 50%;
   }
 
@@ -5229,10 +5151,6 @@ button:focus-visible {
 }
 
 @media (max-width: 620px) {
-  .workbench:not(.lobby-mode) .floating-message {
-    top: 69%;
-  }
-
   .undo-request {
     top: 68px;
     align-items: stretch;
