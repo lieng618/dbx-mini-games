@@ -68,6 +68,11 @@ try {
   });
   assert(joined.selfSeat === 1, "second player did not occupy seat two");
 
+  const lobby = await guest.request("lobby.subscribe");
+  assert(lobby.ok, "lobby subscription failed");
+  const started = await owner.request("room.start");
+  assert(started.phase === "playing", "owner could not start the match");
+
   const watched = await watcher.request("room.join", {
     roomId: created.roomId,
     role: "spectator",
@@ -75,11 +80,6 @@ try {
   });
   assert(watched.selfSeat === -1, "spectator unexpectedly occupied a seat");
   assert(watched.members.length === 3, "room membership is incomplete");
-
-  const lobby = await guest.request("lobby.subscribe");
-  assert(lobby.ok, "lobby subscription failed");
-  const started = await owner.request("room.start");
-  assert(started.phase === "playing", "owner could not start the match");
 
   const sequence = [
     [owner, 7 * 15 + 3],
