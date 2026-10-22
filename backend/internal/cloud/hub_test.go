@@ -1,6 +1,7 @@
 package cloud
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -106,6 +107,63 @@ func TestNicknameValidationAndOwnerRoomRename(t *testing.T) {
 		if _, err := hub.Call(ownerID, "profile.save", map[string]any{"nickname": nickname}); err == nil {
 			t.Fatalf("nickname %q was accepted", nickname)
 		}
+	}
+}
+
+func TestInviteAutoJoinPrefersSeatThenSpectatesWhenFull(t *testing.T) {
+	hub := NewHub()
+	ownerID, _ := hub.AddClient("invite-owner-1", "房主", func(string, any) {})
+	guestID, _ := hub.AddClient("invite-guest-1", "来客", func(string, any) {})
+	watchID, _ := hub.AddClient("invite-watch-1", "旁观", func(string, any) {})
+
+	created, err := hub.Call(ownerID, "room.create", map[string]any{
+		"name": "邀请房",
+		"game": "gomoku",
+		"seat": float64(0),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roomID := created.(map[string]any)["roomId"].(string)
+
+	seated, err := hub.Call(guestID, "room.join", map[string]any{
+		"roomId": roomID,
+		"role":   "auto",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seat := seated.(map[string]any)["selfSeat"]; seat != 1 {
+		t.Fatalf("auto invite seat = %v, want 1", seat)
+	}
+
+	watched, err := hub.Call(watchID, "room.join", map[string]any{
+		"roomId": roomID,
+		"role":   "auto",
+	})
+	if err != nil {
+		t.Fatalf("auto invite did not fall back to spectator: %v", err)
+	}
+	if seat := watched.(map[string]any)["selfSeat"]; seat != -1 {
+		t.Fatalf("full-room auto invite seat = %v, want -1", seat)
+	}
+
+	for index := 0; index < room.MaxParticipants-3; index++ {
+		id := fmt.Sprintf("invite-extra-%d", index)
+		hub.AddClient(id, "旁观", func(string, any) {})
+		if _, err := hub.Call(id, "room.join", map[string]any{
+			"roomId": roomID,
+			"role":   "auto",
+		}); err != nil {
+			t.Fatalf("spectator %d could not join: %v", index, err)
+		}
+	}
+	fullID, _ := hub.AddClient("invite-full-1", "满员", func(string, any) {})
+	if _, err := hub.Call(fullID, "room.join", map[string]any{
+		"roomId": roomID,
+		"role":   "auto",
+	}); err == nil {
+		t.Fatal("auto invite admitted a ninth participant")
 	}
 }
 

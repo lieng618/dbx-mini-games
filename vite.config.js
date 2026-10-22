@@ -15,6 +15,9 @@ export default defineConfig(async ({ command }) => {
         command === "build" ? gameServer.websocketUrl : gameServer.localWebsocketUrl,
       ),
       __DBX_LOCAL_GAME_SERVER_URL__: JSON.stringify(gameServer.localWebsocketUrl),
+      __DBX_PUBLIC_ORIGIN__: JSON.stringify(
+        command === "build" ? gameServer.publicOrigin : gameServer.localOrigin,
+      ),
     },
     plugins: [
       vue(),

@@ -399,6 +399,10 @@ func (h *Hub) joinRoomLocked(client *clientState, params map[string]any) (any, e
 	)
 	if role == "spectator" || role == "watch" {
 		member, err = record.room.JoinSpectator(client.id, client.nickname)
+	} else if role == "auto" && !roomHasOpenLobbySeat(record.room) {
+		// A shared room link should still get the visitor into the room when both seats
+		// are occupied. The explicit spectator action remains limited to live matches.
+		member, err = record.room.JoinSpectator(client.id, client.nickname)
 	} else {
 		member, err = record.room.Join(client.id, client.nickname)
 	}
@@ -410,6 +414,18 @@ func (h *Hub) joinRoomLocked(client *clientState, params map[string]any) (any, e
 	h.notifyLobbyLocked()
 	h.notifyRoomLocked(record)
 	return h.snapshotForMemberLocked(record, client.id, member, time.Now()), nil
+}
+
+func roomHasOpenLobbySeat(r *room.Room) bool {
+	if r.Phase() != room.PhaseLobby {
+		return false
+	}
+	for _, seat := range r.Seats() {
+		if seat == "" {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *Hub) leaveRoomLocked(client *clientState) {

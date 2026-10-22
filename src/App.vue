@@ -58,6 +58,7 @@ const lowMotion = ref(Boolean(settings.value.lowMotion));
 const effectsLevel = ref(settings.value.effectsLevel || "full");
 const boardSize = ref(settings.value.boardSize || "standard");
 const theme = ref(settings.value.theme || "paper");
+const pendingInviteRoomId = readInviteRoomId();
 const reducedMotion = computed(() => lowMotion.value || effectsLevel.value !== "full");
 const lobbyRooms = ref([]);
 const lobbyOnline = ref(0);
@@ -540,6 +541,7 @@ async function performJoin(room, joinRole, password) {
     if (reply && typeof reply === "object") applySnapshot(reply);
     joinSubmitting.value = false;
     closeJoinPrompt();
+    clearInviteParam();
     return true;
   } catch (joinError) {
     joinSubmitting.value = false;
@@ -548,6 +550,7 @@ async function performJoin(room, joinRole, password) {
       joinPasswordError.value = message;
     } else {
       error.value = message;
+      clearInviteParam();
     }
     return false;
   }
@@ -570,6 +573,74 @@ function closeJoinPrompt() {
   joinPrompt.value = null;
   joinPassword.value = "";
   joinPasswordError.value = "";
+}
+
+function readInviteRoomId() {
+  try {
+    const value = new URL(window.location.href).searchParams.get("join")?.trim() || "";
+    return /^[A-Za-z0-9_-]{8,64}$/.test(value) ? value : "";
+  } catch {
+    return "";
+  }
+}
+
+function clearInviteParam() {
+  try {
+    const url = new URL(window.location.href);
+    if (!url.searchParams.has("join")) return;
+    url.searchParams.delete("join");
+    window.history.replaceState({}, "", url);
+  } catch {}
+}
+
+async function tryJoinPendingInvite() {
+  if (!pendingInviteRoomId || role.value !== "idle") {
+    if (pendingInviteRoomId) {
+      error.value = "你已经在一个房间里，请先离开当前房间再打开邀请链接";
+      clearInviteParam();
+    }
+    return;
+  }
+  const room = lobbyRooms.value.find((candidate) => candidate.roomId === pendingInviteRoomId);
+  if (!room) {
+    error.value = "邀请房间已关闭或不存在";
+    clearInviteParam();
+    return;
+  }
+  requestJoin(room, "auto");
+}
+
+async function copyInviteLink() {
+  if (!roomId.value) {
+    error.value = "当前没有可邀请的房间";
+    return;
+  }
+  const origin =
+    typeof __DBX_PUBLIC_ORIGIN__ === "string" && __DBX_PUBLIC_ORIGIN__
+      ? __DBX_PUBLIC_ORIGIN__
+      : window.location.origin;
+  const url = new URL(origin);
+  url.searchParams.set("join", roomId.value);
+  const link = url.toString();
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(link);
+    } else {
+      const field = document.createElement("textarea");
+      field.value = link;
+      field.setAttribute("readonly", "");
+      field.style.position = "fixed";
+      field.style.opacity = "0";
+      document.body.appendChild(field);
+      field.select();
+      const copied = document.execCommand("copy");
+      field.remove();
+      if (!copied) throw new Error("clipboard unavailable");
+    }
+    showFloatingMessage("邀请链接已复制，发给好友即可进入", "info", 3600);
+  } catch {
+    error.value = `复制失败，请手动复制：${link}`;
+  }
 }
 
 async function scan() {
@@ -1011,6 +1082,7 @@ onMounted(async () => {
     }
     const snapshot = await call("room.snapshot");
     if (snapshot) applySnapshot(snapshot);
+    await tryJoinPendingInvite();
   } catch (connectionError) {
     error.value = describeError(connectionError?.message || connectionError);
   }
@@ -1130,10 +1202,23 @@ watch(seats, (next, previous) => {
             <span class="room-phase" :class="`phase-${phase}`">{{ phaseLabel }}</span>
           </div>
           <h2>{{ roomName }}</h2>
-          <p class="room-meta">
-            {{ gameLabel(game) }} ·
-            {{ role === "host" ? "房主" : isSeated ? "棋手" : "观战" }}
-          </p>
+          <div class="room-meta-row">
+            <p class="room-meta">
+              {{ gameLabel(game) }} ·
+              {{ role === "host" ? "房主" : isSeated ? "棋手" : "观战" }}
+            </p>
+            <button
+              class="ghost room-invite-button"
+              type="button"
+              title="复制房间邀请链接"
+              @click="copyInviteLink"
+            >
+              <svg aria-hidden="true" viewBox="0 0 20 20">
+                <path d="M7.5 6.5h-1A3.5 3.5 0 0 0 3 10v0a3.5 3.5 0 0 0 3.5 3.5h1M12.5 6.5h1A3.5 3.5 0 0 1 17 10v0a3.5 3.5 0 0 1-3.5 3.5h-1M6.5 10h7" />
+              </svg>
+              邀请好友
+            </button>
+          </div>
         </div>
 
         <dl class="room-details">
@@ -1735,7 +1820,7 @@ watch(seats, (next, previous) => {
           <span class="join-prompt-kicker">私房验证</span>
           <h2 id="join-prompt-title">{{ joinPrompt.room.name }}</h2>
           <p>
-            输入房主设置的密码后{{ joinPrompt.role === "spectator" ? "观战" : "加入" }}。
+            输入房主设置的密码后{{ joinPrompt.role === "spectator" ? "观战" : joinPrompt.role === "auto" ? "进入房间" : "加入" }}。
           </p>
           <label class="join-prompt-field">
             <span>房间密码</span>
@@ -1761,7 +1846,7 @@ watch(seats, (next, previous) => {
               取消
             </button>
             <button type="submit" class="primary" :disabled="joinSubmitting">
-              {{ joinSubmitting ? "正在进入…" : joinPrompt.role === "spectator" ? "进入观战" : "加入房间" }}
+              {{ joinSubmitting ? "正在进入…" : joinPrompt.role === "spectator" ? "进入观战" : joinPrompt.role === "auto" ? "进入房间" : "加入房间" }}
             </button>
           </div>
         </form>
@@ -4985,6 +5070,49 @@ button:focus-visible {
   letter-spacing: 0.04em;
 }
 
+.room-meta-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.room-meta-row .room-meta {
+  min-width: 0;
+}
+
+.room-invite-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  gap: 5px;
+  height: 30px;
+  padding: 0 8px;
+  color: var(--red-deep);
+  border-color: rgba(157, 48, 38, 0.34);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.room-invite-button:hover {
+  color: var(--red-deep);
+  border-color: var(--red-deep);
+  background: rgba(157, 48, 38, 0.06);
+}
+
+.room-invite-button svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 .room-details {
   display: grid;
   margin: 0;
@@ -5386,6 +5514,17 @@ button:focus-visible {
   border-color: rgba(222, 128, 114, 0.34);
 }
 
+[data-theme="ink"] .room-invite-button {
+  color: #ef9b90;
+  border-color: rgba(222, 128, 114, 0.36);
+}
+
+[data-theme="ink"] .room-invite-button:hover {
+  color: #ffb3a8;
+  border-color: #ef9b90;
+  background: rgba(222, 128, 114, 0.1);
+}
+
 [data-theme="ink"] .seat-strip.active .avatar {
   fill: #ef8b7f;
 }
@@ -5724,7 +5863,7 @@ button:focus-visible {
   }
 
   .workbench:not(.lobby-mode) {
-    grid-template-rows: auto minmax(500px, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
     height: 100dvh;
   }
 
