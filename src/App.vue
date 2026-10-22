@@ -500,6 +500,7 @@ async function declineUndo(auto = false) {
 }
 
 async function rematch() {
+  if (role.value !== "host") return;
   scene?.clearEffects();
   await call("game.rematch");
 }
@@ -1475,7 +1476,8 @@ watch(seats, (next, previous) => {
           </dl>
           <p class="mvp-reason">{{ mvp.reason }}</p>
           <div class="mvp-actions">
-            <button class="primary" @click="rematch">再来一局</button>
+            <button v-if="role === 'host'" class="primary" @click="rematch">再来一局</button>
+            <p v-else class="mvp-awaiting">等待房主开始下一局</p>
           </div>
         </div>
       </div>
@@ -3379,6 +3381,14 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
 
 .mvp-actions button {
   min-width: 148px;
+}
+
+.mvp-awaiting {
+  margin: 0;
+  padding: 6px 10px;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  color: rgba(28, 26, 23, 0.52);
 }
 
 @keyframes mvp-fade {
