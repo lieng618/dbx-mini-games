@@ -60,7 +60,7 @@ Support: https://github.com/lieng618/dbx-mini-games/issues
 
 ## Confirmation
 
-- [ ] The candidate package is unsigned and matches the disclosed source tag.
-- [ ] No private keys, tokens, credentials, or proprietary data are included.
-- [ ] The candidate is listed under `candidates/`; `plugins/` and `catalog/`
+- [x] The candidate package is unsigned and matches the disclosed source tag.
+- [x] No private keys, tokens, credentials, or proprietary data are included.
+- [x] The candidate is listed under `candidates/`; `plugins/` and `catalog/`
       were not edited manually.
