@@ -73,8 +73,6 @@ const nickname = ref("");
 const nicknameDraft = ref(bridge.nickname || "");
 const nicknameSaving = ref(false);
 const nicknameError = ref("");
-const nicknameEditing = ref(false);
-const nicknameInput = ref(null);
 const joinPassword = ref("");
 const joinPrompt = ref(null);
 const joinPasswordError = ref("");
@@ -431,10 +429,10 @@ function validateNicknameDraft(value) {
 }
 
 async function saveNickname() {
-  if (!nicknameEditing.value || nicknameSaving.value) return;
+  if (nicknameSaving.value) return;
   const candidate = String(nicknameDraft.value || "").trim();
   if (candidate === nickname.value) {
-    nicknameEditing.value = false;
+    nicknameDraft.value = nickname.value;
     nicknameError.value = "";
     return;
   }
@@ -448,7 +446,6 @@ async function saveNickname() {
     if (reply && typeof reply === "object") applySnapshot(reply);
     nickname.value = reply?.nickname || candidate;
     nicknameDraft.value = nickname.value;
-    nicknameEditing.value = false;
     showFloatingMessage("昵称已更新", "info", 2800);
   } catch (e) {
     nicknameError.value = describeError(e?.message || e);
@@ -457,20 +454,8 @@ async function saveNickname() {
   }
 }
 
-function beginNicknameEdit() {
+function resetNicknameDraft() {
   if (nicknameSaving.value) return;
-  nicknameDraft.value = nickname.value;
-  nicknameError.value = "";
-  nicknameEditing.value = true;
-  void nextTick(() => {
-    nicknameInput.value?.focus();
-    nicknameInput.value?.select();
-  });
-}
-
-function cancelNicknameEdit() {
-  if (nicknameSaving.value) return;
-  nicknameEditing.value = false;
   nicknameDraft.value = nickname.value;
   nicknameError.value = "";
 }
@@ -908,10 +893,6 @@ function dismissMvp() {
 
 function closeResultOnEscape(event) {
   if (event.key !== "Escape") return;
-  if (nicknameEditing.value) {
-    cancelNicknameEdit();
-    return;
-  }
   if (joinPrompt.value) {
     closeJoinPrompt();
     return;
@@ -1298,46 +1279,9 @@ watch(seats, (next, previous) => {
           </div>
 
           <div class="lobby-account">
-            <div class="guest-name-wrap">
-              <input
-                v-if="nicknameEditing"
-                ref="nicknameInput"
-                v-model="nicknameDraft"
-                class="guest-name-input"
-                :class="{ invalid: Boolean(nicknameError) }"
-                type="text"
-                maxlength="12"
-                autocomplete="nickname"
-                autocapitalize="off"
-                spellcheck="false"
-                aria-label="昵称"
-                :aria-invalid="Boolean(nicknameError)"
-                :aria-describedby="nicknameError ? 'nickname-inline-error' : undefined"
-                :disabled="nicknameSaving"
-                @input="nicknameError = ''"
-                @mouseleave="saveNickname"
-                @blur="saveNickname"
-                @keydown.enter.prevent="saveNickname"
-                @keydown.esc.prevent="cancelNicknameEdit"
-              />
-              <button
-                v-else
-                type="button"
-                class="guest-name"
-                title="点击修改昵称"
-                @click="beginNicknameEdit"
-              >
-                {{ nickname || "随机昵称生成中" }}
-              </button>
-              <span
-                v-if="nicknameError"
-                id="nickname-inline-error"
-                class="nickname-inline-error"
-                role="alert"
-              >
-                {{ nicknameError }}
-              </span>
-            </div>
+            <span class="guest-name" aria-label="当前昵称" :title="nickname">
+              {{ nickname || "随机昵称生成中" }}
+            </span>
             <span class="connection-state" :class="{ online: serverConnected }">
               <i aria-hidden="true"></i>
               {{ serverConnected ? "在线" : "连接中" }}
@@ -1619,9 +1563,52 @@ watch(seats, (next, previous) => {
         <section v-show="lobbyTab === 'settings'" class="lobby-view lobby-settings">
           <div class="settings-head">
             <h2>设置</h2>
-            <span>仅本机保存</span>
+            <span>个人资料与显示偏好</span>
           </div>
           <div class="settings-grid">
+            <div class="setting-row setting-nickname-row">
+              <span class="setting-copy">
+                <strong>昵称</strong>
+              </span>
+              <div class="nickname-settings-control">
+                <form class="nickname-settings-form" @submit.prevent="saveNickname">
+                  <input
+                    v-model="nicknameDraft"
+                    :class="{ invalid: Boolean(nicknameError) }"
+                    type="text"
+                    maxlength="12"
+                    autocomplete="nickname"
+                    autocapitalize="off"
+                    spellcheck="false"
+                    aria-label="昵称"
+                    :aria-invalid="Boolean(nicknameError)"
+                    :aria-describedby="nicknameError ? 'nickname-settings-error' : undefined"
+                    :disabled="nicknameSaving"
+                    @input="nicknameError = ''"
+                    @keydown.esc.prevent="resetNicknameDraft"
+                  />
+                  <button
+                    type="submit"
+                    class="nickname-save"
+                    aria-label="保存昵称"
+                    title="保存昵称"
+                    :disabled="nicknameSaving || nicknameDraft.trim() === nickname"
+                  >
+                    <svg aria-hidden="true" viewBox="0 0 20 20">
+                      <path d="m5 10.5 3.2 3.2L15 6.8" />
+                    </svg>
+                  </button>
+                </form>
+                <span
+                  v-if="nicknameError"
+                  id="nickname-settings-error"
+                  class="nickname-settings-error"
+                  role="alert"
+                >
+                  {{ nicknameError }}
+                </span>
+              </div>
+            </div>
             <label class="setting-row">
               <span><strong>低动效</strong></span>
               <input :checked="lowMotion" type="checkbox" @change="toggleLowMotion" />
@@ -4341,70 +4328,106 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
   stroke-linejoin: round;
 }
 
-.guest-name-wrap {
-  position: relative;
-  display: flex;
-  align-items: center;
-  min-width: 0;
-}
-
 .guest-name {
-  height: auto;
+  display: block;
+  min-width: 0;
   max-width: 180px;
   padding: 0;
   overflow: hidden;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
   font-family: var(--font-num);
   font-size: 11px;
   letter-spacing: 0.02em;
   color: var(--soft-text);
   text-overflow: ellipsis;
   white-space: nowrap;
-  cursor: pointer;
 }
 
-.guest-name:hover {
-  color: var(--ink);
-  text-decoration: underline;
-  text-underline-offset: 3px;
+.setting-nickname-row {
+  align-items: flex-start;
+  gap: 24px;
 }
 
-.guest-name-input {
-  width: 140px;
-  height: 32px;
-  padding: 0 8px;
+.setting-nickname-row .setting-copy {
+  flex: 1 1 auto;
+  padding-top: 10px;
+}
+
+.nickname-settings-control {
+  flex: 0 1 248px;
+  width: 248px;
+  min-width: 0;
+}
+
+.nickname-settings-form {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+}
+
+.nickname-settings-form input {
+  flex: 1;
+  min-width: 0;
+  height: 44px;
+  padding: 0 14px;
   color: var(--ink);
-  background: var(--surface);
-  border: 1px solid rgba(188, 138, 61, 0.72);
-  border-radius: 2px;
+  background: rgba(249, 244, 235, 0.42);
+  border: 1px solid rgba(55, 43, 27, 0.25);
+  border-right: 0;
+  border-radius: 0;
   outline: 0;
   font: inherit;
   font-family: var(--font-num);
-  font-size: 12px;
+  font-size: 14px;
+  letter-spacing: 0.02em;
 }
 
-.guest-name-input:focus {
-  box-shadow: 0 0 0 2px rgba(188, 138, 61, 0.2);
+.nickname-settings-form input:focus {
+  position: relative;
+  z-index: 1;
+  border-color: var(--ink);
+  box-shadow: inset 0 0 0 1px var(--ink);
 }
 
-.guest-name-input.invalid {
+.nickname-settings-form input.invalid {
   border-color: var(--red);
 }
 
-.nickname-inline-error {
-  position: absolute;
-  top: calc(100% + 7px);
-  right: 0;
-  z-index: 30;
-  width: max-content;
-  max-width: min(300px, calc(100vw - 28px));
-  padding: 6px 9px;
+.nickname-save {
+  display: grid;
+  place-items: center;
+  flex: 0 0 46px;
+  width: 46px;
+  height: 44px;
+  padding: 0;
+  color: #fffaf0;
+  background: var(--ink);
+  border: 1px solid var(--ink);
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.nickname-save:disabled {
+  color: var(--soft-text);
+  background: rgba(249, 244, 235, 0.42);
+  border-color: rgba(55, 43, 27, 0.25);
+  opacity: 1;
+  box-shadow: none;
+}
+
+.nickname-save svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.nickname-settings-error {
+  display: block;
+  margin-top: 7px;
   color: var(--red-deep);
-  background: var(--paper-warm);
-  border: 1px solid var(--line);
-  box-shadow: var(--shadow-2);
   font-size: 11px;
   line-height: 1.45;
 }
@@ -5501,7 +5524,7 @@ button:focus-visible {
 }
 
 [data-theme="ink"] .join-prompt-error,
-[data-theme="ink"] .nickname-inline-error,
+[data-theme="ink"] .nickname-settings-error,
 [data-theme="ink"] .move-clock.urgent,
 [data-theme="ink"] .move-clock.urgent strong,
 [data-theme="ink"] .seat-strip-clock.low {
@@ -5607,6 +5630,33 @@ button:focus-visible {
   color: #fffaf0;
   background: #98372d;
   border-color: #d76d61;
+}
+
+[data-theme="ink"] .nickname-settings-form input {
+  color: #f3ead9;
+  background: rgba(255, 248, 235, 0.055);
+  border-color: rgba(243, 234, 217, 0.26);
+}
+
+[data-theme="ink"] .nickname-settings-form input:focus {
+  border-color: #e4d8c5;
+  box-shadow: inset 0 0 0 1px #e4d8c5;
+}
+
+[data-theme="ink"] .nickname-settings-form input.invalid {
+  border-color: #de8072;
+}
+
+[data-theme="ink"] .nickname-save {
+  color: #fffaf0;
+  background: #98372d;
+  border-color: #d76d61;
+}
+
+[data-theme="ink"] .nickname-save:disabled {
+  color: #b7ad9d;
+  background: rgba(255, 248, 235, 0.055);
+  border-color: rgba(243, 234, 217, 0.16);
 }
 
 [data-theme="ink"] .choice-check {
@@ -6164,13 +6214,20 @@ button:focus-visible {
     white-space: nowrap;
   }
 
-  .guest-name-wrap {
-    max-width: min(116px, 28vw);
+  .setting-nickname-row {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 10px;
   }
 
-  .guest-name-input {
-    width: 100%;
-    min-width: 92px;
+  .setting-nickname-row .setting-copy {
+    padding-top: 0;
+  }
+
+  .nickname-settings-control {
+    align-self: flex-start;
+    width: min(248px, 100%);
+    flex-basis: auto;
   }
 
   .connection-state {
