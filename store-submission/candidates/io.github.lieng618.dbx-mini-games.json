@@ -30,8 +30,8 @@
     {
       "target": "universal",
       "url": "https://github.com/lieng618/dbx-mini-games/releases/download/v0.4.1/io.github.lieng618.dbx-mini-games-0.4.1-universal.dbxp",
-      "sha256": "db658e7f819b58e0e962fa4fc460f733361e31c8ca9ab29b41046f808ffe2412",
-      "size": 260039
+      "sha256": "7b8d3ae27b37d72a0cd5dbf59a36e2bf7e9f300c01e14c250fa2f4d83ae596f2",
+      "size": 260025
     }
   ]
 }
