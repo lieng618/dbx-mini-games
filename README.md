@@ -31,11 +31,11 @@ Source:    https://github.com/lieng618/dbx-mini-games
 
 | 大厅 | 创建房间 |
 | --- | --- |
-| ![公共大厅](screenshots/store-01-lobby.png) | ![创建房间](screenshots/store-02-create-room.png) |
+| ![新版公共大厅](screenshots/store-01-lobby.png) | ![创建房间与计时设置](screenshots/store-02-create-room.png) |
 
 | 五子棋 | 中国象棋 |
 | --- | --- |
-| ![五子棋对局](screenshots/store-06-gomoku-match.png) | ![中国象棋对局](screenshots/store-10-xiangqi-move.png) |
+| ![五子棋对局与操作栏](screenshots/store-06-gomoku-match.png) | ![中国象棋上一手高亮](screenshots/store-10-xiangqi-move.png) |
 
 更多商店截图和用途见 [`screenshots/README.md`](screenshots/README.md)。
 隐私和支持说明见 [`PRIVACY.md`](PRIVACY.md)、[`SUPPORT.md`](SUPPORT.md)。
