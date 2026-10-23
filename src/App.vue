@@ -1334,23 +1334,6 @@ watch(seats, (next, previous) => {
             <span class="room-phase" :class="`phase-${phase}`">{{ phaseLabel }}</span>
           </div>
           <h2>{{ roomName }}</h2>
-          <div class="room-meta-row">
-            <p class="room-meta">
-              {{ gameLabel(game) }} ·
-              {{ role === "host" ? "房主" : isSeated ? "棋手" : "观战" }}
-            </p>
-            <button
-              class="ghost room-invite-button"
-              type="button"
-              title="复制房间邀请链接"
-              @click="copyInviteLink"
-            >
-              <svg aria-hidden="true" viewBox="0 0 20 20">
-                <path d="M7.5 6.5h-1A3.5 3.5 0 0 0 3 10v0a3.5 3.5 0 0 0 3.5 3.5h1M12.5 6.5h1A3.5 3.5 0 0 1 17 10v0a3.5 3.5 0 0 1-3.5 3.5h-1M6.5 10h7" />
-              </svg>
-              邀请好友
-            </button>
-          </div>
         </div>
 
         <dl class="room-details">
@@ -1363,6 +1346,18 @@ watch(seats, (next, previous) => {
             <dd>{{ timeControlLabel }}</dd>
           </div>
         </dl>
+
+        <button
+          class="ghost room-invite-button"
+          type="button"
+          title="复制房间邀请链接"
+          @click="copyInviteLink"
+        >
+          <svg aria-hidden="true" viewBox="0 0 20 20">
+            <path d="M7.5 6.5h-1A3.5 3.5 0 0 0 3 10v0a3.5 3.5 0 0 0 3.5 3.5h1M12.5 6.5h1A3.5 3.5 0 0 1 17 10v0a3.5 3.5 0 0 1-3.5 3.5h-1M6.5 10h7" />
+          </svg>
+          邀请好友
+        </button>
 
         <div v-if="spectators.length" class="spectators">
           <span class="spectator-label">观战 {{ spectators.length }} 人</span>
@@ -5532,30 +5527,12 @@ button:focus-visible {
   color: var(--ink);
 }
 
-.room-meta {
-  margin: 0;
-  color: var(--soft-text);
-  font-size: 12px;
-  line-height: 1.5;
-  letter-spacing: 0.04em;
-}
-
-.room-meta-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.room-meta-row .room-meta {
-  min-width: 0;
-}
-
 .room-invite-button {
   position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  align-self: center;
   flex: 0 0 auto;
   gap: 5px;
   height: 32px;
@@ -5953,6 +5930,18 @@ button:focus-visible {
   background-size: 64px 64px, 64px 64px, auto;
 }
 
+[data-theme="ink"] .workbench:not(.lobby-mode) > .stage {
+  background-color: #181613;
+}
+
+[data-theme="ink"] .workbench:not(.lobby-mode) > .rail-actions {
+  border-top-color: rgba(243, 234, 217, 0.16);
+  background: rgba(32, 29, 24, 0.96);
+  box-shadow: 0 -12px 30px rgba(0, 0, 0, 0.24);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+}
+
 [data-theme="ink"] .lobby-topbar {
   background: transparent;
   border-bottom-color: rgba(243, 234, 217, 0.22);
@@ -6008,6 +5997,14 @@ button:focus-visible {
   border-color: rgba(222, 128, 114, 0.34);
   background: rgba(43, 39, 33, 0.8);
   box-shadow: 0 16px 38px rgba(0, 0, 0, 0.3);
+}
+
+[data-theme="ink"] .join-prompt-card {
+  border-color: rgba(243, 234, 217, 0.22);
+  background:
+    linear-gradient(135deg, rgba(255, 248, 235, 0.055), transparent 48%),
+    #2b2721;
+  box-shadow: 8px 8px 0 rgba(0, 0, 0, 0.34), var(--shadow-3);
 }
 
 [data-theme="ink"] .undo-request-copy > span {
@@ -6071,6 +6068,16 @@ button:focus-visible {
   border-color: transparent;
   box-shadow: none;
   text-decoration-color: currentColor;
+}
+
+[data-theme="ink"] .chip {
+  color: #d8cebc;
+  border-color: rgba(243, 234, 217, 0.2);
+}
+
+[data-theme="ink"] .move-clock {
+  color: #d0c5b2;
+  background: rgba(255, 248, 235, 0.06);
 }
 
 [data-theme="ink"] .seat-strip.active .avatar {
@@ -6221,6 +6228,12 @@ button:focus-visible {
   background: rgba(255, 248, 235, 0.065);
   border-color: rgba(243, 234, 217, 0.68);
   box-shadow: none;
+}
+
+[data-theme="ink"] .rail-actions .last-move-action.active {
+  color: #f0a095;
+  border-color: rgba(212, 162, 74, 0.56);
+  background: rgba(212, 162, 74, 0.14);
 }
 
 [data-theme="ink"] .rail-actions .resign-action,
@@ -6569,6 +6582,7 @@ button:focus-visible {
     height: 100dvh;
     --mobile-board-height: 1.12;
     --mobile-board-width-guard: 0.79;
+    --mobile-board-clearance: 48px;
   }
 
   .workbench:not(.lobby-mode) .stage {
@@ -6637,6 +6651,7 @@ button:focus-visible {
     grid-template-areas:
       "summary"
       "details"
+      "invite"
       "spectators"
       "clock";
     gap: 3px;
@@ -6675,14 +6690,9 @@ button:focus-visible {
     white-space: nowrap;
   }
 
-  .workbench:not(.lobby-mode) .room-meta {
-    overflow: hidden;
-    font-size: 11px;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
   .workbench:not(.lobby-mode) .room-invite-button {
+    grid-area: invite;
+    justify-self: center;
     height: 32px;
     padding-inline: 2px;
   }
@@ -6943,8 +6953,8 @@ button:focus-visible {
     overflow: hidden;
   }
 
-  /* Fit the 16:9 scene by height. The board is centred inside the scene, so the
-     unused side margins are clipped while the whole board remains visible. */
+  /* Fit the 16:9 scene by height. On short phones the final cap yields space around
+     the board for both player cards, while tall screens keep the roomier default. */
   .workbench:not(.lobby-mode) .canvas-host canvas {
     position: absolute;
     top: 50%;
@@ -6953,7 +6963,8 @@ button:focus-visible {
     height: 100% !important;
     height: min(
       calc(100cqh * var(--mobile-board-height)),
-      calc(100cqw / var(--mobile-board-width-guard))
+      calc(100cqw / var(--mobile-board-width-guard)),
+      calc(100cqh - var(--mobile-board-clearance))
     ) !important;
     max-width: none !important;
     max-height: none !important;
