@@ -17,6 +17,8 @@ const VOICES = {
   landHeavy: { noise: 0.06, gain: 0.6, body: 132, bodyGain: 0.55, q: 0.9 },
   /** A piece swept off the board: bright, dry, brief. */
   capture: { noise: 0.11, gain: 0.42, body: 240, bodyGain: 0.2, q: 1.8 },
+  /** A heavy piece lost: a deep pressure wave with a long cut through it. */
+  keyCapture: { noise: 0.26, gain: 0.54, body: 82, bodyGain: 0.58, q: 0.62, ring: 1.18 },
   /** Cannon: a short low pressure wave behind the high wood impact. */
   cannon: { noise: 0.2, gain: 0.52, body: 112, bodyGain: 0.38, q: 0.65, ring: 0.34 },
   /** River: a wide, soft brush of noise rather than a pitched impact. */

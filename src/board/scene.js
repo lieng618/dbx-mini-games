@@ -614,15 +614,15 @@ export class BoardScene {
             }
             // A short, tight wave on the struck square: the board takes the hit locally.
             this.pulseShock(move.to, {
-              amplitude: 22,
-              wavelength: 105,
-              speed: 900,
-              duration: 0.46,
+              amplitude: keyCapture ? 44 : 22,
+              wavelength: keyCapture ? 190 : 105,
+              speed: keyCapture ? 780 : 900,
+              duration: keyCapture ? 0.68 : 0.46,
             });
           }
-          this.audio.play("capture", {
-            pitch: keyCapture ? 0.78 : 1,
-            volume: keyCapture ? 1.08 : 1,
+          this.audio.play(keyCapture ? "keyCapture" : "capture", {
+            pitch: keyCapture ? 0.9 : 1,
+            volume: keyCapture ? 1.12 : 1,
           });
           tap(keyCapture ? [12, 34, 20] : [10, 24, 14]);
         });

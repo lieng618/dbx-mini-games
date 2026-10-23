@@ -119,7 +119,7 @@ test("low-motion capture still shows that the piece broke", () => {
   shatter.destroy();
 });
 
-test("heavy-piece captures rise into a full-board tear", () => {
+test("heavy-piece captures rise and shatter across the full board", () => {
   assert.equal(isCinematicCapture(PIECE.rook), true);
   assert.equal(isCinematicCapture(PIECE.horse), true);
   assert.equal(isCinematicCapture(PIECE.cannon), true);
@@ -140,7 +140,31 @@ test("heavy-piece captures rise into a full-board tear", () => {
     angle: 0,
     seed: 31,
   });
-  assert.equal(effect.halves.length, 2);
+  assert.equal(effect.fragments.length, 50);
+  assert.equal(effect.cracks.length, 32);
+  assert.equal(effect.strikes.length, 15);
+  assert.equal(effect.seal, undefined);
+  assert.ok(effect.debris.length >= 38);
+  const strikeQuadrants = new Set(
+    effect.strikes.map(
+      (strike) =>
+        `${strike.points[0].x < effect.center.x ? "L" : "R"}${
+          strike.points[0].y < effect.center.y ? "T" : "B"
+        }`,
+    ),
+  );
+  assert.ok(strikeQuadrants.size >= 2);
+  assert.ok(
+    effect.strikes.some((strike) => {
+      const first = strike.points[0];
+      const last = strike.points[strike.points.length - 1];
+      const middle = strike.points[Math.floor(strike.points.length / 2)];
+      const dx = last.x - first.x;
+      const dy = last.y - first.y;
+      return Math.abs(dx * (middle.y - first.y) - dy * (middle.x - first.x)) > 20;
+    }),
+  );
+  assert.ok(effect.debris.every((particle) => particle.x === effect.center.x));
   effect.update(0.16);
   assert.ok(effect.hero.x > 300);
   assert.ok(effect.hero.x < effect.center.x);
@@ -151,12 +175,26 @@ test("heavy-piece captures rise into a full-board tear", () => {
   assert.ok(effect.caption.alpha > 0);
 
   effect.update(0.18);
-  assert.ok(effect.halves.some((half) => Math.abs(half.group.position.y) > 1));
+  assert.ok(effect.fragments.some((fragment) => Math.abs(fragment.group.position.y) > 1));
   assert.ok(effect.threads.context.instructions.length > 0);
+  assert.ok(effect.inkCloud.context.instructions.length > 0);
+  assert.ok(effect.lightning.context.instructions.length > 0);
+  assert.ok(effect.shock.context.instructions.length > 0);
+  assert.ok(effect.shards.context.instructions.length > 0);
+  assert.equal(effect.intact.alpha, 0);
+  const sample = effect.fragments[0];
+  const fallenFrom = sample.group.position.y;
+  effect.update(0.42);
+  assert.ok(sample.group.position.y > fallenFrom + 20);
+  assert.ok(sample.fall > 0);
+  const scrimBefore = effect.scrim.alpha;
+  effect.update(0.42);
+  assert.ok(effect.scrim.alpha < scrimBefore);
+  assert.ok(effect.scrim.alpha > 0);
   effect.destroy();
 });
 
-test("heavy-piece cinematic has a static reduced-motion tear", () => {
+test("heavy-piece cinematic has a quiet reduced-motion shatter", () => {
   const effect = new KeyCaptureCinematicEffect({
     start: { x: 300, y: 620 },
     width: 1600,
@@ -172,8 +210,17 @@ test("heavy-piece cinematic has a static reduced-motion tear", () => {
   effect.update(0.38);
   assert.equal(effect.hero.x, effect.center.x);
   assert.equal(effect.threads.context.instructions.length, 0);
-  assert.ok(effect.halves.every((half) => Math.abs(half.group.position.x) < 14));
-  assert.ok(effect.halves.every((half) => half.group.rotation === 0));
+  assert.equal(effect.lightning.context.instructions.length, 0);
+  assert.equal(effect.shock.context.instructions.length, 0);
+  assert.equal(effect.shards.context.instructions.length, 0);
+  assert.ok(
+    effect.fragments.every(
+      (fragment) =>
+        Math.hypot(fragment.group.position.x, fragment.group.position.y) < 32 &&
+        fragment.group.rotation === 0 &&
+        fragment.group.visible,
+    ),
+  );
   effect.destroy();
 });
 
