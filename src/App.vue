@@ -115,9 +115,13 @@ const inputMoveSeconds = ref(0);
 const inputSeat = ref(0);
 
 const boardHost = ref(null);
+const boardColumn = ref(null);
+const railActions = ref(null);
 const canvasFailed = ref(false);
 let scene = null;
 let sceneInitPromise = null;
+let seatLayoutFrame = 0;
+let seatResizeObserver = null;
 let hiddenAt = 0;
 let resumeInFlight = false;
 let floatingTimer = null;
@@ -1081,6 +1085,49 @@ function handleWindowFocus() {
   if (document.visibilityState === "visible") scene?.resume();
 }
 
+function syncSeatLayout() {
+  seatLayoutFrame = 0;
+  const column = boardColumn.value;
+  const boardRect = scene?.getBoardVisualRect();
+  if (!column || !boardRect) return;
+
+  const columnRect = column.getBoundingClientRect();
+  const isPhone = window.matchMedia("(max-width: 620px)").matches;
+  const actionsRect = railActions.value?.getBoundingClientRect();
+  if (!columnRect.height || !actionsRect?.height) return;
+
+  const farCenter = (columnRect.top + boardRect.top) / 2;
+  const bottomBoundary = actionsRect.top;
+  const nearCenter = (boardRect.bottom + bottomBoundary) / 2;
+
+  if (isPhone) {
+    column.style.removeProperty("--seat-far-offset");
+    column.style.removeProperty("--seat-near-offset");
+    column.style.setProperty("--seat-far-top", `${farCenter - columnRect.top}px`);
+    column.style.setProperty("--seat-near-top", `${nearCenter - columnRect.top}px`);
+    return;
+  }
+
+  const farSeat = column.querySelector(".seat-strip.far");
+  const nearSeat = column.querySelector(".seat-strip.near");
+  if (!farSeat || !nearSeat) return;
+  const layoutCenter = (element) => {
+    const parentTop = element.offsetParent?.getBoundingClientRect().top ?? columnRect.top;
+    return parentTop + element.offsetTop + element.offsetHeight / 2;
+  };
+  const farBaseCenter = layoutCenter(farSeat);
+  const nearBaseCenter = layoutCenter(nearSeat);
+
+  column.style.removeProperty("--seat-far-top");
+  column.style.removeProperty("--seat-near-top");
+  column.style.setProperty("--seat-far-offset", `${farCenter - farBaseCenter}px`);
+  column.style.setProperty("--seat-near-offset", `${nearCenter - nearBaseCenter}px`);
+}
+
+function scheduleSeatLayout() {
+  if (!seatLayoutFrame) seatLayoutFrame = window.requestAnimationFrame(syncSeatLayout);
+}
+
 async function ensureScene() {
   if (scene) return scene;
   if (sceneInitPromise) return sceneInitPromise;
@@ -1099,6 +1146,7 @@ async function ensureScene() {
         window.__dbxClock = () => JSON.parse(JSON.stringify(clock.value));
       }
       paint();
+      scheduleSeatLayout();
     } catch (sceneError) {
       canvasFailed.value = true;
       console.warn("board renderer unavailable", sceneError);
@@ -1114,11 +1162,18 @@ onMounted(async () => {
   document.addEventListener("visibilitychange", handleVisibilityChange);
   window.addEventListener("focus", handleWindowFocus);
   window.addEventListener("pageshow", handleVisibilityChange);
+  window.addEventListener("resize", scheduleSeatLayout);
 
   await whenReady();
   ready.value = true;
 
   await ensureScene();
+  if (typeof ResizeObserver !== "undefined") {
+    seatResizeObserver = new ResizeObserver(scheduleSeatLayout);
+    if (boardHost.value) seatResizeObserver.observe(boardHost.value);
+    if (railActions.value) seatResizeObserver.observe(railActions.value);
+  }
+  scheduleSeatLayout();
 
   startClockTimers();
   startEvents();
@@ -1144,7 +1199,12 @@ onBeforeUnmount(() => {
   window.removeEventListener("keydown", closeResultOnEscape);
   window.removeEventListener("focus", handleWindowFocus);
   window.removeEventListener("pageshow", handleVisibilityChange);
+  window.removeEventListener("resize", scheduleSeatLayout);
   document.removeEventListener("visibilitychange", handleVisibilityChange);
+  seatResizeObserver?.disconnect();
+  seatResizeObserver = null;
+  if (seatLayoutFrame) window.cancelAnimationFrame(seatLayoutFrame);
+  seatLayoutFrame = 0;
   clearTimeout(undoTimer);
   undoTimer = null;
   clearTimeout(lastMovePreviewTimer);
@@ -1167,6 +1227,7 @@ watch(game, (next) => {
   if (scene) {
     scene.setGame(next);
     scene.setFlipped(shouldFlipBoard(next, mySeat.value));
+    scheduleSeatLayout();
   }
   else void ensureScene();
 });
@@ -1185,7 +1246,10 @@ watch(
 // so the same coordinate is visible in the same place on both screens.
 watch(mySeat, (seat) => {
   scene?.setFlipped(shouldFlipBoard(game.value, seat));
+  scheduleSeatLayout();
 });
+
+watch(phase, scheduleSeatLayout, { flush: "post" });
 
 watch([undoRequestedBy, moveCount, phase, undoRemainingMs], ([nextBy, nextMoves, nextPhase], [previousBy, previousMoves]) => {
   clearTimeout(undoTimer);
@@ -1312,42 +1376,45 @@ watch(seats, (next, previous) => {
         </div>
 
       </section>
-
-      <!-- Room actions stay outside the scrolling details so the primary next step is
-           always visible, especially when the browser viewport is short. -->
-      <div class="actions rail-actions">
-        <button v-if="phase === 'lobby' && role === 'host'" class="primary" @click="startMatch">
-          开始对局
-        </button>
-        <button
-          v-if="phase === 'playing' || phase === 'practice' || phase === 'finished'"
-          class="ghost last-move-action"
-          :class="{ active: lastMovePreviewActive }"
-          type="button"
-          :disabled="!hasLastMove"
-          aria-label="标出上一手，持续高亮四秒"
-          title="高亮棋盘上的上一手，持续四秒"
-          @click="previewLastMove"
-        >
-          上一手
-        </button>
-        <button
-          v-if="phase === 'playing' && isSeated"
-          class="ghost undo-action"
-          :disabled="!canRequestUndo"
-          @click="requestUndo"
-        >
-          {{ isUndoRequester ? "等待悔棋" : "悔棋" }}
-        </button>
-        <button v-if="phase === 'playing' && isSeated" class="ghost" @click="resign">认输</button>
-        <button v-if="phase === 'finished' && role === 'host'" class="primary" @click="rematch">再来一局</button>
-        <button class="ghost" @click="leaveRoom">{{ role === "host" ? "结束房间" : "离开" }}</button>
-        <span class="visually-hidden" role="status" aria-live="polite" aria-atomic="true">
-          {{ lastMoveAnnouncement }}
-        </span>
-      </div>
-
     </aside>
+
+    <!-- Room actions stay outside both the scrolling details and the board so they can occupy
+         a stable side rail on desktop and the bottom edge on smaller screens. -->
+    <div v-show="role !== 'idle'" ref="railActions" class="actions rail-actions">
+      <button v-if="phase === 'lobby' && role === 'host'" class="primary" @click="startMatch">
+        开始对局
+      </button>
+      <button
+        v-if="phase === 'playing' || phase === 'practice' || phase === 'finished'"
+        class="ghost last-move-action"
+        :class="{ active: lastMovePreviewActive }"
+        type="button"
+        :disabled="!hasLastMove"
+        aria-label="标出上一手，持续高亮四秒"
+        title="高亮棋盘上的上一手，持续四秒"
+        @click="previewLastMove"
+      >
+        上一手
+      </button>
+      <button
+        v-if="phase === 'playing' && isSeated"
+        class="ghost undo-action"
+        :disabled="!canRequestUndo"
+        @click="requestUndo"
+      >
+        {{ isUndoRequester ? "等待悔棋" : "悔棋" }}
+      </button>
+      <button v-if="phase === 'playing' && isSeated" class="ghost resign-action" @click="resign">
+        认输
+      </button>
+      <button v-if="phase === 'finished' && role === 'host'" class="primary" @click="rematch">再来一局</button>
+      <button class="ghost room-leave-action" @click="leaveRoom">
+        {{ role === "host" ? "结束房间" : "离开" }}
+      </button>
+      <span class="visually-hidden" role="status" aria-live="polite" aria-atomic="true">
+        {{ lastMoveAnnouncement }}
+      </span>
+    </div>
 
     <main class="stage" :class="{ 'lobby-stage': role === 'idle' }">
       <section v-if="role === 'idle'" class="lobby-screen">
@@ -1370,45 +1437,51 @@ watch(seats, (next, previous) => {
           </div>
 
           <div class="lobby-account">
-            <span class="guest-name" aria-label="当前昵称" :title="nickname">
-              {{ nickname || "随机昵称生成中" }}
-            </span>
-            <span class="connection-state" :class="{ online: serverConnected }">
-              <i aria-hidden="true"></i>
-              {{ serverConnected ? "在线" : "连接中" }}
-            </span>
-            <span
-              v-if="serverConnected"
-              class="lobby-population"
-              role="status"
-              aria-live="polite"
-              :aria-label="`当前大厅 ${lobbyOnline} 人`"
-              title="当前大厅在线人数"
-            >
-              <svg aria-hidden="true" viewBox="0 0 24 24">
-                <circle cx="9" cy="8" r="3" />
-                <path d="M3.5 19c.5-4 2.4-6 5.5-6s5 2 5.5 6M16 6.5a3 3 0 0 1 0 5.8M17 13c2.2.4 3.4 2.3 3.5 5" />
-              </svg>
-              <span class="lobby-population-label">大厅</span>
-              <strong>{{ lobbyOnline }}</strong>
-              <span class="lobby-population-unit">人</span>
-            </span>
-            <button
-              type="button"
-              class="lobby-settings-button"
-              :class="{ active: lobbyTab === 'settings' }"
-              :aria-label="lobbyTab === 'settings' ? '返回房间列表' : '设置'"
-              :title="lobbyTab === 'settings' ? '返回房间列表' : '设置'"
-              @click="lobbyTab = lobbyTab === 'settings' ? 'rooms' : 'settings'"
-            >
-              <svg aria-hidden="true" viewBox="0 0 24 24">
-                <path d="M4 7h9M17 7h3M4 17h3M11 17h9M4 12h4M12 12h8" />
-                <circle cx="15" cy="7" r="2" />
-                <circle cx="9" cy="17" r="2" />
-                <circle cx="10" cy="12" r="2" />
-              </svg>
-            </button>
+            <div class="account-profile">
+              <span class="guest-name" aria-label="当前昵称" :title="nickname">
+                {{ nickname || "随机昵称生成中" }}
+              </span>
+            </div>
+            <div class="account-meta">
+              <span class="connection-state" :class="{ online: serverConnected }">
+                <i aria-hidden="true"></i>
+                {{ serverConnected ? "在线" : "连接中" }}
+              </span>
+              <span
+                v-if="serverConnected"
+                class="lobby-population"
+                role="status"
+                aria-live="polite"
+                :aria-label="`当前大厅 ${lobbyOnline} 人`"
+                title="当前大厅在线人数"
+              >
+                <svg aria-hidden="true" viewBox="0 0 24 24">
+                  <circle cx="9" cy="8" r="3" />
+                  <path d="M3.5 19c.5-4 2.4-6 5.5-6s5 2 5.5 6M16 6.5a3 3 0 0 1 0 5.8M17 13c2.2.4 3.4 2.3 3.5 5" />
+                </svg>
+                <span class="lobby-population-label">大厅</span>
+                <strong>{{ lobbyOnline }}</strong>
+                <span class="lobby-population-unit">人</span>
+              </span>
+            </div>
           </div>
+          <button
+            type="button"
+            class="lobby-settings-button"
+            :class="{ active: lobbyTab === 'settings' }"
+            :aria-label="lobbyTab === 'settings' ? '返回房间列表' : '设置'"
+            :aria-expanded="lobbyTab === 'settings'"
+            :title="lobbyTab === 'settings' ? '返回房间列表' : '设置'"
+            @click="lobbyTab = lobbyTab === 'settings' ? 'rooms' : 'settings'"
+          >
+            <svg aria-hidden="true" viewBox="0 0 24 24">
+              <path d="M4 7h9M17 7h3M4 17h3M11 17h9M4 12h4M12 12h8" />
+              <circle cx="15" cy="7" r="2" />
+              <circle cx="9" cy="17" r="2" />
+              <circle cx="10" cy="12" r="2" />
+            </svg>
+            <span class="settings-label">{{ lobbyTab === "settings" ? "返回" : "设置" }}</span>
+          </button>
         </header>
 
         <main class="lobby-main">
@@ -1769,7 +1842,7 @@ watch(seats, (next, previous) => {
       <div v-show="role !== 'idle'" class="room-stage">
       <!-- Seats flank the board so the players are placed around the table rather than
            listed away in the sidebar. Each one carries the person, the name and the clock. -->
-      <div class="board-col">
+      <div ref="boardColumn" class="board-col">
         <!-- Seats sit across the table, not beside it. Xiangqi puts the viewer's own side
              near; Gomoku keeps seat zero near for both players so their boards match. -->
         <aside
@@ -3562,6 +3635,14 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
 .seat-strip.near { grid-area: near; }
 .seat-strip.far { grid-area: far; }
 
+.board-col .seat-strip.far {
+  transform: translateY(var(--seat-far-offset, 0px));
+}
+
+.board-col .seat-strip.near {
+  transform: translateY(var(--seat-near-offset, 0px));
+}
+
 .seat-strip.active {
   border-color: rgba(176, 58, 46, 0.45);
   box-shadow: var(--shadow-2);
@@ -4215,7 +4296,7 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
 
 .lobby-topbar {
   display: grid;
-  grid-template-columns: auto 1fr;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   gap: 34px;
   align-items: center;
   padding: 15px 0 17px;
@@ -4324,7 +4405,27 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
 }
 
 .lobby-account {
-  gap: 14px;
+  display: grid;
+  justify-self: end;
+  gap: 4px;
+  min-width: 180px;
+  margin-left: 0;
+}
+
+.account-profile {
+  display: flex;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+}
+
+.account-meta {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: 0;
+  gap: 10px;
 }
 
 .lobby-settings-button,
@@ -4342,7 +4443,19 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
 }
 
 .lobby-settings-button {
-  margin-left: 4px;
+  display: inline-flex;
+  width: auto;
+  min-width: 88px;
+  height: 46px;
+  margin-left: 0;
+  padding: 0 13px;
+  gap: 7px;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
 }
 
 .lobby-form-back {
@@ -4395,7 +4508,6 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
   font-variant-numeric: tabular-nums;
 }
 
-.lobby-settings-button:hover,
 .lobby-form-back:hover {
   color: var(--ink);
   background: rgba(247, 240, 228, 0.5);
@@ -4403,16 +4515,23 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
   transform: none;
 }
 
+.lobby-settings-button:hover {
+  color: var(--red-deep);
+  background: transparent;
+  border-color: transparent;
+  transform: none;
+}
+
 .lobby-settings-button.active {
-  color: #fffaf0;
-  background: var(--red-deep);
-  border-color: var(--red-deep);
+  color: var(--red-deep);
+  background: transparent;
+  border-color: transparent;
 }
 
 .lobby-settings-button svg,
 .lobby-form-back svg {
-  width: 18px;
-  height: 18px;
+  width: 17px;
+  height: 17px;
   fill: none;
   stroke: currentColor;
   stroke-width: 1.6;
@@ -4423,14 +4542,22 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
 .guest-name {
   display: block;
   min-width: 0;
-  max-width: 180px;
+  max-width: 260px;
   padding: 0;
   overflow: hidden;
-  font-family: var(--font-num);
-  font-size: 11px;
-  letter-spacing: 0.02em;
-  color: var(--soft-text);
+  color: var(--ink);
+  background: transparent;
+  border: 0;
+  font-family: var(--font-ui);
+  font-size: 16px;
+  font-weight: 400;
+  line-height: 1.3;
+  letter-spacing: 0.015em;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-label {
   white-space: nowrap;
 }
 
@@ -5083,7 +5210,7 @@ button:focus-visible {
 
 .rail {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 24px;
   min-height: 0;
   padding: 28px 26px 30px;
@@ -5324,6 +5451,35 @@ button:focus-visible {
   background: rgba(214, 177, 102, 0.14);
 }
 
+.rail-actions .ghost {
+  background: transparent;
+  box-shadow: none;
+}
+
+.rail-actions .ghost:not(:disabled):hover {
+  background: rgba(83, 64, 40, 0.055);
+  border-color: rgba(48, 38, 26, 0.52);
+  box-shadow: none;
+  transform: none;
+}
+
+.rail-actions .ghost:not(:disabled):active {
+  background: rgba(83, 64, 40, 0.09);
+  transform: translate(1px, 1px);
+}
+
+.rail-actions .resign-action,
+.rail-actions .room-leave-action {
+  color: var(--red-deep);
+  border-color: rgba(157, 48, 38, 0.34);
+}
+
+.rail-actions .resign-action:not(:disabled):hover,
+.rail-actions .room-leave-action:not(:disabled):hover {
+  color: var(--red);
+  border-color: rgba(157, 48, 38, 0.58);
+}
+
 .visually-hidden {
   position: absolute;
   width: 1px;
@@ -5453,15 +5609,15 @@ button:focus-visible {
 }
 
 .workbench[data-board-size="compact"] {
-  --board-fit: 0.8;
+  --board-fit: 0.92;
 }
 
 .workbench[data-board-size="standard"] {
-  --board-fit: 0.9;
+  --board-fit: 1.05;
 }
 
 .workbench[data-board-size="large"] {
-  --board-fit: 1;
+  --board-fit: 1.18;
 }
 
 .controls {
@@ -5719,19 +5875,20 @@ button:focus-visible {
 
 [data-theme="ink"] .lobby-settings-button {
   color: #d8cebc;
-  border-color: rgba(243, 234, 217, 0.28);
+  background: transparent;
+  border-color: transparent;
 }
 
 [data-theme="ink"] .lobby-settings-button:hover {
   color: #fffaf0;
-  background: rgba(255, 248, 235, 0.07);
-  border-color: rgba(243, 234, 217, 0.5);
+  background: transparent;
+  border-color: transparent;
 }
 
 [data-theme="ink"] .lobby-settings-button.active {
-  color: #fffaf0;
-  background: #98372d;
-  border-color: #c85e52;
+  color: #ef9b90;
+  background: transparent;
+  border-color: transparent;
 }
 
 [data-theme="ink"] .lobby-form-back {
@@ -5830,6 +5987,29 @@ button:focus-visible {
   border-color: #f3ead9;
 }
 
+[data-theme="ink"] .rail-actions .ghost {
+  background: transparent;
+  box-shadow: none;
+}
+
+[data-theme="ink"] .rail-actions .ghost:not(:disabled):hover {
+  background: rgba(255, 248, 235, 0.065);
+  border-color: rgba(243, 234, 217, 0.68);
+  box-shadow: none;
+}
+
+[data-theme="ink"] .rail-actions .resign-action,
+[data-theme="ink"] .rail-actions .room-leave-action {
+  color: #ef9b90;
+  border-color: rgba(239, 155, 144, 0.42);
+}
+
+[data-theme="ink"] .rail-actions .resign-action:not(:disabled):hover,
+[data-theme="ink"] .rail-actions .room-leave-action:not(:disabled):hover {
+  color: #ffb3a8;
+  border-color: rgba(255, 179, 168, 0.72);
+}
+
 [data-theme="ink"] .primary,
 [data-theme="ink"] .lobby-main .primary {
   color: #fffaf0;
@@ -5910,6 +6090,45 @@ button:focus-visible {
   .workbench:not(.lobby-mode) {
     grid-template-columns: 304px minmax(0, 1fr);
   }
+
+  .workbench:not(.lobby-mode) > .rail {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .workbench:not(.lobby-mode) > .stage {
+    grid-column: 2;
+    grid-row: 1;
+    padding-bottom: 70px;
+    background-color: #e8dece;
+    background-image:
+      linear-gradient(90deg, rgba(69, 54, 36, 0.035) 1px, transparent 1px),
+      linear-gradient(rgba(69, 54, 36, 0.035) 1px, transparent 1px);
+    background-size: 52px 52px;
+  }
+
+  .workbench:not(.lobby-mode) > .rail-actions {
+    position: fixed;
+    right: 0;
+    bottom: 8px;
+    left: 304px;
+    z-index: 20;
+    justify-content: center;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    width: auto;
+    padding: 8px 12px;
+    border-top: 1px solid var(--line-soft);
+    gap: 8px;
+  }
+
+  .workbench:not(.lobby-mode) > .rail-actions button {
+    flex: 0 1 110px;
+    width: 110px;
+    min-height: 44px;
+    padding-inline: 12px;
+    font-size: 13px;
+  }
 }
 
 @media (max-width: 1040px) {
@@ -5930,7 +6149,12 @@ button:focus-visible {
 
 @media (max-width: 900px) {
   .workbench:not(.lobby-mode) {
+    grid-template-columns: minmax(0, 1fr);
     grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .workbench:not(.lobby-mode) .stage {
+    padding-bottom: calc(70px + env(safe-area-inset-bottom, 0px));
   }
 
   .workbench:not(.lobby-mode) .floating-message {
@@ -5949,9 +6173,16 @@ button:focus-visible {
 
   .lobby-topbar {
     grid-template-columns: 1fr auto;
+    grid-template-areas:
+      "brand settings"
+      "account account";
     gap: 14px 20px;
     padding: 14px 0 12px;
     border-radius: 0;
+  }
+
+  .lobby-brand {
+    grid-area: brand;
   }
 
   .lobby-nav {
@@ -5972,7 +6203,28 @@ button:focus-visible {
   }
 
   .lobby-account {
+    grid-area: account;
+    grid-template-areas: "profile meta";
+    grid-template-columns: minmax(0, 1fr) auto;
+    width: 100%;
+    padding-top: 10px;
+    border-top: 1px solid var(--line-soft);
     margin-left: 0;
+  }
+
+  .account-profile {
+    grid-area: profile;
+    justify-content: flex-start;
+  }
+
+  .account-meta {
+    grid-area: meta;
+    justify-content: flex-end;
+  }
+
+  .lobby-settings-button {
+    grid-area: settings;
+    align-self: center;
   }
 
   .lobby-main {
@@ -6035,11 +6287,25 @@ button:focus-visible {
   }
 
   .workbench:not(.lobby-mode) .rail-actions {
-    grid-column: 1 / -1;
-    grid-row: 3;
-    align-self: end;
-    min-height: max-content;
-    padding-top: 10px;
+    position: fixed;
+    right: 0;
+    bottom: 8px;
+    left: 0;
+    z-index: 20;
+    justify-content: center;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    width: 100%;
+    padding: 8px 12px calc(8px + env(safe-area-inset-bottom, 0px));
+    border-top: 1px solid var(--line-soft);
+    gap: 8px;
+  }
+
+  .workbench:not(.lobby-mode) .rail-actions button {
+    flex: 0 1 auto;
+    min-height: 44px;
+    padding-inline: 12px;
+    font-size: 12px;
   }
 }
 
@@ -6063,6 +6329,10 @@ button:focus-visible {
     --mobile-board-width-guard: 0.79;
   }
 
+  .workbench:not(.lobby-mode) .stage {
+    padding-bottom: calc(70px + env(safe-area-inset-bottom, 0px));
+  }
+
   .workbench[data-game="gomoku"]:not(.lobby-mode) {
     --mobile-board-width-guard: 0.895;
   }
@@ -6076,11 +6346,12 @@ button:focus-visible {
   }
 
   .workbench:not(.lobby-mode) .rail {
-    grid-template-columns: minmax(0, 1fr) auto;
-    grid-template-rows: auto auto;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto auto;
     grid-template-areas:
-      "head actions"
-      "panel panel";
+      "head"
+      "panel"
+      "actions";
     gap: 6px 10px;
     max-height: none;
     padding: 8px 12px 10px;
@@ -6183,13 +6454,14 @@ button:focus-visible {
 
   .workbench:not(.lobby-mode) .room-details > div {
     align-items: baseline;
+    justify-content: center;
     flex-direction: row;
-    gap: 5px;
-    padding: 3px 0;
+    gap: 8px;
+    padding: 5px 8px;
+    text-align: center;
   }
 
   .workbench:not(.lobby-mode) .room-details > div + div {
-    padding-left: 8px;
     border-top: 0;
     border-left: 1px solid var(--line-soft);
   }
@@ -6202,7 +6474,7 @@ button:focus-visible {
 
   .workbench:not(.lobby-mode) .room-details dd {
     font-size: 12px;
-    text-align: left;
+    text-align: center;
     white-space: nowrap;
   }
 
@@ -6251,12 +6523,19 @@ button:focus-visible {
 
   .workbench:not(.lobby-mode) .rail-actions {
     grid-area: actions;
-    align-self: center;
+    align-self: stretch;
+    position: fixed;
+    right: 0;
+    bottom: 8px;
+    left: 0;
+    z-index: 20;
+    justify-content: center;
     flex-direction: row;
     flex-wrap: nowrap;
-    padding: 0;
-    border-top: 0;
-    gap: 6px;
+    width: 100%;
+    padding: 8px 12px calc(8px + env(safe-area-inset-bottom, 0px));
+    border-top: 1px solid var(--line-soft);
+    gap: 8px;
   }
 
   .workbench:not(.lobby-mode) .rail-actions button {
@@ -6271,32 +6550,146 @@ button:focus-visible {
   }
 
   .workbench:not(.lobby-mode) .board-col {
-    gap: 4px;
+    position: relative;
+    gap: 0;
     padding: 4px 8px 8px;
   }
 
   .workbench:not(.lobby-mode) .seat-strip {
-    gap: 8px;
-    min-width: min(220px, 70vw);
+    position: absolute;
+    left: 50%;
+    z-index: 2;
+    grid-area: auto;
+    gap: 7px;
+    width: max-content;
+    max-width: calc(100vw - 48px);
+    min-width: 0;
     min-height: 38px;
-    padding: 4px 12px;
+    padding: 2px 4px;
+    overflow: visible;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+    transform: translate(-50%, -50%);
+  }
+
+  .workbench:not(.lobby-mode) .seat-strip.far {
+    top: var(--seat-far-top, 12%);
+  }
+
+  .workbench:not(.lobby-mode) .seat-strip.near {
+    top: var(--seat-near-top, 88%);
+  }
+
+  .workbench:not(.lobby-mode) .seat-strip::before {
+    display: none;
+  }
+
+  .workbench:not(.lobby-mode) .seat-strip.active {
+    border: 0;
+    box-shadow: none;
+  }
+
+  .workbench:not(.lobby-mode) .seat-strip.mine {
+    background: transparent;
+  }
+
+  .workbench:not(.lobby-mode) .seat-strip.empty {
+    border: 0;
+    background: transparent;
+    box-shadow: none;
+  }
+
+  .workbench:not(.lobby-mode) .seat-strip.empty::before {
+    display: none;
   }
 
   .workbench:not(.lobby-mode) .avatar {
-    width: 20px;
-    height: 24px;
-  }
-
-  .workbench:not(.lobby-mode) .seat-panel-name {
-    font-size: 13px;
+    width: 26px;
+    height: 30px;
+    padding: 3px;
+    border: 1px solid rgba(92, 73, 49, 0.16);
+    border-radius: 50%;
+    background: rgba(255, 252, 246, 0.7);
   }
 
   .workbench:not(.lobby-mode) .seat-panel-tag {
+    padding: 4px 7px;
+    border: 1px solid rgba(91, 72, 47, 0.2);
+    border-radius: 4px;
+    background: rgba(255, 251, 243, 0.52);
     font-size: 10px;
+    line-height: 1;
+    letter-spacing: 0.08em;
+  }
+
+  .workbench:not(.lobby-mode) .seat-panel-name {
+    min-width: 0;
+    font-size: 14px;
+    font-weight: 700;
+  }
+
+  .workbench:not(.lobby-mode) .seat-self {
+    padding: 3px 6px;
+    color: #fffaf0;
+    border-color: var(--red-deep);
+    border-radius: 3px;
+    background: var(--red-deep);
   }
 
   .workbench:not(.lobby-mode) .seat-strip-clock {
-    font-size: 13px;
+    margin-left: auto;
+    padding: 2px 0 2px 10px;
+    border-left: 1px solid rgba(91, 72, 47, 0.2);
+    font-size: 14px;
+  }
+
+  [data-theme="ink"] .workbench:not(.lobby-mode) .seat-strip {
+    border: 0;
+    background: transparent;
+    box-shadow: none;
+  }
+
+  [data-theme="ink"] .workbench:not(.lobby-mode) .seat-strip::before {
+    display: none;
+  }
+
+  [data-theme="ink"] .workbench:not(.lobby-mode) .seat-strip.active {
+    border: 0;
+    box-shadow: none;
+  }
+
+  [data-theme="ink"] .workbench:not(.lobby-mode) .seat-strip.active::before {
+    display: none;
+  }
+
+  [data-theme="ink"] .workbench:not(.lobby-mode) .seat-strip.mine {
+    background: transparent;
+  }
+
+  [data-theme="ink"] .workbench:not(.lobby-mode) .seat-strip.empty {
+    border: 0;
+    background: transparent;
+  }
+
+  [data-theme="ink"] .workbench:not(.lobby-mode) .avatar {
+    border-color: rgba(243, 234, 217, 0.14);
+    background: rgba(255, 248, 235, 0.05);
+  }
+
+  [data-theme="ink"] .workbench:not(.lobby-mode) .seat-panel-tag {
+    border-color: rgba(243, 234, 217, 0.17);
+    background: rgba(255, 248, 235, 0.05);
+  }
+
+  [data-theme="ink"] .workbench:not(.lobby-mode) .seat-self {
+    border-color: #b4473c;
+    background: #8d2e25;
+  }
+
+  [data-theme="ink"] .workbench:not(.lobby-mode) .seat-strip-clock {
+    border-left-color: rgba(243, 234, 217, 0.15);
   }
 
   .workbench:not(.lobby-mode) .canvas-host {
@@ -6342,15 +6735,20 @@ button:focus-visible {
   }
 
   .lobby-account {
-    gap: 6px;
+    gap: 4px 8px;
   }
 
   .guest-name {
     display: block;
-    max-width: min(96px, 20vw);
+    max-width: 100%;
     overflow: hidden;
+    font-size: 15px;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .account-profile {
+    gap: 6px;
   }
 
   .setting-nickname-row {
@@ -6385,9 +6783,12 @@ button:focus-visible {
   }
 
   .lobby-settings-button {
-    width: 36px;
-    height: 36px;
+    width: auto;
+    min-width: 78px;
+    height: 44px;
+    padding: 0 10px;
     margin-left: 0;
+    font-size: 12px;
   }
 
   .lobby-nav {
@@ -6471,4 +6872,5 @@ button:focus-visible {
     width: 100%;
   }
 }
+
 </style>

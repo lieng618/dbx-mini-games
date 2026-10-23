@@ -161,6 +161,29 @@ export class BoardScene {
     this.drawLastMoveAnchor(this.currentLastMove, { force: true });
   }
 
+  /**
+   * Returns the board's visible frame in viewport coordinates.
+   *
+   * The scene canvas is larger than the drawn paper so effects have room around the board.
+   * Mobile controls need the actual frame bounds rather than the canvas bounds to sit in the
+   * gaps around the board.
+   */
+  getBoardVisualRect() {
+    if (!this.boardBounds || !this.app?.canvas) return null;
+    const canvasRect = this.app.canvas.getBoundingClientRect();
+    if (!canvasRect.width || !canvasRect.height) return null;
+
+    const frame = 34;
+    const scaleX = canvasRect.width / LOGICAL_WIDTH;
+    const scaleY = canvasRect.height / LOGICAL_HEIGHT;
+    return {
+      left: canvasRect.left + (this.boardBounds.left - frame) * scaleX,
+      top: canvasRect.top + (this.boardBounds.top - frame) * scaleY,
+      right: canvasRect.left + (this.boardBounds.left + this.boardBounds.width + frame) * scaleX,
+      bottom: canvasRect.top + (this.boardBounds.top + this.boardBounds.height + frame) * scaleY,
+    };
+  }
+
   /** Draws the static board: frame, grid, palace diagonals, river. */
   drawBoard() {
     this.boardLayer.removeChildren().forEach((child) => child.destroy({ children: true }));
