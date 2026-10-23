@@ -64,6 +64,138 @@ func TestCloudRoomJoinSpectateAndStart(t *testing.T) {
 	}
 }
 
+func TestCloudRoomScoreFollowsTrackSettingAndRematch(t *testing.T) {
+	hub := NewHub()
+	ownerID, _ := hub.AddClient("score-owner", "松间客", func(string, any) {})
+	guestID, _ := hub.AddClient("score-guest", "夜航", func(string, any) {})
+
+	created, err := hub.Call(ownerID, "room.create", map[string]any{
+		"name": "计分房", "game": "gomoku", "seat": float64(0), "trackScore": true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial := created.(map[string]any)
+	if initial["trackScore"] != true || initial["score"] != [room.SeatCount]int{} {
+		t.Fatalf("initial score snapshot = %#v", initial)
+	}
+	roomID := initial["roomId"].(string)
+	if _, err := hub.Call(guestID, "room.join", map[string]any{"roomId": roomID}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hub.Call(ownerID, "room.start", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hub.Call(guestID, "game.resign", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	view, err := hub.Call(ownerID, "room.snapshot", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := view.(map[string]any)["score"]; got != [room.SeatCount]int{1, 0} {
+		t.Fatalf("score after win = %#v", got)
+	}
+	if _, err := hub.Call(ownerID, "game.rematch", nil); err != nil {
+		t.Fatal(err)
+	}
+	view, err = hub.Call(ownerID, "room.snapshot", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := view.(map[string]any)["score"]; got != [room.SeatCount]int{1, 0} {
+		t.Fatalf("rematch cleared the score: %#v", got)
+	}
+}
+
+func TestCloudRoomLeavesScoreOffByDefault(t *testing.T) {
+	hub := NewHub()
+	ownerID, _ := hub.AddClient("no-score-owner", "房主", func(string, any) {})
+	view, err := hub.Call(ownerID, "room.create", map[string]any{
+		"name": "普通房", "game": "gomoku",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := view.(map[string]any)
+	if snapshot["trackScore"] != false || snapshot["score"] != [room.SeatCount]int{} {
+		t.Fatalf("score-off snapshot = %#v", snapshot)
+	}
+}
+
+func TestCloudPlayersCanSwapSeatsBeforeTheMatch(t *testing.T) {
+	hub := NewHub()
+	ownerID, _ := hub.AddClient("swap-owner", "先手", func(string, any) {})
+	guestID, _ := hub.AddClient("swap-guest", "后手", func(string, any) {})
+	created, err := hub.Call(ownerID, "room.create", map[string]any{
+		"name": "换位房", "game": "gomoku", "seat": float64(0),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roomID := created.(map[string]any)["roomId"].(string)
+	if _, err := hub.Call(guestID, "room.join", map[string]any{"roomId": roomID}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hub.Call(guestID, "room.swap.request", nil); err != nil {
+		t.Fatalf("the second player could not request a swap: %v", err)
+	}
+	ownerView, err := hub.Call(ownerID, "room.snapshot", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending := ownerView.(map[string]any)["swapRequestedBy"]; pending != guestID {
+		t.Fatalf("owner did not see the swap request: %#v", pending)
+	}
+	if _, err := hub.Call(ownerID, "room.swap.consent", nil); err != nil {
+		t.Fatalf("the opponent could not approve the swap: %v", err)
+	}
+	view, err := hub.Call(guestID, "room.snapshot", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seat := view.(map[string]any)["selfSeat"]; seat != 0 {
+		t.Fatalf("guest seat after swap = %v, want 0", seat)
+	}
+	if _, err := hub.Call(ownerID, "room.start", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hub.Call(ownerID, "room.swap.request", nil); err == nil {
+		t.Fatal("seats could be swapped after the match started")
+	}
+}
+
+func TestCloudSeatSwapRequestExpiresWithoutConsent(t *testing.T) {
+	hub := NewHub()
+	ownerID, _ := hub.AddClient("swap-expire-owner", "先手", func(string, any) {})
+	guestID, _ := hub.AddClient("swap-expire-guest", "后手", func(string, any) {})
+	created, err := hub.Call(ownerID, "room.create", map[string]any{
+		"name": "换位超时", "game": "gomoku",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roomID := created.(map[string]any)["roomId"].(string)
+	if _, err := hub.Call(guestID, "room.join", map[string]any{"roomId": roomID}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hub.Call(ownerID, "room.swap.request", nil); err != nil {
+		t.Fatal(err)
+	}
+	hub.expireClocks(time.Now().Add(undoDecisionTimeout + time.Second))
+	view, err := hub.Call(ownerID, "room.snapshot", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, pending := view.(map[string]any)["swapRequestedBy"]; pending {
+		t.Fatal("seat swap request did not expire")
+	}
+	if got := view.(map[string]any)["seats"]; got != (room.Seats{"swap-expire-owner", "swap-expire-guest"}) {
+		t.Fatalf("seats changed after an unanswered request: %v", got)
+	}
+}
+
 func TestNicknameValidationAndOwnerRoomRename(t *testing.T) {
 	hub := NewHub()
 	ownerID, _ := hub.AddClient("nickname-owner-1", "创建者", func(string, any) {})

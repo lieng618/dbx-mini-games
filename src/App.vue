@@ -8,7 +8,13 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import { BoardScene } from "./board/scene.js";
 import { createBridge, whenReady } from "./bridge.js";
 import { reconcileLastMove } from "./snapshot.js";
-import { clearLegacyRecords, loadSettings, saveSettings } from "./storage.js";
+import {
+  clearLegacyRecords,
+  loadCreateRoomSettings,
+  loadSettings,
+  saveCreateRoomSettings,
+  saveSettings,
+} from "./storage.js";
 
 const GAMES = [
   { id: "xiangqi", name: "中国象棋" },
@@ -46,10 +52,12 @@ const NICKNAME_PATTERN = /^[\p{L}\p{N}_-]{2,12}$/u;
 const bridge = createBridge();
 const ready = ref(false);
 const settings = ref(loadSettings());
+const createRoomDefaults = loadCreateRoomSettings();
 const role = ref("idle");
 const roomId = ref(null);
 const roomName = ref("");
 const game = ref("xiangqi");
+const inputGame = ref(createRoomDefaults.game);
 const phase = ref("lobby");
 const members = ref([]);
 const seats = ref(["", ""]);
@@ -88,6 +96,11 @@ const checkFocus = ref(null);
 const result = ref(null);
 const winLine = ref([]);
 const clock = ref(null);
+const scoreTracking = ref(false);
+const roomScore = ref([0, 0]);
+const swapRequestedBy = ref("");
+const swapRequestedSeat = ref(-1);
+const swapRemainingMs = ref(0);
 const undoRequestedBy = ref("");
 const undoRequestedSeat = ref(-1);
 const undoRemainingMs = ref(0);
@@ -99,6 +112,8 @@ const lastMoveAnnouncement = ref("");
 let clockBase = null;
 let clockBaseAt = 0;
 let undoTimer = null;
+let swapRequestTimer = null;
+let swapSeatsBefore = null;
 let lastMovePreviewTimer = null;
 // The practice partner's seat, or -1. Kept separate from `seats` because the partner is
 // not a member: it has a seat but no id, no nickname and no connection.
@@ -107,12 +122,13 @@ const aiThinking = ref(false);
 const moveCount = ref(0);
 
 const inputPassword = ref("");
-const passwordEnabled = ref(false);
+const passwordEnabled = ref(createRoomDefaults.passwordEnabled);
 const showPassword = ref(false);
 // Time control chosen before the table exists. 0 means "no limit" for either field.
-const inputMinutes = ref(0);
-const inputMoveSeconds = ref(0);
-const inputSeat = ref(0);
+const inputMinutes = ref(createRoomDefaults.minutes);
+const inputMoveSeconds = ref(createRoomDefaults.moveSeconds);
+const inputSeat = ref(createRoomDefaults.seat);
+const inputScoreTracking = ref(createRoomDefaults.scoring);
 
 const boardHost = ref(null);
 const boardColumn = ref(null);
@@ -121,6 +137,7 @@ const canvasFailed = ref(false);
 let scene = null;
 let sceneInitPromise = null;
 let seatLayoutFrame = 0;
+let seatLayoutTimer = 0;
 let seatResizeObserver = null;
 let hiddenAt = 0;
 let resumeInFlight = false;
@@ -164,9 +181,17 @@ function seatActive(seat) {
 }
 
 /** How a seat is named on the board, which depends on the game. */
-function sideName(seat) {
-  if (game.value === "xiangqi") return seat === 0 ? "红方 · 先手" : "黑方 · 后手";
+function sideNameFor(gameId, seat) {
+  if (gameId === "xiangqi") return seat === 0 ? "红方 · 先手" : "黑方 · 后手";
   return seat === 0 ? "黑棋 · 先手" : "白棋 · 后手";
+}
+
+function sideName(seat) {
+  return sideNameFor(game.value, seat);
+}
+
+function inputSideName(seat) {
+  return sideNameFor(inputGame.value, seat);
 }
 
 /** True while the practice partner holds the turn. */
@@ -191,6 +216,23 @@ const canRequestUndo = computed(
     !undoPending.value &&
     moveCount.value > 0 &&
     (cells.value.turnSeat ?? -1) !== mySeat.value,
+);
+const swapPending = computed(() => Boolean(swapRequestedBy.value));
+const isSwapRequester = computed(() => swapRequestedBy.value === selfId.value);
+const isSwapRecipient = computed(() => swapPending.value && isSeated.value && !isSwapRequester.value);
+const swapRequesterName = computed(() => {
+  if (swapRequestedSeat.value < 0) return "对手";
+  return seatMembers.value[swapRequestedSeat.value]?.nickname || seatLabel(swapRequestedSeat.value);
+});
+const showRoomScore = computed(
+  () => scoreTracking.value && (phase.value === "playing" || phase.value === "finished"),
+);
+const canSwapSeats = computed(
+  () =>
+    phase.value === "lobby" &&
+    isSeated.value &&
+    seats.value.every(Boolean) &&
+    !swapPending.value,
 );
 const phaseLabel = computed(() => {
   if (phase.value === "playing") return "对局中";
@@ -266,8 +308,13 @@ function applySnapshot(snapshot) {
     undoRequestedBy.value = "";
     undoRequestedSeat.value = -1;
     undoRemainingMs.value = 0;
+    swapRequestedBy.value = "";
+    swapRequestedSeat.value = -1;
+    swapRemainingMs.value = 0;
     result.value = null;
     winLine.value = [];
+    scoreTracking.value = false;
+    roomScore.value = [0, 0];
     lastMove.value = null;
     clock.value = null;
     clockBase = null;
@@ -277,6 +324,14 @@ function applySnapshot(snapshot) {
   }
   if (Array.isArray(snapshot.members)) members.value = snapshot.members;
   if (Array.isArray(snapshot.seats)) seats.value = snapshot.seats;
+  if (typeof snapshot.trackScore === "boolean") scoreTracking.value = snapshot.trackScore;
+  if (
+    Array.isArray(snapshot.score) &&
+    snapshot.score.length === 2 &&
+    snapshot.score.every((value) => Number.isFinite(Number(value)))
+  ) {
+    roomScore.value = snapshot.score.map((value) => Math.max(0, Math.floor(Number(value))));
+  }
   if (snapshot.clock) {
     clockBase = JSON.parse(JSON.stringify(snapshot.clock));
     clockBaseAt = Date.now();
@@ -302,6 +357,16 @@ function applySnapshot(snapshot) {
     undoRemainingMs.value = Number.isFinite(Number(snapshot.undoRemainingMs))
       ? Math.max(0, Number(snapshot.undoRemainingMs))
       : snapshot.undoRequestedBy
+        ? 20000
+        : 0;
+    swapRequestedBy.value =
+      typeof snapshot.swapRequestedBy === "string" ? snapshot.swapRequestedBy : "";
+    swapRequestedSeat.value = Number.isFinite(Number(snapshot.swapRequestedSeat))
+      ? Number(snapshot.swapRequestedSeat)
+      : -1;
+    swapRemainingMs.value = Number.isFinite(Number(snapshot.swapRemainingMs))
+      ? Math.max(0, Number(snapshot.swapRemainingMs))
+      : swapRequestedBy.value
         ? 20000
         : 0;
     inCheck.value = snapshot.inCheck === true;
@@ -378,6 +443,9 @@ function describeError(raw) {
     ["no move to undo", "现在没有可以撤回的棋"],
     ["only the player who made the last move may request an undo", "只能撤回自己刚下的最后一手"],
     ["only the opponent can answer an undo request", "只有对手可以处理这次悔棋请求"],
+    ["a seat swap request is already pending", "已有交换位置请求等待处理"],
+    ["no seat swap request is pending", "交换位置请求已失效"],
+    ["only the opponent can answer a seat swap request", "只有对手可以处理这次交换位置请求"],
     ["not hosting a room", "当前没有房间，请先开桌"],
     ["already hosting or joined a room", "你已经在一个房间里了"],
     ["you are already in a room", "你已经在一个房间里了"],
@@ -499,8 +567,22 @@ watch(nickname, (value) => {
   nicknameDraft.value = value;
 });
 
+watch(
+  [inputGame, inputSeat, passwordEnabled, inputMinutes, inputMoveSeconds, inputScoreTracking],
+  () => {
+    saveCreateRoomSettings({
+      game: inputGame.value,
+      seat: inputSeat.value,
+      minutes: inputMinutes.value,
+      moveSeconds: inputMoveSeconds.value,
+      scoring: inputScoreTracking.value,
+      passwordEnabled: passwordEnabled.value,
+    });
+  },
+);
+
 async function createRoom() {
-  const roomName = `${nickname.value || "棋友"}的${game.value === "xiangqi" ? "象棋室" : "五子棋室"}`;
+  const roomName = `${nickname.value || "棋友"}的${inputGame.value === "xiangqi" ? "象棋室" : "五子棋室"}`;
   const roomPassword = String(inputPassword.value || "").trim();
   if (passwordEnabled.value && !roomPassword) {
     error.value = "请输入房间密码，或切换为公开房间";
@@ -508,11 +590,12 @@ async function createRoom() {
   }
   await call("room.create", {
     name: roomName,
-    game: game.value,
+    game: inputGame.value,
     password: passwordEnabled.value ? roomPassword : "",
     minutes: Number(inputMinutes.value) || 0,
     moveSeconds: Number(inputMoveSeconds.value) || 0,
     seat: Number(inputSeat.value),
+    trackScore: inputScoreTracking.value,
   });
 }
 
@@ -659,6 +742,22 @@ async function startMatch() {
   await call("room.start");
 }
 
+async function requestSwap() {
+  if (!canSwapSeats.value) return;
+  await call("room.swap.request");
+}
+
+async function consentSwap() {
+  if (!isSwapRecipient.value) return;
+  await call("room.swap.consent");
+}
+
+async function declineSwap(auto = false) {
+  if (!isSwapRecipient.value) return;
+  const reply = await call("room.swap.decline");
+  if (reply && auto) showFloatingMessage("交换位置请求已超时", "info", 2600);
+}
+
 /** Opens a solo board so one player can look at the table and its effects. */
 async function startPractice() {
   scene?.clearEffects();
@@ -762,6 +861,11 @@ async function leaveRoom() {
   cells.value = {};
   lastMove.value = null;
   result.value = null;
+  scoreTracking.value = false;
+  roomScore.value = [0, 0];
+  swapRequestedBy.value = "";
+  swapRequestedSeat.value = -1;
+  swapRemainingMs.value = 0;
   members.value = [];
   seats.value = ["", ""];
   undoRequestedBy.value = "";
@@ -1129,7 +1233,20 @@ function syncSeatLayout() {
 }
 
 function scheduleSeatLayout() {
-  if (!seatLayoutFrame) seatLayoutFrame = window.requestAnimationFrame(syncSeatLayout);
+  if (seatLayoutFrame) window.cancelAnimationFrame(seatLayoutFrame);
+  clearTimeout(seatLayoutTimer);
+  // Wait one more frame so responsive CSS, the canvas box, and the fixed action bar have
+  // all settled before their bounds are measured. This keeps seat cards aligned after a
+  // rotation or a live desktop-to-phone resize.
+  seatLayoutFrame = window.requestAnimationFrame(() => {
+    seatLayoutFrame = window.requestAnimationFrame(syncSeatLayout);
+  });
+  // Canvas scaling can settle a little after the CSS breakpoint. Measure again after that
+  // pass so the seat cards cannot retain their old desktop positions.
+  seatLayoutTimer = window.setTimeout(() => {
+    seatLayoutTimer = 0;
+    syncSeatLayout();
+  }, 180);
 }
 
 async function ensureScene() {
@@ -1207,12 +1324,15 @@ onBeforeUnmount(() => {
   window.removeEventListener("pageshow", handleVisibilityChange);
   window.removeEventListener("resize", scheduleSeatLayout);
   document.removeEventListener("visibilitychange", handleVisibilityChange);
+  clearTimeout(seatLayoutTimer);
   seatResizeObserver?.disconnect();
   seatResizeObserver = null;
   if (seatLayoutFrame) window.cancelAnimationFrame(seatLayoutFrame);
   seatLayoutFrame = 0;
   clearTimeout(undoTimer);
   undoTimer = null;
+  clearTimeout(swapRequestTimer);
+  swapRequestTimer = null;
   clearTimeout(lastMovePreviewTimer);
   lastMovePreviewTimer = null;
   if (mvpTimer) clearTimeout(mvpTimer);
@@ -1280,6 +1400,33 @@ watch([undoRequestedBy, moveCount, phase, undoRemainingMs], ([nextBy, nextMoves,
   }
 });
 
+watch([swapRequestedBy, phase, swapRemainingMs], ([nextBy], [previousBy]) => {
+  clearTimeout(swapRequestTimer);
+  swapRequestTimer = null;
+
+  if (nextBy) {
+    if (!previousBy) swapSeatsBefore = seats.value.slice();
+    if (nextBy !== selfId.value && isSeated.value) {
+      swapRequestTimer = setTimeout(() => {
+        swapRequestTimer = null;
+        void declineSwap(true);
+      }, Math.max(250, swapRemainingMs.value + 1000));
+    }
+    return;
+  }
+  if (!previousBy || !swapSeatsBefore) return;
+
+  const swapped =
+    seats.value[0] === swapSeatsBefore[1] &&
+    seats.value[1] === swapSeatsBefore[0];
+  showFloatingMessage(
+    swapped ? "双方已同意交换位置" : "交换位置请求未通过",
+    "info",
+    3000,
+  );
+  swapSeatsBefore = null;
+});
+
 // Membership IDs are stable across nickname edits and reconnects. Only announce members
 // that are genuinely new to this client, and never announce the viewer joining the room.
 watch(members, (next, previous) => {
@@ -1323,8 +1470,25 @@ watch(seats, (next, previous) => {
   >
     <aside v-show="role !== 'idle'" class="rail">
       <header class="rail-head">
-        <div class="brand">棋牌小馆</div>
-        <p class="brand-sub">云端棋室</p>
+        <div class="brand-block">
+          <div class="brand">棋牌小馆</div>
+          <p class="brand-sub">云端棋室</p>
+        </div>
+        <div
+          v-if="showRoomScore"
+          class="room-score"
+          :aria-label="`比分：${seatLabel(0)} ${roomScore[0]} 比 ${roomScore[1]} ${seatLabel(1)}`"
+        >
+          <div class="room-score-names" aria-hidden="true">
+            <span>{{ seatLabel(0) }}</span>
+            <span>{{ seatLabel(1) }}</span>
+          </div>
+          <div class="room-score-values" aria-hidden="true">
+            <strong>{{ roomScore[0] }}</strong>
+            <span>:</span>
+            <strong>{{ roomScore[1] }}</strong>
+          </div>
+        </div>
       </header>
 
       <section class="panel">
@@ -1382,7 +1546,20 @@ watch(seats, (next, previous) => {
     <!-- Room actions stay outside both the scrolling details and the board so they can occupy
          a stable side rail on desktop and the bottom edge on smaller screens. -->
     <div v-show="role !== 'idle'" ref="railActions" class="actions rail-actions">
-      <button v-if="phase === 'lobby' && role === 'host'" class="primary" @click="startMatch">
+      <button
+        v-if="phase === 'lobby' && isSeated && seats.every(Boolean)"
+        class="ghost"
+        :disabled="!canSwapSeats"
+        @click="requestSwap"
+      >
+        {{ isSwapRequester ? "等待交换" : "交换位置" }}
+      </button>
+      <button
+        v-if="phase === 'lobby' && role === 'host'"
+        class="primary"
+        :disabled="swapPending"
+        @click="startMatch"
+      >
         开始对局
       </button>
       <button
@@ -1594,7 +1771,7 @@ watch(seats, (next, previous) => {
             </button>
             <span class="lobby-kicker">新开一席</span>
             <h2>创建房间</h2>
-            <p>定下棋种、执方和用时时长，邀请朋友入座。</p>
+            <p>制定规则，邀请朋友入座。</p>
           </header>
           <div class="lobby-form-grid">
             <div class="field">
@@ -1605,11 +1782,11 @@ watch(seats, (next, previous) => {
                   :key="item.id"
                   type="button"
                   class="time-option"
-                  :class="{ on: game === item.id }"
-                  @click="game = item.id"
+                  :class="{ on: inputGame === item.id }"
+                  @click="inputGame = item.id"
                 >
                   <span>{{ item.name }}</span>
-                  <svg v-if="game === item.id" class="choice-check" aria-hidden="true" viewBox="0 0 20 20">
+                  <svg v-if="inputGame === item.id" class="choice-check" aria-hidden="true" viewBox="0 0 20 20">
                     <path d="m5 10.5 3.2 3.2L15 6.8" />
                   </svg>
                 </button>
@@ -1619,13 +1796,13 @@ watch(seats, (next, previous) => {
               <span>执方</span>
               <div class="side-pick">
                 <button type="button" class="time-option" :class="{ on: inputSeat === 0 }" @click="inputSeat = 0">
-                  <span>{{ sideName(0) }}</span>
+                  <span>{{ inputSideName(0) }}</span>
                   <svg v-if="inputSeat === 0" class="choice-check" aria-hidden="true" viewBox="0 0 20 20">
                     <path d="m5 10.5 3.2 3.2L15 6.8" />
                   </svg>
                 </button>
                 <button type="button" class="time-option" :class="{ on: inputSeat === 1 }" @click="inputSeat = 1">
-                  <span>{{ sideName(1) }}</span>
+                  <span>{{ inputSideName(1) }}</span>
                   <svg v-if="inputSeat === 1" class="choice-check" aria-hidden="true" viewBox="0 0 20 20">
                     <path d="m5 10.5 3.2 3.2L15 6.8" />
                   </svg>
@@ -1698,6 +1875,33 @@ watch(seats, (next, previous) => {
                 >
                   {{ option.label }}
                   <svg v-if="inputMinutes === option.value" class="choice-check" aria-hidden="true" viewBox="0 0 20 20">
+                    <path d="m5 10.5 3.2 3.2L15 6.8" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+            <div class="field">
+              <span>计分</span>
+              <div class="time-options">
+                <button
+                  type="button"
+                  class="time-option"
+                  :class="{ on: inputScoreTracking }"
+                  @click="inputScoreTracking = true"
+                >
+                  计分
+                  <svg v-if="inputScoreTracking" class="choice-check" aria-hidden="true" viewBox="0 0 20 20">
+                    <path d="m5 10.5 3.2 3.2L15 6.8" />
+                  </svg>
+                </button>
+                <button
+                  type="button"
+                  class="time-option"
+                  :class="{ on: !inputScoreTracking }"
+                  @click="inputScoreTracking = false"
+                >
+                  不计分
+                  <svg v-if="!inputScoreTracking" class="choice-check" aria-hidden="true" viewBox="0 0 20 20">
                     <path d="m5 10.5 3.2 3.2L15 6.8" />
                   </svg>
                 </button>
@@ -1899,6 +2103,32 @@ watch(seats, (next, previous) => {
       </div>
 
       <div v-if="canvasFailed" class="fallback">渲染器不可用，已切换到简化视图。</div>
+
+      <Transition name="undo-request">
+        <div
+          v-if="swapPending"
+          class="undo-request"
+          :class="{ waiting: isSwapRequester, spectator: !isSeated }"
+          role="dialog"
+          aria-live="polite"
+          aria-labelledby="swap-request-title"
+        >
+          <div class="undo-request-copy">
+            <span>交换位置</span>
+            <strong id="swap-request-title">
+              {{ isSwapRequester ? "等待对手确认" : isSeated ? "对手请求交换位置" : "棋手请求交换位置" }}
+            </strong>
+            <p v-if="isSwapRequester">请求已发送，双方同意后才能交换先后手。</p>
+            <p v-else-if="isSeated">{{ swapRequesterName }} 想交换先后手，是否同意？</p>
+            <p v-else>{{ swapRequesterName }} 请求交换先后手，等待对手处理。</p>
+            <small v-if="isSeated">20 秒未处理将自动拒绝</small>
+          </div>
+          <div v-if="isSwapRecipient" class="undo-request-actions">
+            <button class="ghost" type="button" @click="declineSwap(false)">拒绝</button>
+            <button class="primary" type="button" @click="consentSwap">同意</button>
+          </div>
+        </div>
+      </Transition>
 
       <Transition name="undo-request">
         <div
@@ -3022,7 +3252,19 @@ watch(seats, (next, previous) => {
   background: linear-gradient(180deg, rgba(255, 253, 248, 0.92), rgba(242, 232, 213, 0.62));
 }
 
-.rail-head { display: flex; flex-direction: column; gap: 8px; }
+.rail-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.brand-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
 
 .brand {
   display: flex;
@@ -3051,6 +3293,55 @@ watch(seats, (next, previous) => {
   line-height: 1.5;
   letter-spacing: 0.1em;
   color: var(--soft-text);
+}
+
+.room-score {
+  display: grid;
+  flex: 0 0 104px;
+  gap: 4px;
+  min-width: 0;
+  padding: 2px 0 0 12px;
+  border-left: 1px solid var(--line-soft);
+}
+
+.room-score-names {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 6px;
+  color: var(--soft-text);
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.room-score-names span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.room-score-names span:last-child { text-align: right; }
+
+.room-score-values {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: baseline;
+  gap: 6px;
+  color: var(--soft-text);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.room-score-values strong {
+  color: var(--ink);
+  font-family: var(--font-display);
+  font-size: 17px;
+  text-align: center;
+}
+
+.room-score-values span {
+  font-size: 11px;
+  font-weight: 700;
 }
 
 /* ── Panels ─────────────────────────────────────────────────────────────── */
@@ -6619,11 +6910,20 @@ button:focus-visible {
     display: flex;
     flex-direction: row;
     align-items: center;
-    justify-content: flex-start;
+    justify-content: space-between;
     gap: 8px;
     min-width: 0;
     padding: 0;
     border-bottom: 0;
+  }
+
+  .workbench:not(.lobby-mode) .brand-block {
+    min-width: 0;
+  }
+
+  .workbench:not(.lobby-mode) .room-score {
+    flex-basis: 96px;
+    padding-left: 10px;
   }
 
   .workbench:not(.lobby-mode) .brand {

@@ -135,6 +135,88 @@ function easeOutCubic(t) {
   return 1 - Math.pow(1 - t, 3);
 }
 
+/** Direction in which the captured piece is driven: attacker to victim. */
+export function captureImpactAngle(from, to) {
+  if (!from || !to) return 0;
+  return Math.atan2(to.y - from.y, to.x - from.x);
+}
+
+/**
+ * Capture profiles keep the shared "broken piece" grammar while letting the victim's
+ * material decide how much it moves. Pawns dry out; rooks leave heavy, straight debris;
+ * a cannon hit throws the widest fan.
+ */
+const CAPTURE_PROFILES = {
+  [PIECE.pawn]: { force: 0.78, spread: 0.52, lift: 0.36, chips: 8, spin: 3.2 },
+  [PIECE.advisor]: { force: 0.9, spread: 0.72, lift: 0.58, chips: 10, spin: 4.2 },
+  [PIECE.elephant]: { force: 0.94, spread: 0.74, lift: 0.62, chips: 10, spin: 4.4 },
+  [PIECE.horse]: { force: 1.04, spread: 0.68, lift: 0.92, chips: 11, spin: 4.6 },
+  [PIECE.rook]: { force: 1.18, spread: 0.38, lift: 0.68, chips: 12, spin: 4.8 },
+  [PIECE.cannon]: { force: 1.3, spread: 0.88, lift: 0.82, chips: 12, spin: 5.2 },
+  [PIECE.king]: { force: 1.36, spread: 0.64, lift: 0.9, chips: 12, spin: 5.4 },
+};
+
+function captureProfile(kind) {
+  return CAPTURE_PROFILES[Math.abs(Number(kind))] || {
+    force: 1,
+    spread: 0.64,
+    lift: 0.64,
+    chips: 10,
+    spin: 4,
+  };
+}
+
+/** Heavy pieces earn a board-wide cinematic beat; advisors and elephants stay local. */
+export function isCinematicCapture(kind) {
+  const value = Math.abs(Number(kind));
+  return (
+    value === PIECE.rook ||
+    value === PIECE.horse ||
+    value === PIECE.cannon ||
+    value === PIECE.king
+  );
+}
+
+/** Flat point array for an ellipse aligned to the impact direction. */
+function orientedEllipsePoints(rx, ry, angle, steps = 24, cx = 0, cy = 0) {
+  const points = [];
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+  for (let i = 0; i < steps; i++) {
+    const a = (Math.PI * 2 * i) / steps;
+    const x = Math.cos(a) * rx;
+    const y = Math.sin(a) * ry;
+    points.push(cx + x * cos - y * sin, cy + x * sin + y * cos);
+  }
+  return points;
+}
+
+/** Shared irregular crack used to cut both halves of a large piece in the cinematic. */
+function tornCrack(rand, radius, steps = 10) {
+  const points = [];
+  for (let i = 0; i <= steps; i++) {
+    const along = -radius * 1.22 + (radius * 2.44 * i) / steps;
+    const offset =
+      radius * Math.sin(i * 1.17 + 0.4) * 0.055 + (rand() - 0.5) * radius * 0.024;
+    points.push({ along, offset });
+  }
+  return points;
+}
+
+/** One side of the irregular crack, expressed in attack-aligned local coordinates. */
+function tornHalfPoints(crack, radius, side, ux, uy, nx, ny) {
+  const points = [];
+  for (const point of crack) {
+    points.push(ux * point.along + nx * point.offset, uy * point.along + ny * point.offset);
+  }
+  for (let i = crack.length - 1; i >= 0; i--) {
+    const point = crack[i];
+    const edge = side * radius * 1.3;
+    points.push(ux * point.along + nx * edge, uy * point.along + ny * edge);
+  }
+  return points;
+}
+
 /**
  * RippleEffect is a real ink drop: a dark core that blooms instantly, an irregular rim that
  * creeps outward as the paper pulls the ink, and a few satellite droplets thrown clear.
@@ -243,12 +325,25 @@ export class RippleEffect {
  * particle template: round blots that arc and settle, thin hairs that stretch along their
  * own velocity, and flat specks that tumble. All of it is pooled into three Graphics
  * redraws per frame rather than per-particle sprites.
+ *
+ * The burst is a forward fan, not a ring. A small amount of back-scatter keeps it from
+ * looking like a cone stencil, but the victim is visibly driven away from the attacker.
  */
 export class CaptureBurstEffect {
-  constructor({ x, y, radius, colour = PALETTE.ink, lowMotion = false, seed }) {
+  constructor({
+    x,
+    y,
+    radius,
+    colour = PALETTE.ink,
+    lowMotion = false,
+    seed,
+    from = null,
+    to = null,
+    kind = 0,
+  }) {
     this.lowMotion = lowMotion;
     this.age = 0;
-    this.duration = lowMotion ? 0.32 : 0.95;
+    this.duration = lowMotion ? 0.28 : 0.68;
     this.done = false;
     this.view = new Container();
     this.view.position.set(x, y);
@@ -259,20 +354,25 @@ export class CaptureBurstEffect {
 
     this.radius = radius;
     this.colour = colour;
+    this.kind = kind;
+    this.angle = captureImpactAngle(from, to);
+    this.profile = captureProfile(kind);
     /** One array reused for every polygon: no per-frame allocation. */
     this.scratch = [];
 
     const rand = mulberry32(seed ?? nextSeed());
-    // 34 was chosen when every particle reallocated its polygon every frame. The shapes are
-    // now cached per particle, so the cost is fill rate rather than GC pressure and the
-    // burst can carry enough debris to read as shattering instead of as confetti.
-    const count = lowMotion ? 0 : 52;
+    // The shatter owns the large fragments; this layer supplies the dust that follows them.
+    // Keeping it below thirty particles prevents the two effects from turning into a cloud.
+    const count = lowMotion ? 0 : 24;
     this.particles = [];
     for (let i = 0; i < count; i++) {
-      // Even angular distribution with jitter: a perfect fan looks synthetic, and pure
-      // random clumps. Sorted-angle placement with noise keeps coverage but kills the grid.
-      const angle = (Math.PI * 2 * i) / count + (rand() - 0.5) * 0.7;
-      const speed = radius * (0.7 + Math.pow(rand(), 0.6) * 3.2);
+      // Mostly forward, with just enough debris thrown back to describe a real impact.
+      const back = rand() < 0.12;
+      const angle =
+        this.angle +
+        (back ? Math.PI : 0) +
+        (rand() - 0.5) * (back ? 0.54 : this.profile.spread * 1.55);
+      const speed = radius * (1.1 + Math.pow(rand(), 0.6) * 3.2) * this.profile.force;
       const kind = rand();
       this.particles.push({
         kind: kind < 0.5 ? "blot" : kind < 0.82 ? "hair" : "speck",
@@ -299,12 +399,27 @@ export class CaptureBurstEffect {
     this.hairs.clear();
     this.blots.clear();
 
-    // Shock: the pale ring the piece leaves as it clears the square.
+    // Shock: a flattened ellipse across the cut, with one short wake behind it. Unlike the
+    // old perfect circle, this gives the debris a readable direction even when motion is
+    // paused on a single frame.
     if (!this.lowMotion) {
-      const shockR = this.radius * (0.6 + Math.pow(t, 0.5) * 2.4);
+      const shockR = this.radius * (0.5 + Math.pow(t, 0.58) * 1.15);
+      const shockFade = Math.pow(1 - t, 1.35);
+      const cx = Math.cos(this.angle) * this.radius * 0.22 * t;
+      const cy = Math.sin(this.angle) * this.radius * 0.22 * t;
       this.shock
-        .circle(0, 0, shockR)
-        .stroke({ width: 2.6, color: this.colour, alpha: (1 - t) * 0.3 });
+        .poly(
+          orientedEllipsePoints(shockR * 1.45, shockR * 0.16, this.angle + Math.PI / 2, 28, cx, cy),
+          true,
+        )
+        .stroke({ width: 1.8, color: this.colour, alpha: shockFade * 0.2 });
+      this.shock
+        .moveTo(-Math.cos(this.angle) * this.radius * 0.8, -Math.sin(this.angle) * this.radius * 0.8)
+        .lineTo(
+          Math.cos(this.angle) * this.radius * (1.2 + t * 1.5),
+          Math.sin(this.angle) * this.radius * (1.2 + t * 1.5),
+        )
+        .stroke({ width: 1.4, color: PALETTE.gold, alpha: shockFade * 0.42 });
     }
 
     for (const p of this.particles) {
@@ -382,81 +497,111 @@ export class CaptureBurstEffect {
 }
 
 /**
- * Breaks the captured piece itself into rim wedges and chips.
+ * Breaks a captured piece along the attacker's line of travel.
  *
- * The burst alone reads as a puff of dust next to a piece that politely shrinks. Shattering
- * the disc means the thing you were hunting visibly comes apart, which is the part players
- * actually feel. Wedges are cut from the piece's own ring so the fragments keep its colour
- * and its curvature instead of turning into generic confetti.
+ * The old shatter was a radial ring, so every capture ended in the same circular explosion.
+ * This version holds the victim together for a beat, opens one wobbly cut through its
+ * glyph, then sends two unequal halves and a forward fan of ink away from the attacker.
+ * The victim's kind changes weight and spread without changing the shared grammar.
  */
 export class ShatterEffect {
-  constructor({ x, y, radius, colour = PALETTE.ink, glyph = "", lowMotion = false, seed }) {
+  constructor({
+    x,
+    y,
+    radius,
+    colour = PALETTE.ink,
+    glyph = "",
+    kind = 0,
+    from = null,
+    to = null,
+    lowMotion = false,
+    seed,
+  }) {
     this.lowMotion = lowMotion;
     this.age = 0;
-    this.duration = lowMotion ? 0.26 : 0.72;
+    this.duration = lowMotion ? 0.24 : 0.64;
     this.done = false;
     this.view = new Container();
     this.view.position.set(x, y);
+    this.paper = new Graphics();
+    this.crack = new Graphics();
     this.ink = new Graphics();
     this.glyphLayer = new Container();
-    this.view.addChild(this.ink, this.glyphLayer);
+    this.view.addChild(this.paper, this.crack, this.ink, this.glyphLayer);
 
     this.radius = radius;
     this.colour = colour;
+    this.kind = kind;
+    this.profile = captureProfile(kind);
+    this.angle = captureImpactAngle(from, to);
+    this.ux = Math.cos(this.angle);
+    this.uy = Math.sin(this.angle);
+    this.nx = -this.uy;
+    this.ny = this.ux;
     this.scratch = [];
 
     const rand = mulberry32(seed ?? nextSeed());
-    const wedgeCount = lowMotion ? 0 : 11;
+    const wedgeCount = lowMotion ? 0 : 12;
     this.wedges = [];
-    const sector = (Math.PI * 2) / wedgeCount;
     for (let i = 0; i < wedgeCount; i++) {
-      const start = sector * i;
-      // A little gap between wedges: a closed ring only looks like a shrinking donut.
-      const span = sector * (0.52 + rand() * 0.3);
-      const mid = start + span / 2;
-      const speed = radius * (1.5 + rand() * 2.6);
+      const side = i % 2 ? -1 : 1;
+      const lane = Math.floor(i / 2) / Math.max(1, wedgeCount / 2 - 1) - 0.5;
+      const mid =
+        this.angle +
+        side * (Math.PI / 2 + lane * this.profile.spread * 0.68 + (rand() - 0.5) * 0.16);
+      // Each fragment is still a curved rim segment, not a generic rectangle.
+      const span = 0.22 + rand() * 0.15;
+      const forward = radius * (0.9 + rand() * 1.2) * this.profile.force * (side > 0 ? 1.05 : 0.9);
+      const lateral = radius * (0.55 + rand() * 1.15) * (0.7 + Math.abs(lane) * 0.55);
       this.wedges.push({
-        start,
+        start: mid - span / 2,
         span,
-        inner: radius * (0.5 + rand() * 0.14),
-        outer: radius * (0.9 + rand() * 0.08),
+        inner: radius * (0.46 + rand() * 0.16),
+        outer: radius * (0.88 + rand() * 0.1),
         x: 0,
         y: 0,
-        vx: Math.cos(mid) * speed,
-        vy: Math.sin(mid) * speed - radius * 0.9,
+        vx: this.ux * forward + this.nx * side * lateral,
+        vy: this.uy * forward + this.ny * side * lateral - radius * (0.16 + this.profile.lift * 0.42),
         rot: 0,
-        spin: (rand() - 0.5) * 10,
-        life: 0.6 + rand() * 0.4,
+        spin: side * (1.4 + rand() * this.profile.spin),
+        life: 0.66 + rand() * 0.3,
       });
     }
 
-    const chipCount = lowMotion ? 0 : 16;
+    const chipCount = lowMotion ? 0 : this.profile.chips;
     this.chips = [];
     for (let i = 0; i < chipCount; i++) {
-      const angle = rand() * Math.PI * 2;
-      const speed = radius * (2 + rand() * 4);
+      const back = rand() < 0.1;
+      const angle =
+        this.angle +
+        (back ? Math.PI : 0) +
+        (rand() - 0.5) * (back ? 0.48 : this.profile.spread * 1.7);
+      const speed = radius * (1.4 + rand() * 3.4) * this.profile.force;
       this.chips.push({
         x: 0,
         y: 0,
         vx: Math.cos(angle) * speed,
-        vy: Math.sin(angle) * speed - radius * 1.4,
-        size: radius * (0.05 + rand() * 0.09),
+        vy: Math.sin(angle) * speed - radius * (0.35 + this.profile.lift * 0.6),
+        size: radius * (0.045 + rand() * 0.09),
         radii: blobRadii(rand, 6 + Math.round(rand() * 3), 0.3),
         unit: null,
-        life: 0.45 + rand() * 0.4,
+        life: 0.46 + rand() * 0.36,
       });
     }
 
-    // The disc is only the shell. Cutting the actual character into brush-shaped wedges is
-    // what makes a captured 马 look like a captured horse rather than a generic explosion.
-    this.glyphShards = [];
-    if (glyph && !lowMotion) {
-      const shardCount = 7;
-      const shardSector = (Math.PI * 2) / shardCount;
-      for (let i = 0; i < shardCount; i++) {
-        const start = shardSector * i + 0.025;
-        const span = shardSector - 0.05;
-        const mid = start + span / 2;
+    // One irregular cut is sampled once and used by both masks. That leaves a visible seam
+    // between the halves instead of two clean semicircles meeting at a straight line.
+    this.glyphHalves = [];
+    if (glyph) {
+      const steps = 8;
+      const crack = [];
+      for (let i = 0; i <= steps; i++) {
+        const along = -radius * 1.5 + (radius * 3 * i) / steps;
+        const offset =
+          radius * Math.sin(i * 1.23 + 0.7) * 0.045 + (rand() - 0.5) * radius * 0.018;
+        crack.push({ along, offset });
+      }
+      for (const side of [-1, 1]) {
         const group = new Container();
         const glyphText = new Text({
           text: glyph,
@@ -469,52 +614,160 @@ export class ShatterEffect {
         });
         glyphText.anchor.set(0.5);
         glyphText.position.set(0, radius * 0.04);
+
         const mask = new Graphics();
-        const maskPoints = [0, 0];
-        const steps = 5;
-        for (let k = 0; k <= steps; k++) {
-          const a = start + (span * k) / steps;
-          maskPoints.push(Math.cos(a) * radius * 1.45, Math.sin(a) * radius * 1.45);
+        const points = [];
+        for (const point of crack) {
+          points.push(
+            this.ux * point.along + this.nx * point.offset,
+            this.uy * point.along + this.ny * point.offset,
+          );
         }
-        mask.poly(maskPoints, true).fill({ color: 0xffffff });
+        for (let i = crack.length - 1; i >= 0; i--) {
+          const point = crack[i];
+          const edge = side * radius * 1.42;
+          points.push(
+            this.ux * point.along + this.nx * edge,
+            this.uy * point.along + this.ny * edge,
+          );
+        }
+        mask.poly(points, true).fill({ color: 0xffffff });
         group.addChild(glyphText, mask);
         group.mask = mask;
-        group.alpha = 0;
         this.glyphLayer.addChild(group);
-        const speed = radius * (0.7 + rand() * 1.6);
-        this.glyphShards.push({
+
+        const forward = radius * (0.72 + rand() * 0.42) * this.profile.force * (side > 0 ? 1 : 0.78);
+        const lateral = radius * (0.82 + rand() * 0.58) * side;
+        this.glyphHalves.push({
           group,
+          side,
           x: 0,
           y: 0,
-          vx: Math.cos(mid) * speed,
-          vy: Math.sin(mid) * speed - radius * 0.55,
+          vx: this.ux * forward + this.nx * lateral,
+          vy: this.uy * forward + this.ny * lateral - radius * 0.26,
           rot: 0,
-          spin: (rand() - 0.5) * 6.5,
-          life: 0.58 + rand() * 0.34,
+          spin: side * (1.2 + rand() * 2.4),
+          life: 0.56 + rand() * 0.28,
         });
       }
     }
   }
 
+  /** A quiet stain and cut behind the stationary glyph halves. */
+  drawLowMotion(t) {
+    const fade = Math.pow(1 - t, 1.25);
+    this.ink
+      .poly(
+        orientedEllipsePoints(
+          this.radius * 0.82,
+          this.radius * 0.5,
+          this.angle,
+          18,
+        ),
+        true,
+      )
+      .fill({ color: this.colour, alpha: fade * 0.065 });
+    this.crack
+      .moveTo(-this.ux * this.radius * 0.86, -this.uy * this.radius * 0.86)
+      .lineTo(this.ux * this.radius * 0.7, this.uy * this.radius * 0.7)
+      .stroke({ width: 1.8, color: PALETTE.gold, alpha: fade * 0.64 });
+  }
+
   update(dt) {
     this.age += dt;
     const t = Math.min(1, this.age / this.duration);
+    this.paper.clear();
+    this.crack.clear();
     this.ink.clear();
 
+    if (this.lowMotion) {
+      const fade = Math.pow(1 - t, 1.2);
+      for (const half of this.glyphHalves) {
+        const offset = this.radius * (0.08 + t * 0.16) * half.side;
+        half.group.visible = true;
+        half.group.position.set(this.nx * offset, this.ny * offset);
+        half.group.alpha = fade;
+        half.group.scale.set(1 - t * 0.06);
+      }
+      this.drawLowMotion(t);
+      if (t >= 1) this.done = true;
+      return;
+    }
+
+    // The victim gets one held beat before the cut. Landing local light replaces the old
+    // full-board capture flash, so the rest of the position never disappears.
+    const flash = Math.max(0, 1 - this.age / 0.17);
+    if (flash > 0) {
+      this.paper
+        .poly(
+          orientedEllipsePoints(
+            this.radius * (1.9 + t * 0.8),
+            this.radius * (0.95 + t * 0.35),
+            this.angle + Math.PI / 2,
+            28,
+          ),
+          true,
+        )
+        .fill({ color: 0xfff2cf, alpha: flash * flash * 0.16 });
+    }
+    const stainFade = Math.max(0, 1 - this.age / 0.44);
+    if (stainFade > 0) {
+      this.paper
+        .poly(
+          orientedEllipsePoints(
+            this.radius * 1.45,
+            this.radius * 0.58,
+            this.angle + Math.PI / 2,
+            22,
+          ),
+          true,
+        )
+        .fill({ color: this.colour, alpha: stainFade * 0.055 });
+    }
+
+    const cut = Math.min(1, Math.max(0, (this.age - 0.025) / 0.075));
+    const cutFade = Math.max(0, 1 - Math.max(0, this.age - 0.04) / 0.36);
+    if (cut > 0 && cutFade > 0) {
+      const fromAlong = -this.radius * 0.88;
+      const toAlong = this.radius * (0.52 + cut * 0.82);
+      const midAlong = fromAlong + (toAlong - fromAlong) * 0.52;
+      for (const [offset, width, colour, alpha] of [
+        [-0.075, 1.1, this.colour, 0.42],
+        [0, 3.1, PALETTE.gold, 0.86],
+        [0.09, 1.35, this.colour, 0.5],
+      ]) {
+        const wobble = offset < 0 ? -0.045 : offset > 0 ? 0.035 : 0.015;
+        this.crack
+          .moveTo(
+            this.ux * fromAlong + this.nx * this.radius * offset,
+            this.uy * fromAlong + this.ny * this.radius * offset,
+          )
+          .lineTo(
+            this.ux * midAlong + this.nx * this.radius * (offset + wobble),
+            this.uy * midAlong + this.ny * this.radius * (offset + wobble),
+          )
+          .lineTo(
+            this.ux * toAlong + this.nx * this.radius * offset,
+            this.uy * toAlong + this.ny * this.radius * offset,
+          )
+          .stroke({ width, color: colour, alpha: cutFade * alpha });
+      }
+    }
+
+    const motionAge = Math.max(0, this.age - 0.035);
     for (const w of this.wedges) {
-      const local = Math.min(1, this.age / (this.duration * w.life));
+      const local = Math.min(1, motionAge / (this.duration * w.life));
       if (local >= 1) continue;
-      w.vx *= Math.pow(0.34, dt);
-      w.vy *= Math.pow(0.34, dt);
-      w.vy += this.radius * 5.2 * dt;
+      w.vx *= Math.pow(0.36, dt);
+      w.vy *= Math.pow(0.36, dt);
+      w.vy += this.radius * 4.8 * dt;
       w.x += w.vx * dt;
       w.y += w.vy * dt;
       w.rot += w.spin * dt;
 
-      const alpha = Math.pow(1 - local, 1.2);
+      const alpha = Math.pow(1 - local, 1.15);
       if (alpha < 0.02) continue;
 
-      // Cut each wedge from its own arc so the fragment keeps the piece's curvature.
       const pts = this.scratch;
       pts.length = 0;
       const steps = 4;
@@ -530,14 +783,14 @@ export class ShatterEffect {
     }
 
     for (const c of this.chips) {
-      const local = Math.min(1, this.age / (this.duration * c.life));
+      const local = Math.min(1, motionAge / (this.duration * c.life));
       if (local >= 1) continue;
-      c.vx *= Math.pow(0.4, dt);
-      c.vy *= Math.pow(0.4, dt);
-      c.vy += this.radius * 6 * dt;
+      c.vx *= Math.pow(0.42, dt);
+      c.vy *= Math.pow(0.42, dt);
+      c.vy += this.radius * 5.6 * dt;
       c.x += c.vx * dt;
       c.y += c.vy * dt;
-      const alpha = Math.pow(1 - local, 1.4) * 0.9;
+      const alpha = Math.pow(1 - local, 1.35) * 0.9;
       if (alpha < 0.02) continue;
       if (!c.unit) c.unit = radiiToPoints(c.radii, 1, 1, 0, 0);
       const pts = this.scratch;
@@ -548,22 +801,304 @@ export class ShatterEffect {
       this.ink.poly(pts, true).fill({ color: this.colour, alpha });
     }
 
-    for (const shard of this.glyphShards) {
-      const local = Math.min(1, this.age / (this.duration * shard.life));
+    for (const shard of this.glyphHalves) {
+      const local = Math.min(1, motionAge / (this.duration * shard.life));
       if (local >= 1) {
         shard.group.visible = false;
         continue;
       }
-      shard.vx *= Math.pow(0.46, dt);
-      shard.vy *= Math.pow(0.46, dt);
-      shard.vy += this.radius * 3.8 * dt;
+      shard.vx *= Math.pow(0.48, dt);
+      shard.vy *= Math.pow(0.48, dt);
+      shard.vy += this.radius * 3.6 * dt;
       shard.x += shard.vx * dt;
       shard.y += shard.vy * dt;
       shard.rot += shard.spin * dt;
       shard.group.position.set(shard.x, shard.y);
       shard.group.rotation = shard.rot;
-      shard.group.alpha = Math.pow(1 - local, 0.72);
-      shard.group.scale.set(1 - local * 0.2);
+      shard.group.alpha = Math.pow(1 - local, 0.82);
+      shard.group.scale.set(1 - local * 0.14);
+    }
+
+    if (t >= 1) this.done = true;
+  }
+
+  destroy() {
+    this.view.destroy({ children: true });
+  }
+}
+
+/**
+ * A board-wide cinematic for a heavy piece capture.
+ *
+ * The captured piece rises from its square into a calm central focus, remains legible for a
+ * beat, and is then torn along the attacker's line. Both the disc and glyph use the same
+ * irregular mask, so the two halves read as one physical object rather than as text stamped
+ * over an unrelated explosion. The effect never disables pointer input or pauses game state.
+ */
+export class KeyCaptureCinematicEffect {
+  constructor({
+    start,
+    width,
+    height,
+    radius = 102,
+    startRadius = 34,
+    colour = PALETTE.red,
+    glyph = "",
+    kind = 0,
+    angle = 0,
+    lowMotion = false,
+    seed,
+  }) {
+    this.lowMotion = lowMotion;
+    this.age = 0;
+    this.duration = lowMotion ? 0.7 : 1.55;
+    this.done = false;
+    this.width = width;
+    this.height = height;
+    this.radius = radius;
+    this.colour = colour;
+    this.kind = kind;
+    this.angle = angle;
+    this.ux = Math.cos(angle);
+    this.uy = Math.sin(angle);
+    this.nx = -this.uy;
+    this.ny = this.ux;
+    this.start = start ? { x: start.x, y: start.y } : { x: width / 2, y: height / 2 };
+    this.center = { x: width / 2, y: height * 0.475 };
+    this.startScale = Math.min(0.52, Math.max(0.18, startRadius / radius));
+    this.revealAt = lowMotion ? 0.14 : 0.34;
+    this.tearAt = lowMotion ? 0.21 : 0.47;
+    this.tearDuration = lowMotion ? 0.25 : 0.66;
+
+    this.view = new Container();
+    this.scrim = new Graphics();
+    this.frame = new Graphics();
+    this.threads = new Graphics();
+    this.hero = new Container();
+    this.halo = new Graphics();
+    this.shadow = new Graphics();
+    this.body = new Container();
+    this.cut = new Graphics();
+    this.caption = new Text({
+      text: "大 子 失 守",
+      style: new TextStyle({
+        fontFamily: "Songti SC, SimSun, STSong, serif",
+        fontSize: 21,
+        fontWeight: "600",
+        fill: PALETTE.gold,
+        letterSpacing: 10,
+      }),
+    });
+    this.caption.anchor.set(0.5);
+    this.caption.position.set(this.center.x, this.center.y + radius * 1.42);
+    this.caption.alpha = 0;
+    this.hero.addChild(this.halo, this.shadow, this.body, this.cut);
+    this.view.addChild(this.scrim, this.frame, this.threads, this.hero, this.caption);
+
+    this.scrim
+      .rect(-80, -80, width + 160, height + 160)
+      .fill({ color: INK, alpha: 0.62 });
+    this.scrim.alpha = 0;
+
+    const frameTop = this.center.y - radius * 1.58;
+    const frameBottom = this.center.y + radius * 1.62;
+    this.frame
+      .roundRect(width * 0.06, height * 0.13, width * 0.88, height * 0.74, 2)
+      .fill({ color: PALETTE.paper, alpha: 0.035 })
+      .stroke({ width: 1, color: PALETTE.gold, alpha: 0.16 });
+    for (const y of [frameTop, frameBottom]) {
+      this.frame
+        .moveTo(width * 0.12, y)
+        .lineTo(width * 0.88, y)
+        .stroke({ width: y === frameTop ? 1.2 : 1, color: PALETTE.gold, alpha: 0.22 });
+    }
+    for (const x of [width * 0.12, width * 0.88]) {
+      this.frame
+        .moveTo(x, this.center.y - radius * 0.16)
+        .lineTo(x, this.center.y + radius * 0.16)
+        .stroke({ width: 1.4, color: PALETTE.gold, alpha: 0.42 });
+    }
+    this.frame.alpha = 0;
+
+    this.shadow
+      .ellipse(0, radius * 0.36, radius * 0.66, radius * 0.13)
+      .fill({ color: 0x000000, alpha: 0.14 });
+    this.shadow.alpha = 0;
+
+    const rand = mulberry32(seed ?? nextSeed());
+    const crack = tornCrack(rand, radius);
+    this.halves = [];
+    for (const side of [-1, 1]) {
+      const group = new Container();
+      const disc = new Graphics();
+      disc
+        .circle(0, 0, radius)
+        .fill({ color: PALETTE.paper, alpha: 1 })
+        .circle(0, 0, radius)
+        .stroke({ width: 4, color: colour, alpha: 0.94 })
+        .circle(0, 0, radius * 0.84)
+        .stroke({ width: 1.5, color: colour, alpha: 0.48 });
+      const glyphText = new Text({
+        text: glyph,
+        style: new TextStyle({
+          fontFamily: "Songti SC, SimSun, STSong, serif",
+          fontSize: radius * 1.2,
+          fontWeight: "600",
+          fill: colour,
+        }),
+      });
+      glyphText.anchor.set(0.5);
+      glyphText.position.set(0, radius * 0.035);
+      const mask = new Graphics();
+      mask
+        .poly(tornHalfPoints(crack, radius, side, this.ux, this.uy, this.nx, this.ny), true)
+        .fill({ color: 0xffffff });
+      group.addChild(disc, glyphText, mask);
+      group.mask = mask;
+      this.body.addChild(group);
+      this.halves.push({
+        group,
+        side,
+        rotation: side * (0.12 + rand() * 0.08),
+        drift: 0.82 + rand() * 0.22,
+      });
+    }
+
+    this.hero.position.set(this.start.x, this.start.y);
+    this.hero.scale.set(this.startScale);
+
+    this.strands = [];
+    for (let i = 0; i < 11; i++) {
+      this.strands.push({
+        side: i % 2 ? -1 : 1,
+        offset: (rand() - 0.5) * 0.34,
+        reach: 0.72 + rand() * 0.86,
+        lift: (rand() - 0.5) * 0.5,
+        delay: rand() * 0.18,
+        life: 0.42 + rand() * 0.34,
+      });
+    }
+  }
+
+  update(dt) {
+    this.age += dt;
+    const t = Math.min(1, this.age / this.duration);
+    const reveal = Math.min(1, this.age / this.revealAt);
+    const revealEase = easeOutCubic(reveal);
+    const outro = Math.min(1, Math.max(0, (this.age - (this.duration - 0.28)) / 0.28));
+    const tear = Math.min(1, Math.max(0, (this.age - this.tearAt) / this.tearDuration));
+    const tearEase = easeOutCubic(tear);
+    this.view.alpha = 1 - outro;
+
+    this.scrim.alpha = (this.lowMotion ? 0.26 : 0.62) * revealEase;
+    this.frame.alpha = revealEase * (1 - outro);
+
+    if (this.lowMotion) {
+      this.hero.position.set(this.center.x, this.center.y);
+      this.hero.scale.set(1);
+    } else {
+      this.hero.position.set(
+        this.start.x + (this.center.x - this.start.x) * revealEase,
+        this.start.y + (this.center.y - this.start.y) * revealEase,
+      );
+      const settle = 1 + Math.sin(reveal * Math.PI) * 0.045;
+      this.hero.scale.set(
+        (this.startScale + (1 - this.startScale) * revealEase) * settle,
+      );
+    }
+
+    this.caption.alpha =
+      Math.max(0, Math.min(1, (this.age - this.revealAt * 0.7) / 0.18)) *
+      (1 - outro) *
+      (1 - Math.max(0, (tear - 0.46) / 0.54));
+
+    this.halo.clear();
+    const haloFade = revealEase * (1 - outro) * (1 - tear * 0.55);
+    if (haloFade > 0.01) {
+      this.halo
+        .circle(0, 0, this.radius * (1.17 + Math.sin(this.age * 3.4) * 0.012))
+        .stroke({ width: 2, color: PALETTE.gold, alpha: haloFade * 0.34 })
+        .circle(0, 0, this.radius * 1.31)
+        .stroke({ width: 1, color: this.colour, alpha: haloFade * 0.18 });
+    }
+    this.shadow.alpha =
+      (this.lowMotion ? 0.06 : 0.18) *
+      revealEase *
+      (1 - outro) *
+      Math.max(0, 1 - tear * 1.8);
+
+    for (const half of this.halves) {
+      const spread = this.radius * (this.lowMotion ? 0.11 : 0.92) * half.drift * tearEase;
+      const forward = this.radius * (this.lowMotion ? 0 : 0.18) * tearEase;
+      half.group.position.set(
+        this.ux * forward + this.nx * half.side * spread,
+        this.uy * forward + this.ny * half.side * spread,
+      );
+      half.group.rotation = this.lowMotion ? 0 : half.rotation * tearEase;
+      const fadeWindow = this.lowMotion ? 0.2 : 0.38;
+      const fadeStart = this.duration - fadeWindow;
+      half.group.alpha = Math.max(
+        0,
+        1 - Math.min(1, Math.max(0, (this.age - fadeStart) / fadeWindow)),
+      );
+    }
+
+    this.cut.clear();
+    const cutT = Math.min(1, Math.max(0, (this.age - (this.tearAt - 0.09)) / 0.11));
+    const cutFade = Math.max(0, 1 - Math.max(0, this.age - this.tearAt) / 0.32);
+    if (cutT > 0 && cutFade > 0) {
+      const reach = this.radius * (0.55 + cutT * 0.72);
+      this.cut
+        .moveTo(-this.ux * reach, -this.uy * reach)
+        .lineTo(this.ux * reach * 0.16, this.uy * reach * 0.16)
+        .lineTo(this.ux * reach, this.uy * reach)
+        .stroke({ width: 2.6, color: PALETTE.gold, alpha: cutFade * 0.86 });
+      this.cut
+        .moveTo(-this.ux * reach * 0.82, -this.uy * reach * 0.82)
+        .lineTo(this.ux * reach * 0.92, this.uy * reach * 0.92)
+        .stroke({ width: 6, color: this.colour, alpha: cutFade * 0.12 });
+    }
+
+    this.threads.clear();
+    if (!this.lowMotion && tear > 0.02 && tear < 0.98) {
+      for (const strand of this.strands) {
+        const local = (tear - strand.delay) / strand.life;
+        if (local <= 0 || local >= 1) continue;
+        const alpha = Math.pow(1 - local, 1.2) * 0.66;
+        const from = {
+          x:
+            this.center.x +
+            this.nx * strand.side * this.radius * 0.16 +
+            this.uy * strand.offset * this.radius * 0.18,
+          y:
+            this.center.y +
+            this.ny * strand.side * this.radius * 0.16 -
+            this.ux * strand.offset * this.radius * 0.18,
+        };
+        const to = {
+          x:
+            this.center.x +
+            this.nx * strand.side * this.radius * strand.reach +
+            this.ux * this.radius * (0.34 + strand.lift * 0.18),
+          y:
+            this.center.y +
+            this.ny * strand.side * this.radius * strand.reach +
+            this.uy * this.radius * (0.34 + strand.lift * 0.18) -
+            this.radius * 0.22 * local,
+        };
+        const mid = {
+          x: (from.x + to.x) / 2 + this.ux * this.radius * strand.offset * 0.4,
+          y: (from.y + to.y) / 2 + this.radius * 0.08,
+        };
+        this.threads
+          .moveTo(from.x, from.y)
+          .quadraticCurveTo(mid.x, mid.y, to.x, to.y)
+          .stroke({
+            width: 0.9 + (1 - local) * 1.1,
+            color: strand.side < 0 ? this.colour : PALETTE.gold,
+            alpha,
+          });
+      }
     }
 
     if (t >= 1) this.done = true;

@@ -43,6 +43,9 @@ var (
 	ErrUndoPending     = errors.New("an undo request is already pending")
 	ErrUndoNotLastMove = errors.New("only the player who made the last move may request an undo")
 	ErrUndoNotOpponent = errors.New("only the opponent can answer an undo request")
+	ErrSwapPending     = errors.New("a seat swap request is already pending")
+	ErrNoSwapRequest   = errors.New("no seat swap request is pending")
+	ErrSwapNotOpponent = errors.New("only the opponent can answer a seat swap request")
 )
 
 // Phase is the Room's lifecycle state.
@@ -85,8 +88,16 @@ type Match struct {
 	StartedAt int64
 	Finished  bool
 	Result    game.Result
+	// ScoreRecorded makes settlement idempotent across snapshots and reconnect paths.
+	ScoreRecorded bool
 	// UndoRequestedBy is the member id proposing an undo, or empty.
 	UndoRequestedBy string
+}
+
+// Scoreboard is the optional room-scoped score shown beside the room title.
+type Scoreboard struct {
+	Tracked bool           `json:"tracked"`
+	Wins    [SeatCount]int `json:"wins"`
 }
 
 // Room is the authoritative table. All exported methods are safe for concurrent use.
@@ -106,6 +117,9 @@ type Room struct {
 	// in. It only exists on a practice board: a real match is always two humans.
 	aiSeat int
 
+	trackScore bool
+	wins       [SeatCount]int
+
 	members map[string]*Member
 	order   []string // join order, for "first to arrive sits"
 	seats   Seats
@@ -113,6 +127,8 @@ type Room struct {
 	match   *Match
 	replay  *replay.Replay
 	seq     int
+	// swapRequestedBy is set while the two seated players decide whether to exchange sides.
+	swapRequestedBy string
 }
 
 // Options configures a new Room.
@@ -124,7 +140,8 @@ type Options struct {
 	Password string
 	// HostSeat lets the host choose which side to play before anyone sits down. -1 means
 	// "wherever is free", which is the old arrival-order behaviour.
-	HostSeat int
+	HostSeat   int
+	TrackScore bool
 }
 
 // New creates an empty Room with its host not yet joined.
@@ -133,15 +150,16 @@ func New(opts Options) (*Room, error) {
 		return nil, err
 	}
 	return &Room{
-		id:       opts.ID,
-		name:     opts.Name,
-		gameName: opts.Game,
-		hostID:   opts.HostID,
-		password: opts.Password,
-		members:  map[string]*Member{},
-		phase:    PhaseLobby,
-		aiSeat:   -1,
-		hostSeat: opts.HostSeat,
+		id:         opts.ID,
+		name:       opts.Name,
+		gameName:   opts.Game,
+		hostID:     opts.HostID,
+		password:   opts.Password,
+		members:    map[string]*Member{},
+		phase:      PhaseLobby,
+		aiSeat:     -1,
+		hostSeat:   opts.HostSeat,
+		trackScore: opts.TrackScore,
 	}, nil
 }
 
@@ -163,6 +181,13 @@ func (r *Room) GameName() string { return r.gameName }
 
 // HostID returns the host member id.
 func (r *Room) HostID() string { return r.hostID }
+
+// Scoreboard returns a copy of the optional room score.
+func (r *Room) Scoreboard() Scoreboard {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return Scoreboard{Tracked: r.trackScore, Wins: r.wins}
+}
 
 // Locked reports whether a join password is required.
 func (r *Room) Locked() bool { return r.password != "" }
@@ -227,11 +252,15 @@ func (r *Room) join(id, nickname string, allowSeat bool) (Member, error) {
 		// The host may have reserved a side at creation time. Honour it first, then fall
 		// back to "first free" for everyone else.
 		if m.IsHost && r.hostSeat >= 0 && r.hostSeat < SeatCount && r.seats[r.hostSeat] == "" {
+			r.resetScoreLocked()
+			r.swapRequestedBy = ""
 			r.seats[r.hostSeat] = id
 			m.Seat = r.hostSeat
 		} else {
 			for seat := 0; seat < SeatCount; seat++ {
 				if r.seats[seat] == "" {
+					r.resetScoreLocked()
+					r.swapRequestedBy = ""
 					r.seats[seat] = id
 					m.Seat = seat
 					break
@@ -312,6 +341,8 @@ func (r *Room) vacateLocked(m *Member) {
 	// Decide the forfeit before clearing the seat, because the remaining seated player
 	// is identified by comparing the table against the leaver.
 	if r.phase == PhasePlaying && r.match != nil && m.Seat >= 0 {
+		r.resetScoreLocked()
+		r.swapRequestedBy = ""
 		if r.seats[m.Seat] == m.ID {
 			r.seats[m.Seat] = ""
 		}
@@ -325,6 +356,8 @@ func (r *Room) vacateLocked(m *Member) {
 		return
 	}
 	if m.Seat >= 0 {
+		r.resetScoreLocked()
+		r.swapRequestedBy = ""
 		if r.seats[m.Seat] == m.ID {
 			r.seats[m.Seat] = ""
 		}
@@ -350,6 +383,8 @@ func (r *Room) TakeSeat(id string, seat int) error {
 	if r.seats[seat] != "" {
 		return ErrSeatOccupied
 	}
+	r.resetScoreLocked()
+	r.swapRequestedBy = ""
 	if m.Seat >= 0 {
 		r.seats[m.Seat] = ""
 	}
@@ -374,8 +409,120 @@ func (r *Room) ReleaseSeat(id string) error {
 	if r.phase == PhasePlaying {
 		return ErrMatchInProgress
 	}
+	r.resetScoreLocked()
+	r.swapRequestedBy = ""
 	r.seats[m.Seat] = ""
 	m.Seat = -1
+	return nil
+}
+
+// RequestSwap asks the opponent to exchange the two occupied seats before a match starts.
+func (r *Room) RequestSwap(id string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.phase != PhaseLobby {
+		return ErrMatchInProgress
+	}
+	member, ok := r.members[id]
+	if !ok {
+		return ErrNotMember
+	}
+	if member.Seat < 0 {
+		return ErrNotSeated
+	}
+	if r.seats[0] == "" || r.seats[1] == "" {
+		return ErrNotEnoughPlayers
+	}
+	if r.swapRequestedBy != "" {
+		return ErrSwapPending
+	}
+	r.swapRequestedBy = id
+	return nil
+}
+
+// ConsentSwap applies a pending swap when the *other* seated player agrees.
+func (r *Room) ConsentSwap(id string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.phase != PhaseLobby {
+		return ErrMatchInProgress
+	}
+	if r.swapRequestedBy == "" {
+		return ErrNoSwapRequest
+	}
+	if r.swapRequestedBy == id {
+		return ErrSwapNotOpponent
+	}
+	if err := r.swapSeatsLocked(id); err != nil {
+		return err
+	}
+	r.swapRequestedBy = ""
+	return nil
+}
+
+// DeclineSwap dismisses the pending seat swap without changing the seats.
+func (r *Room) DeclineSwap(id string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.phase != PhaseLobby {
+		return ErrMatchInProgress
+	}
+	if r.swapRequestedBy == "" {
+		return ErrNoSwapRequest
+	}
+	if r.swapRequestedBy == id {
+		return ErrSwapNotOpponent
+	}
+	member, ok := r.members[id]
+	if !ok {
+		return ErrNotMember
+	}
+	if member.Seat < 0 {
+		return ErrNotSeated
+	}
+	r.swapRequestedBy = ""
+	return nil
+}
+
+// SwapRequest reports the member and seat waiting for a swap decision.
+func (r *Room) SwapRequest() (string, int) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.phase != PhaseLobby || r.swapRequestedBy == "" {
+		return "", -1
+	}
+	member := r.members[r.swapRequestedBy]
+	if member == nil {
+		return "", -1
+	}
+	return member.ID, member.Seat
+}
+
+// swapSeatsLocked performs the exchange after the opponent has consented. Scores move
+// with the players, so alternating colours between rematches keeps the running total.
+func (r *Room) swapSeatsLocked(id string) error {
+	member, ok := r.members[id]
+	if !ok {
+		return ErrNotMember
+	}
+	if member.Seat < 0 {
+		return ErrNotSeated
+	}
+	if r.seats[0] == "" || r.seats[1] == "" {
+		return ErrNotEnoughPlayers
+	}
+	other := r.members[r.seats[1-member.Seat]]
+	if other == nil {
+		return ErrNotEnoughPlayers
+	}
+
+	r.seats[0], r.seats[1] = r.seats[1], r.seats[0]
+	member.Seat = 1 - member.Seat
+	other.Seat = 1 - other.Seat
+	r.wins[0], r.wins[1] = r.wins[1], r.wins[0]
 	return nil
 }
 
@@ -386,6 +533,9 @@ func (r *Room) Start(now int64) error {
 
 	if r.phase == PhasePlaying {
 		return ErrMatchInProgress
+	}
+	if r.swapRequestedBy != "" {
+		return ErrSwapPending
 	}
 	if r.seats[0] == "" || r.seats[1] == "" {
 		return ErrNotEnoughPlayers
@@ -603,9 +753,24 @@ func (r *Room) finishLocked(res game.Result) {
 	r.match.Record.Reason = res.Reason
 	r.match.UndoRequestedBy = ""
 	r.phase = PhaseFinished
+	if r.trackScore && !r.match.ScoreRecorded && r.seats[0] != "" && r.seats[1] != "" {
+		switch res.Outcome {
+		case game.OutcomeSeatOneWin:
+			r.wins[0]++
+		case game.OutcomeSeatTwoWin:
+			r.wins[1]++
+		}
+	}
+	if r.match != nil {
+		r.match.ScoreRecorded = true
+	}
 	if rep, err := replay.New(r.match.Record); err == nil {
 		r.replay = rep
 	}
+}
+
+func (r *Room) resetScoreLocked() {
+	r.wins = [SeatCount]int{}
 }
 
 // RequestUndo records an undo proposal from a seated player.

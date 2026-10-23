@@ -18,7 +18,7 @@ import (
 	"github.com/lieng618/dbx-mini-games/backend/internal/cloud"
 )
 
-const version = "0.3.1"
+const version = "0.4.1"
 
 func main() {
 	addr := flag.String("addr", envOr("DBX_MINI_GAMES_ADDR", ":8787"), "HTTP listen address")

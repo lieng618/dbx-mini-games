@@ -42,6 +42,7 @@ type cloudRoom struct {
 	startedAt    time.Time
 	finished     time.Time
 	undoDeadline time.Time
+	swapDeadline time.Time
 	clock        *matchClock
 }
 
@@ -218,7 +219,8 @@ func (h *Hub) CallSession(clientID, connectionToken, method string, params map[s
 		h.leaveRoomLocked(client)
 		h.notifyLobbyLocked()
 		return map[string]any{"role": "idle"}, nil
-	case "room.start", "room.seat", "room.release", "room.practice.start",
+	case "room.start", "room.seat", "room.release",
+		"room.swap.request", "room.swap.consent", "room.swap.decline", "room.practice.start",
 		"room.practice.end", "room.ai.start", "room.ai.move",
 		"game.move", "game.undo.request", "game.undo.consent", "game.undo.decline",
 		"game.resign", "game.rematch":
@@ -252,6 +254,7 @@ func (h *Hub) expireClocks(now time.Time) {
 
 func (h *Hub) expireClocksLocked(now time.Time) {
 	var undoExpired []*cloudRoom
+	var swapExpired []*cloudRoom
 	var clockExpired []*cloudRoom
 	for _, record := range h.rooms {
 		if !record.undoDeadline.IsZero() && !now.Before(record.undoDeadline) {
@@ -271,6 +274,22 @@ func (h *Hub) expireClocksLocked(now time.Time) {
 				record.undoDeadline = time.Time{}
 			}
 		}
+		if !record.swapDeadline.IsZero() && !now.Before(record.swapDeadline) {
+			proposer, _ := record.room.SwapRequest()
+			if proposer != "" {
+				for _, member := range record.room.Members() {
+					if member.IsSeated() && member.ID != proposer {
+						if err := record.room.DeclineSwap(member.ID); err == nil {
+							record.swapDeadline = time.Time{}
+							swapExpired = append(swapExpired, record)
+						}
+						break
+					}
+				}
+			} else {
+				record.swapDeadline = time.Time{}
+			}
+		}
 		if record.room.Phase() != room.PhasePlaying {
 			continue
 		}
@@ -286,10 +305,13 @@ func (h *Hub) expireClocksLocked(now time.Time) {
 		record.undoDeadline = time.Time{}
 		clockExpired = append(clockExpired, record)
 	}
-	if len(undoExpired) == 0 && len(clockExpired) == 0 {
+	if len(undoExpired) == 0 && len(swapExpired) == 0 && len(clockExpired) == 0 {
 		return
 	}
 	for _, record := range undoExpired {
+		h.notifyRoomLocked(record)
+	}
+	for _, record := range swapExpired {
 		h.notifyRoomLocked(record)
 	}
 	for _, record := range clockExpired {
@@ -355,12 +377,13 @@ func (h *Hub) createRoomLocked(client *clientState, params map[string]any) (any,
 	record.clock = newMatchClock(parseBudget(params), parseMoveTime(params))
 
 	created, err := room.New(room.Options{
-		ID:       randomID(),
-		Name:     name,
-		Game:     gameName,
-		HostID:   client.id,
-		Password: stringParam(params, "password"),
-		HostSeat: hostSeat,
+		ID:         randomID(),
+		Name:       name,
+		Game:       gameName,
+		HostID:     client.id,
+		Password:   stringParam(params, "password"),
+		HostSeat:   hostSeat,
+		TrackScore: boolParam(params, "trackScore"),
 	})
 	if err != nil {
 		return nil, err
@@ -438,6 +461,7 @@ func (h *Hub) leaveRoomLocked(client *clientState) {
 	wasPlaying := record.room.Phase() == room.PhasePlaying
 	_ = record.room.LeaveForCloud(client.id)
 	record.undoDeadline = time.Time{}
+	record.swapDeadline = time.Time{}
 	if wasPlaying && record.room.Phase() == room.PhaseFinished {
 		now := time.Now()
 		record.finished = now
@@ -510,16 +534,34 @@ func (h *Hub) actLocked(client *clientState, method string, params map[string]an
 		record.startedAt = now
 		record.finished = time.Time{}
 		record.undoDeadline = time.Time{}
+		record.swapDeadline = time.Time{}
 		record.clock.start(now)
 	case "room.seat":
 		seat := intParam(params, "seat", -1)
 		if err := record.room.TakeSeat(client.id, seat); err != nil {
 			return nil, err
 		}
+		record.swapDeadline = time.Time{}
 	case "room.release":
 		if err := record.room.ReleaseSeat(client.id); err != nil {
 			return nil, err
 		}
+		record.swapDeadline = time.Time{}
+	case "room.swap.request":
+		if err := record.room.RequestSwap(client.id); err != nil {
+			return nil, err
+		}
+		record.swapDeadline = now.Add(undoDecisionTimeout)
+	case "room.swap.consent":
+		if err := record.room.ConsentSwap(client.id); err != nil {
+			return nil, err
+		}
+		record.swapDeadline = time.Time{}
+	case "room.swap.decline":
+		if err := record.room.DeclineSwap(client.id); err != nil {
+			return nil, err
+		}
+		record.swapDeadline = time.Time{}
 	case "game.move":
 		move := game.Move{
 			From: intParam(params, "from", -1),
@@ -569,6 +611,7 @@ func (h *Hub) actLocked(client *clientState, method string, params map[string]an
 		record.startedAt = time.Time{}
 		record.finished = time.Time{}
 		record.undoDeadline = time.Time{}
+		record.swapDeadline = time.Time{}
 	case "room.practice.start", "room.practice.end", "room.ai.start", "room.ai.move":
 		return nil, errors.New("practice tools are not available in cloud rooms")
 	default:
@@ -633,6 +676,20 @@ func (h *Hub) snapshotForMemberLocked(record *cloudRoom, clientID string, member
 		"roomStartedAt":  unixMilli(record.startedAt),
 		"roomFinishedAt": unixMilli(record.finished),
 		"clock":          record.clock.snapshot(now),
+	}
+	score := record.room.Scoreboard()
+	view["trackScore"] = score.Tracked
+	view["score"] = score.Wins
+	if requestedBy, requestedSeat := record.room.SwapRequest(); requestedBy != "" {
+		view["swapRequestedBy"] = requestedBy
+		view["swapRequestedSeat"] = requestedSeat
+	}
+	if !record.swapDeadline.IsZero() {
+		remaining := record.swapDeadline.Sub(now).Milliseconds()
+		if remaining < 0 {
+			remaining = 0
+		}
+		view["swapRemainingMs"] = remaining
 	}
 	moveCount := 0
 	if rec, ok := record.room.Replay(); ok {
@@ -846,6 +903,11 @@ func intParam(params map[string]any, key string, fallback int) int {
 	default:
 		return fallback
 	}
+}
+
+func boolParam(params map[string]any, key string) bool {
+	value, _ := params[key].(bool)
+	return value
 }
 
 func sanitizeName(value string) string {

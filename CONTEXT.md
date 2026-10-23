@@ -23,6 +23,14 @@ more in a row wins. There is deliberately no 三三 / 四四 / 长连 referee.
 two Seats, and zero or more Spectators. A Room is tied to one Game: 象棋 and 五子棋
 never share a Room.
 
+**Room score** — an optional pair of win totals scoped to one Room. It is enabled when
+the Room is created, follows Rematches, and resets when either Seat changes hands. It is
+not a persistent player record.
+
+**Seat swap** — a Room action shared by both Occupants while the Room is in its lobby.
+It exchanges the two Seats and the players' running score totals; it is unavailable once
+the Match starts.
+
 **Host** — the participant who created the Room. The Host controls room actions such as
 starting the Match, but the cloud service is the referee. Host status transfers to a
 remaining seated player when the creator leaves.

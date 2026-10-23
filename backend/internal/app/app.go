@@ -105,6 +105,7 @@ func (a *App) Call(method string, params map[string]any) (any, error) {
 	case "room.start", "room.practice.start", "room.practice.end",
 		"room.ai.start", "room.ai.move",
 		"room.seat", "room.release",
+		"room.swap.request", "room.swap.consent", "room.swap.decline",
 		"game.move", "game.undo.request", "game.undo.consent", "game.undo.decline",
 		"game.resign", "game.rematch":
 		return a.act(method, params)
@@ -211,6 +212,7 @@ func (a *App) createRoom(params map[string]any) (map[string]any, error) {
 	r, err := room.New(room.Options{
 		ID: randomID(), Name: name, Game: gameName, HostID: hostID,
 		Password: password, HostSeat: hostSeat,
+		TrackScore: params["trackScore"] == true,
 	})
 	if err != nil {
 		a.mu.Unlock()
@@ -339,6 +341,9 @@ func (a *App) snapshot() map[string]any {
 			"aiSeat":    a.room.AISeat(),
 			"lowMotion": a.lowMotion,
 		}
+		score := a.room.Scoreboard()
+		view["trackScore"] = score.Tracked
+		view["score"] = score.Wins
 		if a.server != nil {
 			view["port"] = a.server.Port()
 			view["hostKey"] = hex.EncodeToString(a.server.PublicKey())
@@ -454,6 +459,10 @@ func (a *App) boardViewLocked() map[string]any {
 	if requestedBy, requestedSeat := a.room.UndoRequest(); requestedBy != "" {
 		view["undoRequestedBy"] = requestedBy
 		view["undoRequestedSeat"] = requestedSeat
+	}
+	if requestedBy, requestedSeat := a.room.SwapRequest(); requestedBy != "" {
+		view["swapRequestedBy"] = requestedBy
+		view["swapRequestedSeat"] = requestedSeat
 	}
 	// Last move and check state drive the presentation layer's effects. They are derived
 	// from authoritative state, so a spectator sees the same ink as the player.
@@ -633,6 +642,12 @@ func (a *App) applyHostAction(method string, params map[string]any) error {
 		return a.room.TakeSeat(a.localID, seat)
 	case "room.release":
 		return a.room.ReleaseSeat(a.localID)
+	case "room.swap.request":
+		return a.room.RequestSwap(a.localID)
+	case "room.swap.consent":
+		return a.room.ConsentSwap(a.localID)
+	case "room.swap.decline":
+		return a.room.DeclineSwap(a.localID)
 	case "room.start":
 		if err := needSeat(); err != nil {
 			return err
@@ -771,6 +786,8 @@ func (a *App) serveGuest(memberID, method string, params json.RawMessage) (any, 
 	}
 
 	a.pushState()
+	// The host's own window does not receive the guest-only broadcast, so wake it too.
+	a.emitSafe("room.members", map[string]any{"reason": "guest-action"})
 	return map[string]any{"ok": true}, nil
 }
 
@@ -819,6 +836,9 @@ func (a *App) snapshotForMember(memberID string) map[string]any {
 		"aiSeat":    a.room.AISeat(),
 		"lowMotion": a.lowMotion,
 	}
+	score := a.room.Scoreboard()
+	view["trackScore"] = score.Tracked
+	view["score"] = score.Wins
 	if rec, ok := a.room.Replay(); ok {
 		view["record"] = rec
 	}
@@ -849,6 +869,9 @@ func (a *App) snapshotLocked() map[string]any {
 		"aiSeat":    a.room.AISeat(),
 		"lowMotion": a.lowMotion,
 	}
+	score := a.room.Scoreboard()
+	view["trackScore"] = score.Tracked
+	view["score"] = score.Wins
 	if a.server != nil {
 		view["port"] = a.server.Port()
 		view["hostKey"] = hex.EncodeToString(a.server.PublicKey())

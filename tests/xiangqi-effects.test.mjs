@@ -3,12 +3,16 @@ import assert from "node:assert/strict";
 
 import {
   CannonBlastEffect,
+  CaptureBurstEffect,
   CheckEffect,
   GhostMoveEffect,
+  KeyCaptureCinematicEffect,
   PieceCaptureAccentEffect,
   RiverSurgeEffect,
   ShatterEffect,
   VictoryFractureEffect,
+  captureImpactAngle,
+  isCinematicCapture,
 } from "../src/board/effects.js";
 import { PIECE, cellCenter, cellsBetween, crossesRiver, layout } from "../src/board/layout.js";
 import { PieceLayer } from "../src/board/pieces.js";
@@ -43,7 +47,134 @@ test("piece moves carry cannon and victim identity for their effects", () => {
 
   assert.equal(move.moverKind, PIECE.cannon);
   assert.equal(move.victimGlyph, "马");
+  assert.equal(move.victimKind, PIECE.horse);
+  const victim = pieces.dying[0];
+  assert.ok(victim?.tween);
+  assert.equal(victim.tween.kind, "capture");
+  assert.ok(Math.abs(victim.tween.delay - Math.max(0, move.duration - 0.06)) < 1e-9);
+  assert.ok(Math.abs(victim.tween.angle + Math.PI / 2) < 1e-9);
   pieces.root.destroy({ children: true });
+});
+
+test("capture effects follow the attacker's line and break the glyph in two", () => {
+  const from = { x: 100, y: 260 };
+  const to = { x: 340, y: 260 };
+  assert.equal(captureImpactAngle(from, to), 0);
+
+  const shatter = new ShatterEffect({
+    x: to.x,
+    y: to.y,
+    radius: 30,
+    colour: 0xb03a2e,
+    glyph: "马",
+    kind: PIECE.horse,
+    from,
+    to,
+    seed: 13,
+  });
+  assert.equal(shatter.angle, 0);
+  assert.equal(shatter.glyphHalves.length, 2);
+  assert.ok(shatter.wedges.length >= 11);
+  assert.ok(shatter.wedges.every((wedge) => wedge.vx > 0));
+  shatter.update(0.11);
+  assert.ok(shatter.crack.context.instructions.length > 0);
+  assert.ok(shatter.ink.context.instructions.length > 0);
+  assert.ok(shatter.glyphHalves.some((half) => half.group.alpha > 0.5));
+  shatter.destroy();
+
+  const dust = new CaptureBurstEffect({
+    x: to.x,
+    y: to.y,
+    radius: 28,
+    colour: 0xb03a2e,
+    kind: PIECE.horse,
+    from,
+    to,
+    seed: 14,
+  });
+  assert.equal(dust.angle, 0);
+  assert.ok(dust.particles.length < 30);
+  assert.ok(dust.particles.filter((particle) => particle.vx > 0).length > dust.particles.length / 2);
+  dust.destroy();
+});
+
+test("low-motion capture still shows that the piece broke", () => {
+  const shatter = new ShatterEffect({
+    x: 200,
+    y: 200,
+    radius: 30,
+    colour: 0x22201d,
+    glyph: "车",
+    kind: PIECE.rook,
+    from: { x: 200, y: 40 },
+    to: { x: 200, y: 200 },
+    lowMotion: true,
+    seed: 15,
+  });
+  shatter.update(0.08);
+  assert.equal(shatter.glyphHalves.length, 2);
+  assert.ok(shatter.glyphHalves.every((half) => half.group.alpha > 0));
+  assert.ok(shatter.ink.context.instructions.length > 0);
+  assert.ok(shatter.crack.context.instructions.length > 0);
+  shatter.destroy();
+});
+
+test("heavy-piece captures rise into a full-board tear", () => {
+  assert.equal(isCinematicCapture(PIECE.rook), true);
+  assert.equal(isCinematicCapture(PIECE.horse), true);
+  assert.equal(isCinematicCapture(PIECE.cannon), true);
+  assert.equal(isCinematicCapture(PIECE.king), true);
+  assert.equal(isCinematicCapture(PIECE.advisor), false);
+  assert.equal(isCinematicCapture(PIECE.elephant), false);
+  assert.equal(isCinematicCapture(PIECE.pawn), false);
+
+  const effect = new KeyCaptureCinematicEffect({
+    start: { x: 300, y: 620 },
+    width: 1600,
+    height: 900,
+    radius: 100,
+    startRadius: 34,
+    colour: 0xb03a2e,
+    glyph: "车",
+    kind: PIECE.rook,
+    angle: 0,
+    seed: 31,
+  });
+  assert.equal(effect.halves.length, 2);
+  effect.update(0.16);
+  assert.ok(effect.hero.x > 300);
+  assert.ok(effect.hero.x < effect.center.x);
+  assert.ok(effect.scrim.context.instructions.length > 0);
+
+  effect.update(0.24);
+  assert.ok(Math.abs(effect.hero.x - effect.center.x) < 1);
+  assert.ok(effect.caption.alpha > 0);
+
+  effect.update(0.18);
+  assert.ok(effect.halves.some((half) => Math.abs(half.group.position.y) > 1));
+  assert.ok(effect.threads.context.instructions.length > 0);
+  effect.destroy();
+});
+
+test("heavy-piece cinematic has a static reduced-motion tear", () => {
+  const effect = new KeyCaptureCinematicEffect({
+    start: { x: 300, y: 620 },
+    width: 1600,
+    height: 900,
+    radius: 100,
+    colour: 0x22201d,
+    glyph: "炮",
+    kind: PIECE.cannon,
+    angle: Math.PI / 2,
+    lowMotion: true,
+    seed: 37,
+  });
+  effect.update(0.38);
+  assert.equal(effect.hero.x, effect.center.x);
+  assert.equal(effect.threads.context.instructions.length, 0);
+  assert.ok(effect.halves.every((half) => Math.abs(half.group.position.x) < 14));
+  assert.ok(effect.halves.every((half) => half.group.rotation === 0));
+  effect.destroy();
 });
 
 test("signature effects draw their primary geometry", () => {
@@ -108,11 +239,14 @@ test("signature effects draw their primary geometry", () => {
     radius: 30,
     colour: 0xb03a2e,
     glyph: "马",
+    kind: PIECE.horse,
+    from: { x: 100, y: 240 },
+    to: { x: 240, y: 240 },
     seed: 11,
   });
   glyphShatter.update(0.18);
-  assert.equal(glyphShatter.glyphShards.length, 7);
-  assert.ok(glyphShatter.glyphShards.some((shard) => shard.group.alpha > 0));
+  assert.equal(glyphShatter.glyphHalves.length, 2);
+  assert.ok(glyphShatter.glyphHalves.some((shard) => shard.group.alpha > 0));
   glyphShatter.destroy();
 
   const accent = new PieceCaptureAccentEffect({

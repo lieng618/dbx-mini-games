@@ -1,11 +1,21 @@
 const LEGACY_RECORD_DB = "dbx-mini-games";
 const SETTINGS_KEY = "dbxmg.settings";
+const CREATE_ROOM_SETTINGS_KEY = "dbxmg.createRoom";
 
 export const DEFAULT_SETTINGS = Object.freeze({
   lowMotion: false,
   effectsLevel: "full",
   boardSize: "standard",
   theme: "paper",
+});
+
+export const DEFAULT_CREATE_ROOM_SETTINGS = Object.freeze({
+  game: "xiangqi",
+  seat: 0,
+  minutes: 0,
+  moveSeconds: 0,
+  scoring: true,
+  passwordEnabled: false,
 });
 
 export function loadSettings() {
@@ -31,6 +41,37 @@ export function saveSettings(settings) {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
   } catch {
     // A sandbox that disables storage should still allow the current session to work.
+  }
+}
+
+/** Loads the previous create-room rule choices without retaining the password itself. */
+export function loadCreateRoomSettings() {
+  try {
+    const raw = localStorage.getItem(CREATE_ROOM_SETTINGS_KEY);
+    if (!raw) return { ...DEFAULT_CREATE_ROOM_SETTINGS };
+    const stored = JSON.parse(raw);
+    return {
+      game: stored.game === "gomoku" ? "gomoku" : "xiangqi",
+      seat: stored.seat === 1 ? 1 : 0,
+      minutes: [0, 10, 20, 30, 60].includes(Number(stored.minutes))
+        ? Number(stored.minutes)
+        : 0,
+      moveSeconds: [0, 15, 30, 60].includes(Number(stored.moveSeconds))
+        ? Number(stored.moveSeconds)
+        : 0,
+      scoring: stored.scoring !== false,
+      passwordEnabled: stored.passwordEnabled === true,
+    };
+  } catch {
+    return { ...DEFAULT_CREATE_ROOM_SETTINGS };
+  }
+}
+
+export function saveCreateRoomSettings(settings) {
+  try {
+    localStorage.setItem(CREATE_ROOM_SETTINGS_KEY, JSON.stringify(settings));
+  } catch {
+    // Rule defaults still apply when storage is unavailable.
   }
 }
 

@@ -155,16 +155,28 @@ class PieceNode {
     this.tween = { kind: "place", duration: 0.18, age: 0 };
   }
 
-  /** A captured piece is knocked back and shrinks; it is not faded like a UI element. */
-  startCapture() {
-    this.tween = { kind: "capture", duration: 0.16, age: 0 };
+  /**
+   * A captured piece waits for the attacker to arrive, then breaks along that line.
+   * The delay is visual only: the host has already committed the move.
+   */
+  startCapture({ delay = 0, angle = 0 } = {}) {
+    this.tween = {
+      kind: "capture",
+      duration: 0.17,
+      delay: Math.max(0, delay),
+      angle,
+      spin: Math.cos(angle) >= 0 ? 0.62 : -0.62,
+      age: 0,
+    };
   }
 
   update(dt) {
     const tw = this.tween;
     if (!tw) return;
     tw.age += dt;
-    const t = Math.min(1, tw.age / tw.duration);
+    const elapsed = tw.age - (tw.delay || 0);
+    if (elapsed < 0) return;
+    const t = Math.min(1, elapsed / tw.duration);
 
     if (tw.kind === "move") {
       const e = easeOutQuint(t);
@@ -188,15 +200,16 @@ class PieceNode {
       this.lift.scale.set(Math.max(0.001, s));
       this.lift.alpha = Math.min(1, t * 2.6);
     } else if (tw.kind === "capture") {
-      // Collapse fast. The old version politely shrank over 0.28s, which read as the piece
-      // being tidied away rather than struck; the shatter fragments now carry the moment,
-      // so the disc itself only has to register the hit and get out of their way.
+      // The first moment is a held beat; the actual collapse follows the cut. The lift
+      // travels along the attacker's vector so the body agrees with the ink fragments.
       const e = easeOutCubic(t);
       const pop = 1 + Math.sin(Math.min(1, t * 3.4) * Math.PI) * 0.18;
       this.lift.scale.set(Math.max(0.001, pop * (1 - e)));
       this.lift.alpha = 1 - e;
-      this.lift.y = -e * this.radius * 0.3;
-      this.lift.rotation = e * 0.7;
+      const push = this.radius * 0.62 * e;
+      this.lift.x = Math.cos(tw.angle) * push;
+      this.lift.y = Math.sin(tw.angle) * push - this.radius * 0.24 * e;
+      this.lift.rotation = e * tw.spin;
     }
 
     if (t >= 1) {
@@ -205,6 +218,7 @@ class PieceNode {
       } else {
         this.lift.scale.set(1);
         this.lift.alpha = 1;
+        this.lift.x = 0;
         this.lift.y = 0;
         this.lift.rotation = 0;
       }
@@ -384,7 +398,10 @@ export class PieceLayer {
       // Read the colour off the victim before detaching: the shatter has to fly in the
       // colour of the piece that broke, not in the mover's.
       victimColour = pieceColour(victim.code, lay.game);
-      victim.startCapture();
+      victim.startCapture({
+        delay: Math.max(0, duration - 0.06),
+        angle: Math.atan2(toPt.y - fromPt.y, toPt.x - fromPt.x),
+      });
       this.detach(victim);
     }
     mover.cell = to;
@@ -401,6 +418,7 @@ export class PieceLayer {
       moverKind: Math.abs(moverCode),
       moverColour: pieceColour(moverCode, lay.game),
       victimGlyph: glyphFor(victimCode),
+      victimKind: victim ? Math.abs(victimCode) : 0,
       victimColour,
       duration,
     });

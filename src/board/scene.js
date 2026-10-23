@@ -25,6 +25,7 @@ import {
   CheckEffect,
   FlashEffect,
   GhostMoveEffect,
+  KeyCaptureCinematicEffect,
   LastMoveEffect,
   PALETTE,
   PieceCaptureAccentEffect,
@@ -33,7 +34,9 @@ import {
   ShatterEffect,
   VictoryFractureEffect,
   WinEffect,
+  captureImpactAngle,
   clearTransient,
+  isCinematicCapture,
 } from "./effects.js";
 import { HandShadow } from "./hand.js";
 import { BoardAudio, tap } from "./sound.js";
@@ -523,10 +526,10 @@ export class BoardScene {
         });
         tap(6);
 
-        // The piece is set down, so the board answers it. A short, tight wave at the square
-        // the piece landed on, plus the faintest lift in brightness — enough that a quiet
-        // move still lands with weight, without competing with a capture or a check.
-        if (!this.effectsOff) {
+        // A quiet move gets a local board answer. A capture already owns the hit through
+        // its directional scar and shock, so doubling the response would make the cut hard
+        // to read and flash the whole position at the exact moment of the exchange.
+        if (!this.effectsOff && !move.captured) {
           this.pulseShock(move.to, {
             amplitude: 18,
             wavelength: 90,
@@ -534,7 +537,7 @@ export class BoardScene {
             duration: 0.42,
           });
         }
-        if (!this.effectsOff && this.boardBounds && !this.lowMotion) {
+        if (!this.effectsOff && this.boardBounds && !this.lowMotion && !move.captured) {
           this.effects.push(
             new FlashEffect({
               x: this.boardBounds.left,
@@ -554,6 +557,8 @@ export class BoardScene {
         this.schedule(Math.max(0, travel - 0.06), () => {
           // The victim's own colour, so a capture looks like that piece breaking.
           const broken = move.victimColour ?? (this.game === "xiangqi" ? PALETTE.red : PALETTE.ink);
+          const keyCapture =
+            this.game === "xiangqi" && isCinematicCapture(move.victimKind);
           if (!this.effectsOff) {
             this.effects.push(
               // The disc comes apart first; the dust trails it.
@@ -563,6 +568,9 @@ export class BoardScene {
                 radius: lay2.step * 0.44,
                 colour: broken,
                 glyph: move.victimGlyph,
+                kind: move.victimKind,
+                from: move.from,
+                to: move.to,
                 lowMotion: this.lowMotion,
               }),
               new CaptureBurstEffect({
@@ -570,6 +578,9 @@ export class BoardScene {
                 y: move.to.y,
                 radius: lay2.step * 0.36,
                 colour: broken,
+                kind: move.victimKind,
+                from: move.from,
+                to: move.to,
                 lowMotion: this.lowMotion,
               }),
             );
@@ -585,30 +596,35 @@ export class BoardScene {
                 }),
               );
             }
-            if (this.boardBounds) {
+            if (keyCapture) {
               this.effects.push(
-                new FlashEffect({
-                  x: this.boardBounds.left,
-                  y: this.boardBounds.top,
-                  width: this.boardBounds.width,
-                  height: this.boardBounds.height,
-                  colour: 0xfff1d0,
-                  peak: 0.3,
-                  duration: 0.38,
+                new KeyCaptureCinematicEffect({
+                  start: move.to,
+                  width: this.app.screen.width,
+                  height: this.app.screen.height,
+                  radius: lay2.step * 1.34,
+                  startRadius: lay2.step * 0.36,
+                  colour: broken,
+                  glyph: move.victimGlyph,
+                  kind: move.victimKind,
+                  angle: captureImpactAngle(move.from, move.to),
                   lowMotion: this.lowMotion,
                 }),
               );
             }
             // A short, tight wave on the struck square: the board takes the hit locally.
             this.pulseShock(move.to, {
-              amplitude: 26,
-              wavelength: 120,
+              amplitude: 22,
+              wavelength: 105,
               speed: 900,
-              duration: 0.5,
+              duration: 0.46,
             });
           }
-          this.audio.play("capture");
-          tap([10, 24, 14]);
+          this.audio.play("capture", {
+            pitch: keyCapture ? 0.78 : 1,
+            volume: keyCapture ? 1.08 : 1,
+          });
+          tap(keyCapture ? [12, 34, 20] : [10, 24, 14]);
         });
       }
     }
