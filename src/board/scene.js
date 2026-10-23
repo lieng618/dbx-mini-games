@@ -56,6 +56,36 @@ export function landingColour(game, nextTurn) {
 }
 
 /**
+ * A rematch also drops the move counter, but it replaces the whole position rather than
+ * rewinding one authoritative move. Keep the undo animation to an unfinished match that
+ * moved back exactly one ply, so opening the next round cannot replay the old last move.
+ */
+export function isImmediateXiangqiUndo({
+  game,
+  previousMoveCount,
+  moveCount,
+  previousFinished,
+  previousLastMove,
+}) {
+  const previous = Number(previousMoveCount);
+  const current = Number(moveCount);
+  const from = Number(previousLastMove?.from);
+  const to = Number(previousLastMove?.to);
+  return (
+    game === "xiangqi" &&
+    previousFinished !== true &&
+    Number.isFinite(previous) &&
+    Number.isFinite(current) &&
+    previous > 0 &&
+    current === previous - 1 &&
+    Number.isInteger(from) &&
+    from >= 0 &&
+    Number.isInteger(to) &&
+    to >= 0
+  );
+}
+
+/**
  * Escalates checks that arrive in quick succession. The room move counter is authoritative,
  * so players and spectators derive the same tier even if their snapshots arrive late.
  */
@@ -394,6 +424,8 @@ export class BoardScene {
         : "";
     const lastMoveChanged = nextLastMoveKey !== this.lastMoveKey;
     const previousLastMove = this.currentLastMove;
+    const previousMoveCount = this.lastMoveCount;
+    const previousFinished = this.result?.finished === true;
     const incomingMoveCount = Number(snapshot.moveCount);
     const moveCountDropped =
       Number.isFinite(incomingMoveCount) &&
@@ -410,15 +442,14 @@ export class BoardScene {
     // The piece layer resolves identity and animates the move; it reports what it played.
     // Effects are then anchored to that timeline instead of to the snapshot's arrival, so
     // the ink lands when the piece does.
-    if (
-      moveCountDropped &&
-      positionChanged &&
-      this.game === "xiangqi" &&
-      !this.effectsOff &&
-      previousLastMove &&
-      previousLastMove.from >= 0 &&
-      prev
-    ) {
+    const immediateUndo = isImmediateXiangqiUndo({
+      game: this.game,
+      previousMoveCount,
+      moveCount: incomingMoveCount,
+      previousFinished,
+      previousLastMove,
+    });
+    if (moveCountDropped && immediateUndo && positionChanged && !this.effectsOff && prev) {
       const undoCode = prev[previousLastMove.to] || 0;
       const undoEffect = new GhostMoveEffect({
         from: cellCenter(this.lay, previousLastMove.to),

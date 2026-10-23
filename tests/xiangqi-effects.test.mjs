@@ -16,7 +16,7 @@ import {
 } from "../src/board/effects.js";
 import { PIECE, cellCenter, cellsBetween, crossesRiver, layout } from "../src/board/layout.js";
 import { PieceLayer } from "../src/board/pieces.js";
-import { nextCheckTier } from "../src/board/scene.js";
+import { isImmediateXiangqiUndo, nextCheckTier } from "../src/board/scene.js";
 
 test("cannon geometry exposes the one screen piece and river crossing", () => {
   const lay = layout("xiangqi");
@@ -336,4 +336,28 @@ test("check chains escalate", () => {
   assert.equal(nextCheckTier(2, 10, 11), 3);
   assert.equal(nextCheckTier(3, 11, 12), 3);
   assert.equal(nextCheckTier(2, 10, 15), 1);
+});
+
+test("a rematch cannot be mistaken for an undo of the old last move", () => {
+  const previousLastMove = { from: 81, to: 72 };
+  assert.equal(
+    isImmediateXiangqiUndo({
+      game: "xiangqi",
+      previousMoveCount: 42,
+      moveCount: 0,
+      previousFinished: true,
+      previousLastMove,
+    }),
+    false,
+  );
+  assert.equal(
+    isImmediateXiangqiUndo({
+      game: "xiangqi",
+      previousMoveCount: 42,
+      moveCount: 41,
+      previousFinished: false,
+      previousLastMove,
+    }),
+    true,
+  );
 });
