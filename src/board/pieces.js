@@ -132,11 +132,12 @@ class PieceNode {
     this.container.position.set(point.x, point.y);
   }
 
-  startMove(to, duration) {
+  startMove(to, duration, pieceKind) {
     // from is captured from the live position, so a move issued mid-animation chains from
     // where the piece actually is rather than jumping to a stale origin.
     this.tween = {
       kind: "move",
+      pieceKind,
       fromX: this.container.x,
       fromY: this.container.y,
       toX: to.x,
@@ -167,12 +168,21 @@ class PieceNode {
 
     if (tw.kind === "move") {
       const e = easeOutQuint(t);
-      this.container.position.set(tw.fromX + (tw.toX - tw.fromX) * e, tw.fromY + (tw.toY - tw.fromY) * e);
+      // A horse describes a shallow arc instead of sliding like a rook. The path remains a
+      // display choice only: the destination is still the host-authoritative square.
+      const dx = tw.toX - tw.fromX;
+      const dy = tw.toY - tw.fromY;
+      const distance = Math.hypot(dx, dy) || 1;
+      const arc = tw.pieceKind === "horse" ? Math.sin(t * Math.PI) * this.radius * 0.72 : 0;
+      this.container.position.set(
+        tw.fromX + dx * e - (dy / distance) * arc,
+        tw.fromY + dy * e + (dx / distance) * arc,
+      );
       // A sine arc lifts the piece over the board and sets it down. This is the part that
       // reads as "picked up and placed" instead of "slid along the surface".
-      const arc = Math.sin(t * Math.PI);
-      this.lift.scale.set(1 + arc * 0.1);
-      this.lift.y = -arc * this.radius * 0.14;
+      const lift = Math.sin(t * Math.PI);
+      this.lift.scale.set(1 + lift * (tw.pieceKind === "horse" ? 0.16 : 0.1));
+      this.lift.y = -lift * this.radius * (tw.pieceKind === "horse" ? 0.25 : 0.14);
     } else if (tw.kind === "place") {
       const s = easeOutBack(t);
       this.lift.scale.set(Math.max(0.001, s));
@@ -359,6 +369,8 @@ export class PieceLayer {
       return;
     }
     const victim = this.nodeAt(to);
+    const moverCode = mover.code;
+    const victimCode = victim?.code ?? 0;
     const fromPt = cellCenter(lay, from);
     const toPt = cellCenter(lay, to);
 
@@ -376,7 +388,7 @@ export class PieceLayer {
       this.detach(victim);
     }
     mover.cell = to;
-    mover.startMove(toPt, duration);
+    mover.startMove(toPt, duration, glyphFor(moverCode));
     // `to` is a point for the effects layer; `toCell` is the index, which is what anything
     // that needs to find the piece again has to use — nodeAt takes a cell, not a position.
     this.moves.push({
@@ -385,6 +397,10 @@ export class PieceLayer {
       fromCell: from,
       toCell: to,
       captured: !!victim,
+      moverCode,
+      moverKind: Math.abs(moverCode),
+      moverColour: pieceColour(moverCode, lay.game),
+      victimGlyph: glyphFor(victimCode),
       victimColour,
       duration,
     });

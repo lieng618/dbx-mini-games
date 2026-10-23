@@ -8,15 +8,30 @@
 
 import { Application, Container, Graphics, Text, TextStyle } from "pixi.js";
 import { ShockwaveFilter } from "pixi-filters/shockwave";
-import { LOGICAL_HEIGHT, LOGICAL_WIDTH, PIECE, cellAt, cellCenter, glyphFor, layout } from "./layout.js";
 import {
+  LOGICAL_HEIGHT,
+  LOGICAL_WIDTH,
+  PIECE,
+  cellAt,
+  cellCenter,
+  cellsBetween,
+  crossesRiver,
+  glyphFor,
+  layout,
+} from "./layout.js";
+import {
+  CannonBlastEffect,
   CaptureBurstEffect,
   CheckEffect,
   FlashEffect,
+  GhostMoveEffect,
   LastMoveEffect,
   PALETTE,
+  PieceCaptureAccentEffect,
   RippleEffect,
+  RiverSurgeEffect,
   ShatterEffect,
+  VictoryFractureEffect,
   WinEffect,
   clearTransient,
 } from "./effects.js";
@@ -37,6 +52,19 @@ export function landingColour(game, nextTurn) {
   return PALETTE.gold;
 }
 
+/**
+ * Escalates checks that arrive in quick succession. The room move counter is authoritative,
+ * so players and spectators derive the same tier even if their snapshots arrive late.
+ */
+export function nextCheckTier(previousTier, lastCheckMove, moveCount) {
+  const move = Number(moveCount);
+  const previous = Number(lastCheckMove);
+  if (!Number.isFinite(move) || !Number.isFinite(previous) || previous < 0) return 1;
+  const gap = move - previous;
+  if (gap <= 0 || gap > 3) return 1;
+  return Math.min(3, Math.max(1, Number(previousTier) || 1) + 1);
+}
+
 export class BoardScene {
   constructor(callbacks = {}) {
     this.callbacks = callbacks;
@@ -53,6 +81,7 @@ export class BoardScene {
     this.lastMoveKey = null;
     this.lastMoveAnchorKey = "";
     this.lastMoveEffect = null;
+    this.replayGhostEffect = null;
     this.result = null;
     this.destroyed = false;
     this.audio = new BoardAudio();
@@ -63,6 +92,9 @@ export class BoardScene {
     // Tracks which one-shot cues have already fired for the current position, so a
     // repeated snapshot cannot re-trigger the check gong or the victory chime.
     this.cued = { check: false, win: false };
+    this.lastMoveCount = null;
+    this.lastCheckMove = -Infinity;
+    this.checkStreak = 0;
     // The board-wide shockwave is transient: it lives only while settling, then the filter
     // is detached. Leaving a filter on the root would cost a full render-to-texture every
     // frame for the rest of the session.
@@ -130,6 +162,9 @@ export class BoardScene {
     this.clearLastMove();
     this.cued.check = false;
     this.cued.win = false;
+    this.lastMoveCount = null;
+    this.lastCheckMove = -Infinity;
+    this.checkStreak = 0;
     this.lastMoveKey = null;
     this.game = game;
     this.lay = layout(game, this.flipped);
@@ -355,12 +390,48 @@ export class BoardScene {
         ? `${snapshot.lastMove.from ?? -1}:${snapshot.lastMove.to}`
         : "";
     const lastMoveChanged = nextLastMoveKey !== this.lastMoveKey;
+    const previousLastMove = this.currentLastMove;
+    const incomingMoveCount = Number(snapshot.moveCount);
+    const moveCountDropped =
+      Number.isFinite(incomingMoveCount) &&
+      Number.isFinite(this.lastMoveCount) &&
+      incomingMoveCount < this.lastMoveCount;
+    this.lastMoveCount = Number.isFinite(incomingMoveCount) ? incomingMoveCount : this.lastMoveCount;
+    if (incomingMoveCount === 0) {
+      this.lastCheckMove = -Infinity;
+      this.checkStreak = 0;
+    }
     this.lastMoveKey = nextLastMoveKey;
     this.drawLastMoveAnchor(snapshot.lastMove);
 
     // The piece layer resolves identity and animates the move; it reports what it played.
     // Effects are then anchored to that timeline instead of to the snapshot's arrival, so
     // the ink lands when the piece does.
+    if (
+      moveCountDropped &&
+      positionChanged &&
+      this.game === "xiangqi" &&
+      !this.effectsOff &&
+      previousLastMove &&
+      previousLastMove.from >= 0 &&
+      prev
+    ) {
+      const undoCode = prev[previousLastMove.to] || 0;
+      const undoEffect = new GhostMoveEffect({
+        from: cellCenter(this.lay, previousLastMove.to),
+        to: cellCenter(this.lay, previousLastMove.from),
+        glyph: glyphFor(undoCode),
+        colour: undoCode > 0 ? PALETTE.red : PALETTE.black,
+        kind: Math.abs(undoCode),
+        radius: this.lay.step * 0.36,
+        lowMotion: this.lowMotion,
+        mode: "undo",
+      });
+      this.effects.push(undoEffect);
+      this.audio.play("undo");
+      tap([34, 22, 12]);
+    }
+
     this.lastCells = Array.from(cells);
     const moves = this.drawPieces(cells, snapshot) || [];
 
@@ -374,6 +445,47 @@ export class BoardScene {
     const lay2 = lay;
     for (const move of moves) {
       const travel = move.duration || 0;
+      if (this.game === "xiangqi" && !this.effectsOff && move.fromCell >= 0) {
+        const moverColour = move.moverColour ?? landingColour(this.game, snapshot.turnSeat);
+
+        // Cannon captures are the one move whose visual needs an extra rule made visible:
+        // the jumped screen is found from the previous authoritative board, not guessed
+        // from the destination. Without that piece the shot is a plain capture again.
+        if (move.moverKind === PIECE.cannon && move.captured && prev) {
+          const between = cellsBetween(lay2, move.fromCell, move.toCell);
+          const occupied = between.filter((index) => (prev[index] || 0) !== 0);
+          const screenPoint = occupied.length === 1 ? cellCenter(lay2, occupied[0]) : null;
+          this.effects.push(
+            new CannonBlastEffect({
+              from: move.from,
+              to: move.to,
+              screen: screenPoint,
+              radius: lay2.step * 0.4,
+              colour: moverColour,
+              lowMotion: this.lowMotion,
+            }),
+          );
+          this.audio.play("cannon");
+          tap([18, 28, 18]);
+        }
+
+        if (crossesRiver(lay2, move.fromCell, move.toCell)) {
+          this.effects.push(
+            new RiverSurgeEffect({
+              left: lay2.originX,
+              top: lay2.originY + 4 * lay2.step,
+              width: lay2.boardWidth,
+              height: lay2.step,
+              step: lay2.step,
+              colour: moverColour,
+              lowMotion: this.lowMotion,
+            }),
+          );
+          this.audio.play("river");
+          tap(12);
+        }
+      }
+
       // One hand, on the first move of the update. A scenario replay produces several
       // moves in one snapshot, and a hand per move would look like a crowd at the table.
       // The hand belongs to xiangqi piece travel. A gomoku tap places a new stone directly;
@@ -450,6 +562,7 @@ export class BoardScene {
                 y: move.to.y,
                 radius: lay2.step * 0.44,
                 colour: broken,
+                glyph: move.victimGlyph,
                 lowMotion: this.lowMotion,
               }),
               new CaptureBurstEffect({
@@ -460,6 +573,18 @@ export class BoardScene {
                 lowMotion: this.lowMotion,
               }),
             );
+            if (move.moverKind !== PIECE.cannon) {
+              this.effects.push(
+                new PieceCaptureAccentEffect({
+                  from: move.from,
+                  to: move.to,
+                  kind: move.moverKind,
+                  radius: lay2.step * 0.38,
+                  colour: move.moverColour ?? landingColour(this.game, snapshot.turnSeat),
+                  lowMotion: this.lowMotion,
+                }),
+              );
+            }
             if (this.boardBounds) {
               this.effects.push(
                 new FlashEffect({
@@ -511,7 +636,16 @@ export class BoardScene {
     if (!this.effectsOff && snapshot.inCheck && this.boardBounds && this.game === "xiangqi") {
       if (!this.cued.check) {
         this.cued.check = true;
+        this.checkStreak = nextCheckTier(this.checkStreak, this.lastCheckMove, snapshot.moveCount);
+        this.lastCheckMove = Number.isFinite(Number(snapshot.moveCount))
+          ? Number(snapshot.moveCount)
+          : this.lastCheckMove;
         const focus = snapshot.checkFocus != null ? cellCenter(lay2, snapshot.checkFocus) : null;
+        const attackerIndex = Number(snapshot.lastMove?.to);
+        const attacker =
+          Number.isInteger(attackerIndex) && attackerIndex >= 0 && attackerIndex < lay2.cells
+            ? cellCenter(lay2, attackerIndex)
+            : null;
         this.effects.push(
           new CheckEffect({
             boardWidth: this.boardBounds.width,
@@ -519,8 +653,10 @@ export class BoardScene {
             originX: this.boardBounds.left,
             originY: this.boardBounds.top,
             focus,
+            attacker,
             step: lay2.step,
             lowMotion: this.lowMotion,
+            tier: this.checkStreak,
           }),
         );
         // The glyph says "check"; the shockwave is what makes the board feel hit.
@@ -529,8 +665,27 @@ export class BoardScene {
             x: this.boardBounds.left + this.boardBounds.width / 2,
             y: this.boardBounds.top + this.boardBounds.height / 2,
           },
-          { amplitude: 52, wavelength: 200, speed: 820, duration: 0.78 },
+          {
+            amplitude: 66 + (this.checkStreak - 1) * 16,
+            wavelength: 220 + (this.checkStreak - 1) * 40,
+            speed: 850,
+            duration: 0.86 + (this.checkStreak - 1) * 0.1,
+          },
         );
+        if (!this.lowMotion) {
+          this.effects.push(
+            new FlashEffect({
+              x: this.boardBounds.left,
+              y: this.boardBounds.top,
+              width: this.boardBounds.width,
+              height: this.boardBounds.height,
+              colour: 0xffd7c4,
+              peak: 0.24 + (this.checkStreak - 1) * 0.045,
+              duration: 0.32 + (this.checkStreak - 1) * 0.06,
+              lowMotion: false,
+            }),
+          );
+        }
         this.audio.play("check");
         tap([26, 40, 26]);
       }
@@ -588,6 +743,15 @@ export class BoardScene {
           break;
         }
       }
+    }
+    if (this.game === "xiangqi" && sealAt) {
+      this.effects.push(
+        new VictoryFractureEffect({
+          center: sealAt,
+          step: lay.step,
+          lowMotion: this.lowMotion,
+        }),
+      );
     }
     this.effects.push(
       new WinEffect({
@@ -687,6 +851,55 @@ export class BoardScene {
     const toIndex = Number(lastMove.to);
     if (!Number.isInteger(toIndex) || toIndex < 0) return false;
     this.playLastMove(lastMove, duration);
+
+    if (this.replayGhostEffect) {
+      const existing = this.effects.indexOf(this.replayGhostEffect);
+      if (existing >= 0) this.effects.splice(existing, 1);
+      this.replayGhostEffect.destroy();
+    }
+    const lay = this.lay;
+    const cells = this.pieces.cellsOf();
+    const code = cells[toIndex] || 0;
+    const fromIndex = lastMove.from == null ? -1 : Number(lastMove.from);
+    const from = Number.isInteger(fromIndex) && fromIndex >= 0 ? cellCenter(lay, fromIndex) : null;
+    const to = cellCenter(lay, toIndex);
+    if (from) {
+      const ghost = new GhostMoveEffect({
+        from,
+        to,
+        glyph: glyphFor(code),
+        colour:
+          this.game === "gomoku"
+            ? code === 2
+              ? PALETTE.paper
+              : PALETTE.ink
+            : code > 0
+              ? PALETTE.red
+              : PALETTE.black,
+        kind: Math.abs(code),
+        radius: lay.step * 0.36,
+        lowMotion: this.lowMotion,
+        mode: "replay",
+      });
+      this.replayGhostEffect = ghost;
+      this.effects.push(ghost);
+
+      if (this.game === "xiangqi" && Math.abs(code) === PIECE.cannon) {
+        const between = cellsBetween(lay, fromIndex, toIndex);
+        const occupied = between.filter((index) => (cells[index] || 0) !== 0);
+        this.effects.push(
+          new CannonBlastEffect({
+            from,
+            to,
+            screen: occupied.length === 1 ? cellCenter(lay, occupied[0]) : null,
+            radius: lay.step * 0.4,
+            colour: code > 0 ? PALETTE.red : PALETTE.black,
+            lowMotion: this.lowMotion,
+          }),
+        );
+        this.audio.play("cannon");
+      }
+    }
     return true;
   }
 
@@ -874,6 +1087,7 @@ export class BoardScene {
     for (const effect of this.effects) effect.update(step);
 
     if (this.lastMoveEffect?.done) this.lastMoveEffect = null;
+    if (this.replayGhostEffect?.done) this.replayGhostEffect = null;
 
     // Camera shake is owned by the check effect and applied to the board as a whole.
     let shake = { x: 0, y: 0 };
@@ -905,6 +1119,7 @@ export class BoardScene {
     for (let i = this.effects.length - 1; i >= 0; i--) {
       if (this.effects[i].done) {
         if (this.effects[i] === this.lastMoveEffect) this.lastMoveEffect = null;
+        if (this.effects[i] === this.replayGhostEffect) this.replayGhostEffect = null;
         this.effects[i].destroy();
         this.effects.splice(i, 1);
       }
@@ -926,6 +1141,7 @@ export class BoardScene {
     this.pending.length = 0;
     clearTransient(this.effects);
     this.lastMoveEffect = null;
+    this.replayGhostEffect = null;
     if (this.shock) {
       if (this.root) this.root.filters = null;
       this.shock = null;

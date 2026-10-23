@@ -23,6 +23,7 @@ import { Container, Graphics, Text, TextStyle } from "pixi.js";
 // filters and the plugin ships as a single inline bundle.
 import { GlowFilter } from "pixi-filters/glow";
 import { DropShadowFilter } from "pixi-filters/drop-shadow";
+import { PIECE } from "./layout.js";
 
 const INK = 0x1c1a17;
 const RED_SEAL = 0xb03a2e;
@@ -128,6 +129,10 @@ function drawInkMark(g, points, radius, colour, alpha) {
   g.poly(points, true).fill({ color: colour, alpha: alpha * 0.1 });
   g.poly(points, true).stroke({ width: Math.max(1, radius * 0.5), color: colour, alpha: alpha * 0.22 });
   g.poly(points, true).fill({ color: colour, alpha: alpha * 0.55 });
+}
+
+function easeOutCubic(t) {
+  return 1 - Math.pow(1 - t, 3);
 }
 
 /**
@@ -321,7 +326,10 @@ export class CaptureBurstEffect {
 
       if (p.kind === "hair") {
         // Tapered stroke along the velocity vector: a hair of ink pulled off the piece.
-        const len = Math.min(this.radius * 1.5, Math.hypot(p.vx, p.vy) * 0.06);
+        const speed = Math.hypot(p.vx, p.vy) || 1;
+        const len = Math.min(this.radius * 1.5, speed * 0.06);
+        const dirX = p.vx / speed;
+        const dirY = p.vy / speed;
         const nx = -p.vy,
           ny = p.vx;
         const norm = Math.hypot(nx, ny) || 1;
@@ -333,8 +341,8 @@ export class CaptureBurstEffect {
               p.y + (ny / norm) * w,
               p.x - (nx / norm) * w,
               p.y - (ny / norm) * w,
-              p.x - p.vx * len,
-              p.y - p.vy * len,
+              p.x - dirX * len,
+              p.y - dirY * len,
             ],
             true,
           )
@@ -382,7 +390,7 @@ export class CaptureBurstEffect {
  * and its curvature instead of turning into generic confetti.
  */
 export class ShatterEffect {
-  constructor({ x, y, radius, colour = PALETTE.ink, lowMotion = false, seed }) {
+  constructor({ x, y, radius, colour = PALETTE.ink, glyph = "", lowMotion = false, seed }) {
     this.lowMotion = lowMotion;
     this.age = 0;
     this.duration = lowMotion ? 0.26 : 0.72;
@@ -390,7 +398,8 @@ export class ShatterEffect {
     this.view = new Container();
     this.view.position.set(x, y);
     this.ink = new Graphics();
-    this.view.addChild(this.ink);
+    this.glyphLayer = new Container();
+    this.view.addChild(this.ink, this.glyphLayer);
 
     this.radius = radius;
     this.colour = colour;
@@ -436,6 +445,54 @@ export class ShatterEffect {
         unit: null,
         life: 0.45 + rand() * 0.4,
       });
+    }
+
+    // The disc is only the shell. Cutting the actual character into brush-shaped wedges is
+    // what makes a captured 马 look like a captured horse rather than a generic explosion.
+    this.glyphShards = [];
+    if (glyph && !lowMotion) {
+      const shardCount = 7;
+      const shardSector = (Math.PI * 2) / shardCount;
+      for (let i = 0; i < shardCount; i++) {
+        const start = shardSector * i + 0.025;
+        const span = shardSector - 0.05;
+        const mid = start + span / 2;
+        const group = new Container();
+        const glyphText = new Text({
+          text: glyph,
+          style: new TextStyle({
+            fontFamily: "Songti SC, SimSun, STSong, serif",
+            fontSize: radius * 1.24,
+            fontWeight: "600",
+            fill: colour,
+          }),
+        });
+        glyphText.anchor.set(0.5);
+        glyphText.position.set(0, radius * 0.04);
+        const mask = new Graphics();
+        const maskPoints = [0, 0];
+        const steps = 5;
+        for (let k = 0; k <= steps; k++) {
+          const a = start + (span * k) / steps;
+          maskPoints.push(Math.cos(a) * radius * 1.45, Math.sin(a) * radius * 1.45);
+        }
+        mask.poly(maskPoints, true).fill({ color: 0xffffff });
+        group.addChild(glyphText, mask);
+        group.mask = mask;
+        group.alpha = 0;
+        this.glyphLayer.addChild(group);
+        const speed = radius * (0.7 + rand() * 1.6);
+        this.glyphShards.push({
+          group,
+          x: 0,
+          y: 0,
+          vx: Math.cos(mid) * speed,
+          vy: Math.sin(mid) * speed - radius * 0.55,
+          rot: 0,
+          spin: (rand() - 0.5) * 6.5,
+          life: 0.58 + rand() * 0.34,
+        });
+      }
     }
   }
 
@@ -491,6 +548,477 @@ export class ShatterEffect {
       this.ink.poly(pts, true).fill({ color: this.colour, alpha });
     }
 
+    for (const shard of this.glyphShards) {
+      const local = Math.min(1, this.age / (this.duration * shard.life));
+      if (local >= 1) {
+        shard.group.visible = false;
+        continue;
+      }
+      shard.vx *= Math.pow(0.46, dt);
+      shard.vy *= Math.pow(0.46, dt);
+      shard.vy += this.radius * 3.8 * dt;
+      shard.x += shard.vx * dt;
+      shard.y += shard.vy * dt;
+      shard.rot += shard.spin * dt;
+      shard.group.position.set(shard.x, shard.y);
+      shard.group.rotation = shard.rot;
+      shard.group.alpha = Math.pow(1 - local, 0.72);
+      shard.group.scale.set(1 - local * 0.2);
+    }
+
+    if (t >= 1) this.done = true;
+  }
+
+  destroy() {
+    this.view.destroy({ children: true });
+  }
+}
+
+/**
+ * A cannon capture made legible as a cannon shot.
+ *
+ * The screen piece is the rule that distinguishes a cannon from every other Xiangqi piece,
+ * so the shot starts by marking that piece, charges at the muzzle, then drives a double ink
+ * beam through it. The beam lives below the pieces; the lock-on and impact flare live above
+ * them, so the board stays readable while the strike still feels physical.
+ */
+export class CannonBlastEffect {
+  constructor({ from, to, screen, radius = 38, colour = PALETTE.red, lowMotion = false, seed }) {
+    this.lowMotion = lowMotion;
+    this.age = 0;
+    this.duration = lowMotion ? 0.42 : 1.08;
+    this.done = false;
+    this.from = from;
+    this.to = to;
+    this.screen = screen;
+    this.radius = radius;
+    this.colour = colour;
+    this.view = new Container();
+    this.beam = new Graphics();
+    this.view.addChild(this.beam);
+
+    this.overlayView = new Container();
+    this.charge = new Graphics();
+    this.screenLock = new Graphics();
+    this.impact = new Graphics();
+    this.sparks = new Graphics();
+    this.overlayView.addChild(this.screenLock, this.charge, this.sparks, this.impact);
+
+    const dx = to.x - from.x;
+    const dy = to.y - from.y;
+    this.length = Math.hypot(dx, dy) || 1;
+    this.ux = dx / this.length;
+    this.uy = dy / this.length;
+
+    const rand = mulberry32(seed ?? nextSeed());
+    this.sparkSeeds = [];
+    const count = lowMotion ? 0 : 34;
+    for (let i = 0; i < count; i++) {
+      const angle = (Math.PI * 2 * i) / count + (rand() - 0.5) * 0.42;
+      this.sparkSeeds.push({
+        angle,
+        speed: radius * (2.2 + rand() * 5.8),
+        size: radius * (0.025 + rand() * 0.075),
+        life: 0.34 + rand() * 0.4,
+        kind: rand() < 0.36 ? "line" : "dot",
+        radii: blobRadii(rand, 6 + Math.round(rand() * 4), 0.3),
+      });
+    }
+  }
+
+  update(dt) {
+    this.age += dt;
+    const t = Math.min(1, this.age / this.duration);
+    this.beam.clear();
+    this.charge.clear();
+    this.screenLock.clear();
+    this.impact.clear();
+    this.sparks.clear();
+
+    const launchStart = this.lowMotion ? 0.06 : 0.1;
+    const launchEnd = this.lowMotion ? 0.17 : 0.24;
+    const beamFade = this.lowMotion ? 1 - t : Math.max(0, 1 - Math.max(0, this.age - 0.26) / 0.78);
+
+    // The screen is the "mountain". Hold a gold and vermilion lock on it long enough for
+    // the player to read why the shot can reach across the board.
+    if (this.screen && beamFade > 0) {
+      const lockAlpha = Math.min(1, this.age / 0.08) * beamFade;
+      const lockR = this.radius * (1.34 + Math.sin(this.age * 13) * 0.08);
+      this.screenLock
+        .circle(this.screen.x, this.screen.y, lockR)
+        .stroke({ width: 3.2, color: PALETTE.gold, alpha: lockAlpha * 0.8 });
+      this.screenLock
+        .circle(this.screen.x, this.screen.y, lockR * 0.72)
+        .stroke({ width: 1.4, color: this.colour, alpha: lockAlpha * 0.7 });
+      for (let i = 0; i < 8; i++) {
+        const a = (Math.PI * 2 * i) / 8 + this.age * 0.65;
+        const inner = lockR * 1.14;
+        const outer = lockR * (1.34 + (i % 2) * 0.08);
+        this.screenLock
+          .moveTo(this.screen.x + Math.cos(a) * inner, this.screen.y + Math.sin(a) * inner)
+          .lineTo(this.screen.x + Math.cos(a) * outer, this.screen.y + Math.sin(a) * outer)
+          .stroke({ width: 2, color: PALETTE.gold, alpha: lockAlpha * 0.7 });
+      }
+    }
+
+    // Charge: three shrinking rings and a hot centre at the cannon. This begins before the
+    // piece has travelled far, so the shot reads as the cause of the capture.
+    if (this.age < launchEnd + 0.12) {
+      const chargeT = Math.min(1, this.age / Math.max(0.08, launchEnd));
+      const chargeAlpha = Math.min(1, this.age / 0.06);
+      for (let i = 0; i < 3; i++) {
+        const r = this.radius * (1.34 - i * 0.24) * (1 - chargeT * 0.34);
+        this.charge
+          .circle(this.from.x, this.from.y, r)
+          .stroke({
+            width: 4 - i,
+            color: i === 0 ? PALETTE.gold : this.colour,
+            alpha: chargeAlpha * (0.68 - i * 0.13),
+          });
+      }
+      this.charge
+        .circle(this.from.x, this.from.y, this.radius * (0.42 + chargeT * 0.3))
+        .fill({ color: 0xfff2cf, alpha: chargeAlpha * 0.58 });
+    }
+
+    if (this.age >= launchStart && beamFade > 0) {
+      const p = Math.min(1, (this.age - launchStart) / Math.max(0.01, launchEnd - launchStart));
+      const ex = this.from.x + (this.to.x - this.from.x) * p;
+      const ey = this.from.y + (this.to.y - this.from.y) * p;
+      this.beam
+        .moveTo(this.from.x, this.from.y)
+        .lineTo(ex, ey)
+        .stroke({ width: this.radius * 1.18, color: this.colour, alpha: beamFade * 0.16 });
+      this.beam
+        .moveTo(this.from.x, this.from.y)
+        .lineTo(ex, ey)
+        .stroke({ width: this.radius * 0.28, color: PALETTE.gold, alpha: beamFade * 0.82 });
+      this.beam
+        .moveTo(this.from.x, this.from.y)
+        .lineTo(ex, ey)
+        .stroke({ width: Math.max(1.2, this.radius * 0.055), color: 0xfff8e9, alpha: beamFade * 0.96 });
+    }
+
+    if (this.age >= launchEnd - 0.04) {
+      const impactT = Math.min(1, (this.age - (launchEnd - 0.04)) / 0.54);
+      const impactFade = Math.pow(1 - impactT, 1.5);
+      const front = this.radius * (0.72 + Math.pow(impactT, 0.48) * 4.4);
+      this.impact
+        .circle(this.to.x, this.to.y, front)
+        .stroke({ width: 6, color: this.colour, alpha: impactFade * 0.28 });
+      this.impact
+        .circle(this.to.x, this.to.y, front * 0.92)
+        .stroke({ width: 2.2, color: PALETTE.gold, alpha: impactFade * 0.94 });
+      for (let i = 0; i < 10; i++) {
+        const a = (Math.PI * 2 * i) / 10 + 0.18;
+        const r0 = this.radius * (0.8 + impactT * 0.55);
+        const r1 = r0 + this.radius * (0.7 + (i % 3) * 0.34) * impactFade;
+        this.impact
+          .moveTo(this.to.x + Math.cos(a) * r0, this.to.y + Math.sin(a) * r0)
+          .lineTo(this.to.x + Math.cos(a) * r1, this.to.y + Math.sin(a) * r1)
+          .stroke({ width: i % 2 ? 2 : 3.4, color: i % 3 ? PALETTE.gold : this.colour, alpha: impactFade * 0.72 });
+      }
+
+      for (const spark of this.sparkSeeds) {
+        const local = Math.max(0, this.age - launchEnd) / spark.life;
+        if (local >= 1) continue;
+        const travel = spark.speed * Math.pow(local, 0.56);
+        const x = this.to.x + Math.cos(spark.angle) * travel;
+        const y = this.to.y + Math.sin(spark.angle) * travel;
+        const alpha = Math.pow(1 - local, 1.3);
+        if (spark.kind === "line") {
+          this.sparks
+            .moveTo(this.to.x + Math.cos(spark.angle) * travel * 0.45, this.to.y + Math.sin(spark.angle) * travel * 0.45)
+            .lineTo(x, y)
+            .stroke({ width: spark.size * 1.8, color: this.colour, alpha: alpha * 0.78 });
+        } else {
+          this.sparks
+            .poly(radiiToPoints(spark.radii, spark.size, 1, x, y), true)
+            .fill({ color: PALETTE.gold, alpha: alpha * 0.9 });
+        }
+      }
+    }
+
+    if (t >= 1) this.done = true;
+  }
+
+  destroy() {
+    this.view.destroy({ children: true });
+    this.overlayView.destroy({ children: true });
+  }
+}
+
+/**
+ * The short signature left by the piece that delivered a capture.
+ *
+ * Cannon captures already own the long-range shot. Every other Xiangqi piece gets a motif
+ * built from how it entered the square: rooks cut, horses stamp, pawns thrust, advisors and
+ * elephants sweep the palace, and a general hits with concentric pressure.
+ */
+export class PieceCaptureAccentEffect {
+  constructor({ from, to, kind, radius = 34, colour = PALETTE.red, lowMotion = false }) {
+    this.lowMotion = lowMotion;
+    this.age = 0;
+    this.duration = lowMotion ? 0.32 : 0.78;
+    this.done = false;
+    this.from = from;
+    this.to = to;
+    this.kind = kind;
+    this.radius = radius;
+    this.colour = colour;
+    this.angle = Math.atan2(to.y - from.y, to.x - from.x);
+    this.view = new Container();
+    this.mark = new Graphics();
+    this.view.addChild(this.mark);
+  }
+
+  update(dt) {
+    this.age += dt;
+    const t = Math.min(1, this.age / this.duration);
+    const fade = Math.pow(1 - t, 1.35);
+    this.mark.clear();
+
+    if (this.lowMotion) {
+      this.mark
+        .circle(this.to.x, this.to.y, this.radius * (1.2 + t * 0.8))
+        .stroke({ width: 2, color: this.colour, alpha: (1 - t) * 0.5 });
+      if (t >= 1) this.done = true;
+      return;
+    }
+
+    const ux = Math.cos(this.angle);
+    const uy = Math.sin(this.angle);
+    const nx = -uy;
+    const ny = ux;
+
+    if (this.kind === PIECE.rook) {
+      // Rook: two clean parallel cuts that extend beyond the struck square.
+      for (let side = -1; side <= 1; side += 2) {
+        const offset = this.radius * 0.42 * side;
+        const tail = this.radius * (4.2 * fade + 0.5);
+        this.mark
+          .moveTo(this.to.x - ux * tail + nx * offset, this.to.y - uy * tail + ny * offset)
+          .lineTo(this.to.x + ux * this.radius * 2.1 + nx * offset, this.to.y + uy * this.radius * 2.1 + ny * offset)
+          .stroke({
+            width: side < 0 ? 3.4 : 1.5,
+            color: side < 0 ? PALETTE.gold : this.colour,
+            alpha: fade * 0.82,
+          });
+      }
+      for (let i = 0; i < 4; i++) {
+        const r = this.radius * (0.7 + i * 0.42);
+        this.mark
+          .moveTo(this.to.x + nx * r, this.to.y + ny * r)
+          .lineTo(this.to.x - nx * r, this.to.y - ny * r)
+          .stroke({ width: 1.2, color: this.colour, alpha: fade * (0.32 - i * 0.045) });
+      }
+    } else if (this.kind === PIECE.horse) {
+      // Horse: a crescent of hoof prints and three hair-like arcs around the landing.
+      for (let i = 0; i < 7; i++) {
+        const a = this.angle + Math.PI * 0.66 + i * 0.16;
+        const r = this.radius * (0.72 + i * 0.3) * (1 + (1 - fade) * 0.24);
+        const x = this.to.x + Math.cos(a) * r;
+        const y = this.to.y + Math.sin(a) * r;
+        this.mark
+          .ellipse(x, y, this.radius * 0.11, this.radius * 0.055)
+          .fill({ color: i % 2 ? PALETTE.gold : this.colour, alpha: fade * (0.62 - i * 0.045) });
+      }
+      for (let i = 0; i < 3; i++) {
+        const r = this.radius * (1.1 + i * 0.34 + t * 0.6);
+        this.mark
+          .arc(this.to.x, this.to.y, r, this.angle - 0.9, this.angle + 1.7)
+          .stroke({ width: 2.6 - i * 0.5, color: i === 1 ? PALETTE.gold : this.colour, alpha: fade * 0.48 });
+      }
+    } else if (this.kind === PIECE.pawn) {
+      // Pawn: a low, short thrust rather than a broad blast.
+      const reach = this.radius * (2.8 * fade + 0.5);
+      this.mark
+        .poly(
+          [
+            this.to.x - ux * reach,
+            this.to.y - uy * reach,
+            this.to.x + nx * this.radius * 0.8,
+            this.to.y + ny * this.radius * 0.8,
+            this.to.x - nx * this.radius * 0.8,
+            this.to.y - ny * this.radius * 0.8,
+          ],
+          true,
+        )
+        .fill({ color: this.colour, alpha: fade * 0.3 });
+      for (let i = 0; i < 3; i++) {
+        this.mark
+          .ellipse(this.to.x - ux * this.radius * (0.7 + i * 0.42), this.to.y - uy * this.radius * (0.7 + i * 0.42), this.radius * 0.42, this.radius * 0.16)
+          .stroke({ width: 1.2, color: PALETTE.gold, alpha: fade * (0.48 - i * 0.09) });
+      }
+    } else if (this.kind === PIECE.advisor || this.kind === PIECE.elephant) {
+      // Advisor and elephant: palace wind, drawn as four elegant rotating curls.
+      for (let i = 0; i < 4; i++) {
+        const a = this.age * 2.2 + (Math.PI * 2 * i) / 4;
+        const r = this.radius * (1.15 + t * 0.78);
+        this.mark
+          .arc(this.to.x, this.to.y, r, a, a + 1.08)
+          .stroke({ width: 2.4, color: i % 2 ? this.colour : PALETTE.gold, alpha: fade * 0.58 });
+        this.mark
+          .circle(this.to.x + Math.cos(a) * r, this.to.y + Math.sin(a) * r, this.radius * 0.07)
+          .fill({ color: PALETTE.paper, alpha: fade * 0.8 });
+      }
+    } else {
+      // General: compact pressure rings and radial fault lines.
+      for (let i = 0; i < 8; i++) {
+        const a = (Math.PI * 2 * i) / 8;
+        const r0 = this.radius * (0.8 + t * 0.45);
+        const r1 = r0 + this.radius * 1.4 * fade;
+        this.mark
+          .moveTo(this.to.x + Math.cos(a) * r0, this.to.y + Math.sin(a) * r0)
+          .lineTo(this.to.x + Math.cos(a) * r1, this.to.y + Math.sin(a) * r1)
+          .stroke({ width: i % 2 ? 2 : 3.2, color: i % 2 ? PALETTE.gold : this.colour, alpha: fade * 0.64 });
+      }
+      this.mark
+        .circle(this.to.x, this.to.y, this.radius * (1.2 + t * 1.4))
+        .stroke({ width: 3, color: this.colour, alpha: fade * 0.45 });
+    }
+
+    if (t >= 1) this.done = true;
+  }
+
+  destroy() {
+    this.view.destroy({ children: true });
+  }
+}
+
+/**
+ * The river answers a piece that crosses it.
+ *
+ * A translucent wash travels through the楚河漢界 band while gold current lines sweep across
+ * and a large 渡 seal rises from the paper. This is deliberately attached to the actual
+ * move timeline, so it reads as the board reacting rather than as a generic banner.
+ */
+export class RiverSurgeEffect {
+  constructor({ left, top, width, height, step = 64, colour = PALETTE.red, lowMotion = false, seed }) {
+    this.lowMotion = lowMotion;
+    this.age = 0;
+    this.duration = lowMotion ? 0.5 : 1.5;
+    this.done = false;
+    this.left = left;
+    this.top = top;
+    this.width = width;
+    this.height = height;
+    this.colour = colour;
+    this.view = new Container();
+    this.band = new Graphics();
+    this.current = new Graphics();
+    this.motes = new Graphics();
+    this.view.addChild(this.band, this.current, this.motes);
+
+    const rand = mulberry32(seed ?? nextSeed());
+    this.lines = [];
+    const count = lowMotion ? 1 : 9;
+    for (let i = 0; i < count; i++) {
+      this.lines.push({
+        y: top + height * (0.16 + rand() * 0.68),
+        offset: rand(),
+        speed: 1.15 + rand() * 0.9,
+        width: 2.1 + rand() * 4.2,
+        gold: rand() > 0.35,
+      });
+    }
+    this.moteSeeds = [];
+    const moteCount = lowMotion ? 0 : 28;
+    for (let i = 0; i < moteCount; i++) {
+      this.moteSeeds.push({
+        x: left + rand() * width,
+        y: top + height * (0.05 + rand() * 0.9),
+        speed: 0.7 + rand() * 1.8,
+        length: step * (0.08 + rand() * 0.22),
+        delay: rand() * 0.24,
+      });
+    }
+
+    this.glyph = null;
+    if (!lowMotion) {
+      this.glyph = new Text({
+        text: "渡",
+        style: new TextStyle({
+          fontFamily: "Songti SC, SimSun, STSong, serif",
+          fontSize: Math.max(44, step * 1.35),
+          fontWeight: "700",
+          fill: this.colour,
+          stroke: { color: PALETTE.paper, width: Math.max(2, step * 0.04) },
+        }),
+      });
+      this.glyph.anchor.set(0.5);
+      this.glyph.position.set(left + width / 2, top + height / 2);
+      this.view.addChild(this.glyph);
+    }
+  }
+
+  update(dt) {
+    this.age += dt;
+    const t = Math.min(1, this.age / this.duration);
+    const fade = Math.pow(1 - t, 1.35);
+    this.band.clear();
+    this.current.clear();
+    this.motes.clear();
+
+    const rise = Math.min(1, this.age / 0.18);
+    this.band
+      .rect(this.left - 6, this.top, this.width + 12, this.height)
+      .fill({ color: this.colour, alpha: (this.lowMotion ? 0.08 : 0.2) * rise * fade });
+    this.band
+      .rect(this.left - 6, this.top - 2, this.width + 12, this.height + 4)
+      .stroke({ width: this.lowMotion ? 1.5 : 4, color: PALETTE.gold, alpha: rise * fade * (this.lowMotion ? 0.42 : 0.94) });
+
+    for (const line of this.lines) {
+      const head = (this.age * line.speed + line.offset) % 1;
+      const tail = Math.max(0, head - (this.lowMotion ? 0.9 : 0.28));
+      const x0 = this.left + tail * this.width;
+      const x1 = this.left + head * this.width;
+      const wave = Math.sin(this.age * 9 + line.offset * 12) * this.height * 0.08;
+      this.current
+        .moveTo(x0, line.y)
+        .quadraticCurveTo((x0 + x1) / 2, line.y + wave, x1, line.y - wave * 0.35)
+        .stroke({
+          width: line.width,
+          color: line.gold ? PALETTE.gold : this.colour,
+          alpha: fade * (line.gold ? 0.82 : 0.5),
+        });
+    }
+    if (!this.lowMotion) {
+      const crestX = this.left - 30 + ((this.age * 0.92) % 1) * (this.width + 60);
+      this.current
+        .poly(
+          [
+            crestX - 10,
+            this.top + 4,
+            crestX + 22,
+            this.top + this.height / 2,
+            crestX - 10,
+            this.top + this.height - 4,
+          ],
+          true,
+        )
+        .stroke({ width: 6, color: PALETTE.gold, alpha: fade * 0.52 });
+    }
+
+    for (const mote of this.moteSeeds) {
+      const local = Math.max(0, this.age - mote.delay) / Math.max(0.01, this.duration - mote.delay);
+      if (local <= 0 || local >= 1) continue;
+      const x = this.left - 16 + ((mote.x - this.left + mote.speed * this.age * this.width) % (this.width + 32));
+      const alpha = Math.sin(local * Math.PI) * 0.72;
+      this.motes
+        .moveTo(x, mote.y)
+        .lineTo(x + mote.length, mote.y + Math.sin(this.age * 11 + mote.y) * 1.8)
+        .stroke({ width: 1.5, color: this.colour, alpha });
+    }
+
+    if (this.glyph) {
+      const riseT = Math.min(1, this.age / 0.34);
+      const overshoot = 1 + Math.sin(riseT * Math.PI) * 0.18;
+      this.glyph.scale.set((0.34 + riseT * 0.76) * overshoot);
+      this.glyph.alpha = riseT * Math.max(0, 1 - t) * 0.68;
+      this.glyph.rotation = -0.06 + Math.sin(this.age * 4.2) * 0.012;
+    }
+
     if (t >= 1) this.done = true;
   }
 
@@ -542,15 +1070,19 @@ export class FlashEffect {
  * low-motion form: a single soft rim pulse, no shake, no glyph, no spray.
  */
 export class CheckEffect {
-  constructor({ boardWidth, boardHeight, originX = 0, originY = 0, focus, step = 64, lowMotion = false, seed }) {
+  constructor({ boardWidth, boardHeight, originX = 0, originY = 0, focus, attacker, step = 64, lowMotion = false, tier = 1, seed }) {
     this.lowMotion = lowMotion;
+    this.tier = Math.min(3, Math.max(1, Math.round(Number(tier) || 1)));
     this.age = 0;
-    this.duration = lowMotion ? 0.55 : 1.35;
+    this.duration = lowMotion ? 0.55 : 1.35 + (this.tier - 1) * 0.22;
     this.done = false;
     this.view = new Container();
     this.rim = new Graphics();
-    this.view.addChild(this.rim);
+    this.attack = new Graphics();
+    this.view.addChild(this.rim, this.attack);
     this.focus = focus;
+    this.attacker = attacker;
+    this.step = step;
     this.boardWidth = boardWidth;
     this.boardHeight = boardHeight;
     // The frame is drawn in stage coordinates, so it needs the board's own origin: drawing
@@ -562,6 +1094,7 @@ export class CheckEffect {
     this.spray = null;
     this.glyph = null;
     this.glyphBleed = null;
+    this.echoes = [];
 
     if (!lowMotion) {
       // The spray sits under the character: ink hitting the page behind the brush.
@@ -569,7 +1102,7 @@ export class CheckEffect {
       this.spray.position.set(0, 0);
       this.view.addChild(this.spray);
       this.spraySeeds = [];
-      for (let i = 0; i < 16; i++) {
+      for (let i = 0; i < 16 + this.tier * 6; i++) {
         const angle = rand() * Math.PI * 2;
         this.spraySeeds.push({
           angle,
@@ -624,6 +1157,24 @@ export class CheckEffect {
         }
         this.glyphBleed.alpha = 0.5;
         this.view.addChild(this.glyphBleed, this.glyph);
+
+        // A second and third check in quick succession leave afterimages behind the main
+        // character. They are echoes, not extra labels: the threat itself stays unmistakably
+        // one call of "将".
+        for (let i = 1; i < this.tier; i++) {
+          const echo = new Text({
+            text: "将",
+            style: new TextStyle({ ...base, fill: i === 1 ? PALETTE.red : 0xffefcf }),
+          });
+          echo.anchor.set(0.5);
+          echo.position.set(cx, cy);
+          echo.alpha = 0;
+          this.view.addChild(echo);
+          this.echoes.push({
+            text: echo,
+            angle: i === 1 ? (this.tier >= 3 ? 0 : -0.45) : Math.PI - 0.2,
+          });
+        }
       }
     }
   }
@@ -643,6 +1194,55 @@ export class CheckEffect {
     this.rim
       .roundRect(this.originX, this.originY, this.boardWidth, this.boardHeight, 18)
       .stroke({ width: 4, color: PALETTE.red, alpha });
+
+    this.attack.clear();
+    if (!this.lowMotion && this.attacker && this.focus) {
+      // A broken tactical line, not a movement arrow: it converges on the threatened
+      // general and then breaks into orbiting slashes. This points at the source of the
+      // check without claiming that horses or cannons move in a straight line.
+      const dx = this.focus.x - this.attacker.x;
+      const dy = this.focus.y - this.attacker.y;
+      const length = Math.hypot(dx, dy) || 1;
+      const ux = dx / length;
+      const uy = dy / length;
+      const reveal = Math.min(1, this.age / 0.28);
+      const lockFade = Math.max(0, 1 - Math.max(0, this.age - 0.55) / 0.8);
+      const segments = 15;
+      for (let i = 0; i < segments; i += 2) {
+        const a = Math.min(reveal, i / segments);
+        const b = Math.min(reveal, (i + 1) / segments);
+        if (b <= a) continue;
+        const wa = this.attacker.x + dx * a;
+        const wb = this.attacker.x + dx * b;
+        const ha = this.attacker.y + dy * a;
+        const hb = this.attacker.y + dy * b;
+        this.attack
+          .moveTo(wa, ha)
+          .lineTo(wb, hb)
+          .stroke({
+            width: i % 4 === 0 ? 3.4 : 2,
+            color: i % 4 === 0 ? PALETTE.red : PALETTE.gold,
+            alpha: lockFade * (i % 4 === 0 ? 0.68 : 0.45),
+          });
+      }
+      const lockR = Math.max(24, this.step * 0.62) * (1 + Math.sin(this.age * 14) * 0.08);
+      for (let i = 0; i < 3; i++) {
+        const a = this.age * 2.8 + (Math.PI * 2 * i) / 3;
+        this.attack
+          .arc(this.focus.x, this.focus.y, lockR * (1 + i * 0.16), a, a + 0.72)
+          .stroke({
+            width: 3.2 - i * 0.6,
+            color: i === 1 ? PALETTE.gold : PALETTE.red,
+            alpha: lockFade * (0.76 - i * 0.12),
+          });
+      }
+      const tipX = this.focus.x - ux * lockR * 1.2;
+      const tipY = this.focus.y - uy * lockR * 1.2;
+      this.attack
+        .moveTo(this.attacker.x + ux * length * reveal, this.attacker.y + uy * length * reveal)
+        .lineTo(tipX + ux * 18, tipY + uy * 18)
+        .stroke({ width: 1.4, color: 0xfff0cf, alpha: lockFade * 0.8 });
+    }
 
     if (this.spray && this.focus) {
       const burst = Math.min(1, t / 0.35);
@@ -671,6 +1271,22 @@ export class CheckEffect {
       this.glyphBleed.scale.set(scale * 1.06);
       this.glyphBleed.rotation = tilt * 1.4;
       this.glyphBleed.alpha = glyphAlpha * 0.42;
+
+      for (let i = 0; i < this.echoes.length; i++) {
+        const echo = this.echoes[i];
+        const echoT = Math.min(1, Math.max(0, (this.age - 0.08 - i * 0.1) / 0.42));
+        const spread = this.step * (1.7 + i * 0.9);
+        const echoMargin = this.step * 0.78;
+        const echoX = this.glyph.x + Math.cos(echo.angle) * spread * Math.sin(echoT * Math.PI * 0.5);
+        const echoY = this.glyph.y + Math.sin(echo.angle) * spread * Math.sin(echoT * Math.PI * 0.5);
+        echo.text.position.set(
+          Math.min(Math.max(echoX, this.originX + echoMargin), this.originX + this.boardWidth - echoMargin),
+          Math.min(Math.max(echoY, this.originY + echoMargin), this.originY + this.boardHeight - echoMargin),
+        );
+        echo.text.scale.set(scale * (0.86 - i * 0.1));
+        echo.text.rotation = -echo.angle * 0.06 + tilt * 0.5;
+        echo.text.alpha = glyphAlpha * (i === 0 ? 0.28 : 0.18);
+      }
     }
 
     if (t >= 1) this.done = true;
@@ -682,8 +1298,142 @@ export class CheckEffect {
     const t = Math.min(1, this.age / this.duration);
     if (t > 0.5) return { x: 0, y: 0 };
     // Decaying random walk with a directional bias: the board is knocked, then settles.
-    const magnitude = 6 * (1 - t * 2);
+    const magnitude = (6 + (this.tier - 1) * 2.3) * (1 - t * 2);
     return { x: (Math.random() - 0.5) * magnitude * 2, y: (Math.random() - 0.5) * magnitude * 2 };
+  }
+
+  destroy() {
+    this.view.destroy({ children: true });
+  }
+}
+
+/**
+ * A translucent piece that retraces a move for a replay or a successful undo.
+ *
+ * The authoritative pieces still jump/rebuild on undo snapshots; this ghost supplies the
+ * spatial continuity the player actually sees. Replay ghosts warm toward gold, while undo
+ * ghosts pull a vermilion thread back to the origin and collapse at the end.
+ */
+export class GhostMoveEffect {
+  constructor({
+    from,
+    to,
+    glyph = "",
+    colour = PALETTE.red,
+    kind = 0,
+    radius = 34,
+    lowMotion = false,
+    mode = "replay",
+    duration,
+  }) {
+    this.from = from;
+    this.to = to;
+    this.glyph = glyph;
+    this.colour = colour;
+    this.kind = kind;
+    this.radius = radius;
+    this.lowMotion = lowMotion;
+    this.mode = mode;
+    this.age = 0;
+    this.duration =
+      Number.isFinite(duration) && duration > 0
+        ? duration
+        : lowMotion
+          ? 0.32
+          : mode === "undo"
+            ? 0.86
+            : 1.05;
+    this.done = false;
+    this.view = new Container();
+    this.trail = new Graphics();
+    this.aura = new Graphics();
+    this.body = new Container();
+    this.disc = new Graphics();
+    this.body.addChild(this.disc);
+    if (glyph) {
+      this.text = new Text({
+        text: glyph,
+        style: new TextStyle({
+          fontFamily: "Songti SC, SimSun, STSong, serif",
+          fontSize: radius * 1.22,
+          fontWeight: "600",
+          fill: colour,
+        }),
+      });
+      this.text.anchor.set(0.5);
+      this.text.position.set(0, radius * 0.04);
+      this.body.addChild(this.text);
+    }
+    this.disc
+      .circle(0, 0, radius)
+      .fill({ color: PALETTE.paper, alpha: 0.86 })
+      .stroke({ width: 2.4, color: colour, alpha: 0.88 });
+    this.view.addChild(this.trail, this.aura, this.body);
+  }
+
+  update(dt) {
+    this.age += dt;
+    const t = Math.min(1, this.age / this.duration);
+    const eased = this.mode === "undo" ? 1 - Math.pow(1 - t, 3) : easeOutCubic(t);
+    const dx = this.to.x - this.from.x;
+    const dy = this.to.y - this.from.y;
+    const distance = Math.hypot(dx, dy) || 1;
+    const arc = this.kind === PIECE.horse ? Math.sin(t * Math.PI) * this.radius * 0.8 : 0;
+    const x = this.from.x + dx * eased - (dy / distance) * arc;
+    const y = this.from.y + dy * eased + (dx / distance) * arc;
+
+    this.body.position.set(x, y);
+    this.body.scale.set(this.lowMotion ? 1 : 1 + Math.sin(t * Math.PI) * 0.08);
+    const fadeIn = Math.min(1, this.age / 0.06);
+    const fadeOut = this.mode === "undo" ? Math.max(0, 1 - Math.pow(Math.max(0, t - 0.78) / 0.22, 2)) : Math.max(0, 1 - Math.pow(Math.max(0, t - 0.86) / 0.14, 2));
+    this.body.alpha = this.lowMotion ? 0.72 * fadeIn * fadeOut : 0.9 * fadeIn * fadeOut;
+    this.body.rotation = Math.sin(t * Math.PI) * (this.mode === "undo" ? -0.12 : 0.08);
+
+    this.trail.clear();
+    this.aura.clear();
+    if (this.lowMotion) {
+      this.trail
+        .moveTo(this.from.x, this.from.y)
+        .lineTo(this.to.x, this.to.y)
+        .stroke({ width: 2, color: this.mode === "undo" ? PALETTE.red : PALETTE.gold, alpha: (1 - t) * 0.5 });
+    } else {
+      const steps = 18;
+      for (let i = 0; i < steps; i++) {
+        const t0 = (i / steps) * eased;
+        const t1 = Math.min(eased, ((i + 1) / steps) * eased);
+        if (t1 <= t0) continue;
+        const x0 = this.from.x + dx * t0;
+        const y0 = this.from.y + dy * t0;
+        const x1 = this.from.x + dx * t1;
+        const y1 = this.from.y + dy * t1;
+        this.trail
+          .moveTo(x0, y0)
+          .lineTo(x1, y1)
+          .stroke({
+            width: this.radius * (0.08 + t0 * 0.22),
+            color: this.mode === "undo" ? this.colour : PALETTE.gold,
+            alpha: (1 - t) * (0.2 + t0 * 0.55),
+          });
+      }
+      const auraR = this.radius * (1.2 + Math.sin(t * Math.PI) * 0.42);
+      this.aura
+        .circle(x, y, auraR)
+        .stroke({
+          width: this.mode === "undo" ? 2.8 : 2,
+          color: this.mode === "undo" ? PALETTE.red : PALETTE.gold,
+          alpha: (1 - t) * 0.58,
+        });
+      if (this.mode === "undo") {
+        for (let i = 0; i < 3; i++) {
+          const a = this.age * 4.2 + (Math.PI * 2 * i) / 3;
+          this.aura
+            .arc(x, y, auraR * (1.1 + i * 0.18), a, a + 0.76)
+            .stroke({ width: 2, color: i === 1 ? PALETTE.gold : PALETTE.red, alpha: (1 - t) * 0.52 });
+        }
+      }
+    }
+
+    if (t >= 1) this.done = true;
   }
 
   destroy() {
@@ -1044,6 +1794,136 @@ export class WinEffect {
   destroy() {
     this.view.destroy({ children: true });
     this.overlayView.destroy({ children: true });
+  }
+}
+
+/**
+ * Cracks the losing palace when a Xiangqi game ends.
+ *
+ * The victory seal is a stamp on top of the board; this effect is the board giving way
+ * underneath it. Fourteen irregular fractures radiate from the defeated general, with a
+ * suspended ring of ink dust between the first crack and the final seal.
+ */
+export class VictoryFractureEffect {
+  constructor({ center, step = 64, lowMotion = false, seed }) {
+    this.lowMotion = lowMotion;
+    this.age = 0;
+    this.duration = lowMotion ? 0.5 : 2.15;
+    this.done = false;
+    this.center = center;
+    this.step = step;
+    this.view = new Container();
+    this.cracks = new Graphics();
+    this.rings = new Graphics();
+    this.dust = new Graphics();
+    this.view.addChild(this.cracks, this.rings, this.dust);
+
+    const rand = mulberry32(seed ?? nextSeed());
+    this.fractures = [];
+    const count = lowMotion ? 0 : 14;
+    for (let i = 0; i < count; i++) {
+      const angle = (Math.PI * 2 * i) / count + (rand() - 0.5) * 0.5;
+      const branches = [];
+      let a = angle;
+      let distance = 0;
+      const total = step * (1.2 + rand() * 4.2);
+      while (distance < total) {
+        const run = step * (0.2 + rand() * 0.46);
+        distance = Math.min(total, distance + run);
+        a += (rand() - 0.5) * 0.34;
+        branches.push({
+          x: Math.cos(a) * distance,
+          y: Math.sin(a) * distance,
+          at: distance / total,
+        });
+      }
+      this.fractures.push({
+        branches,
+        delay: rand() * 0.18,
+        width: 1.3 + rand() * 2.5,
+      });
+    }
+    this.motes = [];
+    for (let i = 0; i < (lowMotion ? 0 : 30); i++) {
+      this.motes.push({
+        angle: rand() * Math.PI * 2,
+        radius: step * (0.7 + rand() * 3.6),
+        size: step * (0.014 + rand() * 0.035),
+        delay: rand() * 0.35,
+      });
+    }
+  }
+
+  update(dt) {
+    this.age += dt;
+    const t = Math.min(1, this.age / this.duration);
+    this.cracks.clear();
+    this.rings.clear();
+    this.dust.clear();
+
+    const settle = Math.max(0, 1 - Math.max(0, this.age - 1.15) / 1);
+    if (this.lowMotion) {
+      this.rings
+        .circle(this.center.x, this.center.y, this.step * (0.7 + t * 1.4))
+        .stroke({ width: 2, color: PALETTE.red, alpha: (1 - t) * 0.5 });
+    } else {
+      const shock = Math.min(1, this.age / 0.7);
+      for (let i = 0; i < 3; i++) {
+        const r = this.step * (0.5 + Math.pow(shock, 0.6) * (2.2 + i * 0.86));
+        this.rings
+          .circle(this.center.x, this.center.y, r)
+          .stroke({
+            width: 5 - i,
+            color: i === 0 ? PALETTE.gold : PALETTE.red,
+            alpha: Math.pow(1 - shock, 1.3) * (0.7 - i * 0.14),
+          });
+      }
+
+      for (const fracture of this.fractures) {
+        const local = Math.max(0, this.age - fracture.delay) / 0.62;
+        if (local <= 0) continue;
+        const reveal = Math.min(1, local);
+        let previous = { x: 0, y: 0 };
+        for (const branch of fracture.branches) {
+          if (branch.at > reveal) break;
+          this.cracks
+            .moveTo(this.center.x + previous.x, this.center.y + previous.y)
+            .lineTo(this.center.x + branch.x, this.center.y + branch.y)
+            .stroke({
+              width: fracture.width * (1 - branch.at * 0.45),
+              color: PALETTE.ink,
+              alpha: settle * 0.78,
+            });
+          this.cracks
+            .moveTo(this.center.x + previous.x, this.center.y + previous.y)
+            .lineTo(this.center.x + branch.x, this.center.y + branch.y)
+            .stroke({
+              width: Math.max(1, fracture.width * 0.34),
+              color: PALETTE.red,
+              alpha: settle * 0.58,
+            });
+          previous = branch;
+        }
+      }
+
+      for (const mote of this.motes) {
+        const local = Math.max(0, this.age - mote.delay) / 1.45;
+        if (local <= 0 || local >= 1) continue;
+        const travel = mote.radius * Math.pow(local, 0.56);
+        const angle = mote.angle + local * 0.9;
+        const x = this.center.x + Math.cos(angle) * travel;
+        const y = this.center.y + Math.sin(angle) * travel * 0.78;
+        this.dust
+          .circle(x, y, mote.size * (1 - local * 0.5))
+          .fill({ color: local < 0.45 ? PALETTE.gold : PALETTE.red, alpha: (1 - local) * 0.78 * settle });
+      }
+    }
+
+    if (t >= 1) this.done = true;
+  }
+
+  destroy() {
+    this.view.destroy({ children: true });
   }
 }
 

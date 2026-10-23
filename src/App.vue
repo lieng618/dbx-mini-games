@@ -176,6 +176,7 @@ const seatMembers = computed(() =>
   seats.value.map((id) => members.value.find((m) => m.id === id) || null),
 );
 const spectators = computed(() => members.value.filter((m) => !seats.value.includes(m.id)));
+
 const undoPending = computed(() => Boolean(undoRequestedBy.value));
 const isUndoRequester = computed(() => undoRequestedBy.value === selfId.value);
 const isUndoRecipient = computed(() => undoPending.value && isSeated.value && !isUndoRequester.value);
@@ -338,6 +339,7 @@ function paint() {
     checkFocus: checkFocus.value,
     result: result.value,
     winLine: winLine.value,
+    moveCount: moveCount.value,
     lowMotion: reducedMotion.value,
     effectsOff: effectsLevel.value === "off",
   });
@@ -741,7 +743,7 @@ function previewLastMove() {
   // native button instead of relying on the visual ring alone.
   lastMoveAnnouncement.value = "";
   void nextTick(() => {
-    lastMoveAnnouncement.value = "已标出上一手，持续四秒";
+    lastMoveAnnouncement.value = "已复演上一手，持续四秒";
   });
 }
 
@@ -775,7 +777,9 @@ async function toggleLowMotion() {
 }
 
 function updateEffectsLevel() {
-  if (effectsLevel.value === "off") scene?.clearEffects();
+  if (effectsLevel.value === "off") {
+    scene?.clearEffects();
+  }
   persistSettings();
   paint();
 }
@@ -1135,7 +1139,9 @@ async function ensureScene() {
     await nextTick();
     if (!boardHost.value || scene) return scene;
     try {
-      const created = new BoardScene({ onCell });
+      const created = new BoardScene({
+        onCell,
+      });
       await created.init(boardHost.value, game.value);
       created.setFlipped(shouldFlipBoard(game.value, mySeat.value));
       if (document.visibilityState === "hidden") created.suspend();
@@ -1390,8 +1396,8 @@ watch(seats, (next, previous) => {
         :class="{ active: lastMovePreviewActive }"
         type="button"
         :disabled="!hasLastMove"
-        aria-label="标出上一手，持续高亮四秒"
-        title="高亮棋盘上的上一手，持续四秒"
+        aria-label="复演上一手，持续四秒"
+        title="复演棋子上一步的移动和吃子特效"
         @click="previewLastMove"
       >
         上一手
@@ -1894,6 +1900,7 @@ watch(seats, (next, previous) => {
 
         <div ref="boardHost" class="canvas-host" :class="{ hidden: canvasFailed }"></div>
       </div>
+
       <div v-if="canvasFailed" class="fallback">渲染器不可用，已切换到简化视图。</div>
 
       <Transition name="undo-request">
@@ -3621,6 +3628,7 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
    side underneath. Placed by named areas rather than source order, because both seats come
    from one v-for and would otherwise sit next to each other. */
 .board-col {
+  position: relative;
   flex: 1;
   min-height: 0;
   display: grid;

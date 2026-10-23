@@ -143,3 +143,49 @@ export function cellAt(lay, x, y) {
   const point = orient(lay, file, rank);
   return point.rank * lay.files + point.file;
 }
+
+/**
+ * Returns the squares strictly between two cells on one rank or file.
+ *
+ * Xiangqi's cannon capture is defined by its screen piece, so keeping this geometry in the
+ * shared layout module gives the board, effects and tests one answer for "what was jumped".
+ * Diagonal or disconnected cells return an empty list.
+ */
+export function cellsBetween(lay, from, to) {
+  if (!lay || from < 0 || to < 0 || from >= lay.cells || to >= lay.cells || from === to) {
+    return [];
+  }
+  const fromFile = from % lay.files;
+  const fromRank = Math.floor(from / lay.files);
+  const toFile = to % lay.files;
+  const toRank = Math.floor(to / lay.files);
+  const fileStep = Math.sign(toFile - fromFile);
+  const rankStep = Math.sign(toRank - fromRank);
+  if (fileStep !== 0 && rankStep !== 0) return [];
+
+  const cells = [];
+  let file = fromFile + fileStep;
+  let rank = fromRank + rankStep;
+  while (file !== toFile || rank !== toRank) {
+    cells.push(rank * lay.files + file);
+    file += fileStep;
+    rank += rankStep;
+  }
+  return cells;
+}
+
+/**
+ * Whether a move leaves one side of the river for the other.
+ *
+ * The test uses board indices rather than drawn coordinates, so it is unaffected by the
+ * seat-two half-turn. Only Xiangqi has this boundary.
+ */
+export function crossesRiver(lay, from, to) {
+  if (!lay || lay.game !== "xiangqi" || from < 0 || to < 0 || from >= lay.cells || to >= lay.cells) {
+    return false;
+  }
+  const river = lay.ranks / 2;
+  const fromRank = Math.floor(from / lay.files) + 0.5;
+  const toRank = Math.floor(to / lay.files) + 0.5;
+  return (fromRank < river && toRank > river) || (fromRank > river && toRank < river);
+}
