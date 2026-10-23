@@ -1753,7 +1753,7 @@ watch(seats, (next, previous) => {
                 <strong>昵称</strong>
               </span>
               <div class="nickname-settings-control">
-                <form class="nickname-settings-form" @submit.prevent="saveNickname">
+                <div class="nickname-settings-form">
                   <input
                     v-model="nicknameDraft"
                     :class="{ invalid: Boolean(nicknameError) }"
@@ -1767,20 +1767,22 @@ watch(seats, (next, previous) => {
                     :aria-describedby="nicknameError ? 'nickname-settings-error' : undefined"
                     :disabled="nicknameSaving"
                     @input="nicknameError = ''"
+                    @keydown.enter.prevent="saveNickname"
                     @keydown.esc.prevent="resetNicknameDraft"
                   />
                   <button
-                    type="submit"
+                    type="button"
                     class="nickname-save"
                     aria-label="保存昵称"
                     title="保存昵称"
                     :disabled="nicknameSaving || nicknameDraft.trim() === nickname"
+                    @click="saveNickname"
                   >
                     <svg aria-hidden="true" viewBox="0 0 20 20">
                       <path d="m5 10.5 3.2 3.2L15 6.8" />
                     </svg>
                   </button>
-                </form>
+                </div>
                 <span
                   v-if="nicknameError"
                   id="nickname-settings-error"
@@ -1987,7 +1989,7 @@ watch(seats, (next, previous) => {
         aria-labelledby="join-prompt-title"
         @click.self="closeJoinPrompt"
       >
-        <form class="join-prompt-card" @submit.prevent="submitJoinPassword">
+        <div class="join-prompt-card">
           <button
             class="join-prompt-close"
             type="button"
@@ -2014,6 +2016,7 @@ watch(seats, (next, previous) => {
               :aria-invalid="Boolean(joinPasswordError)"
               :aria-describedby="joinPasswordError ? 'join-prompt-error' : undefined"
               :disabled="joinSubmitting"
+              @keydown.enter.prevent="submitJoinPassword"
             />
           </label>
           <p v-if="joinPasswordError" id="join-prompt-error" class="join-prompt-error" role="alert">
@@ -2023,11 +2026,16 @@ watch(seats, (next, previous) => {
             <button type="button" class="ghost" :disabled="joinSubmitting" @click="closeJoinPrompt">
               取消
             </button>
-            <button type="submit" class="primary" :disabled="joinSubmitting">
+            <button
+              type="button"
+              class="primary"
+              :disabled="joinSubmitting"
+              @click="submitJoinPassword"
+            >
               {{ joinSubmitting ? "正在进入…" : joinPrompt.role === "spectator" ? "进入观战" : joinPrompt.role === "auto" ? "进入房间" : "加入房间" }}
             </button>
           </div>
-        </form>
+        </div>
       </div>
     </Transition>
 

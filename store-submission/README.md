@@ -9,8 +9,8 @@ has an immutable release tag with the matching assets.
 1. Commit all source and documentation changes.
 2. Run the complete test suite.
 3. Run `npm run package:dbx`.
-4. Run `node scripts/prepare-store-submission.mjs v0.4.0`.
-5. Create the immutable `v0.4.0` tag from the reviewed commit.
+4. Run `node scripts/prepare-store-submission.mjs v0.4.1`.
+5. Create the immutable `v0.4.1` tag from the reviewed commit.
 6. Publish a GitHub Release from that tag.
 7. Wait for the release workflow to upload:
    - the unsigned universal `.dbxp`;
@@ -24,10 +24,10 @@ has an immutable release tag with the matching assets.
 Suggested release commands:
 
 ```bash
-git tag v0.4.0
-git push origin v0.4.0
-gh release create v0.4.0 \
-  --title "DBX Mini Games 0.4.0" \
+git tag v0.4.1
+git push origin v0.4.1
+gh release create v0.4.1 \
+  --title "DBX Mini Games 0.4.1" \
   --notes-file RELEASE_NOTES.md
 ```
 
