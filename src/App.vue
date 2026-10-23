@@ -1311,7 +1311,7 @@ watch(seats, (next, previous) => {
 <template>
   <div
     class="workbench"
-    :class="{ 'lobby-mode': role === 'idle' }"
+    :class="{ 'lobby-mode': role === 'idle', 'motion-reduced': reducedMotion }"
     :data-board-size="boardSize"
     :data-game="game"
   >
@@ -1858,6 +1858,9 @@ watch(seats, (next, previous) => {
             },
           ]"
         >
+          <span v-if="seatActive(seat)" class="seat-turn-effect" aria-hidden="true">
+            <span class="seat-turn-sweep"></span>
+          </span>
           <svg class="avatar" viewBox="0 0 64 72" aria-hidden="true">
             <!-- A robe silhouette: head, shoulders, and a collar V. Kept as three shapes so
                  it reads at 44px without any asset, which the single-bundle CSP forbids. -->
@@ -3617,6 +3620,8 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
 }
 
 .seat-strip {
+  position: relative;
+  isolation: isolate;
   grid-area: far;
   display: flex;
   align-items: center;
@@ -3647,6 +3652,85 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
   border-color: rgba(176, 58, 46, 0.45);
   box-shadow: var(--shadow-2);
   transform: translateY(-1px);
+}
+
+.seat-turn-effect {
+  position: absolute;
+  inset: -3px;
+  z-index: 0;
+  border: 1px solid rgba(188, 138, 61, 0.72);
+  border-radius: inherit;
+  pointer-events: none;
+  animation: seat-turn-breathe 2.35s var(--ease-standard) infinite;
+}
+
+.seat-strip > :not(.seat-turn-effect) {
+  position: relative;
+  z-index: 1;
+}
+
+.seat-turn-effect::before,
+.seat-turn-effect::after {
+  content: "";
+  position: absolute;
+  pointer-events: none;
+}
+
+.seat-turn-effect::before {
+  inset: -2px;
+  border: 2px solid rgba(176, 58, 46, 0.64);
+  border-radius: inherit;
+  animation: seat-turn-flare 0.95s var(--ease-decelerate) both;
+}
+
+.seat-turn-effect::after {
+  top: -3px;
+  left: 22%;
+  width: 42%;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--gold), var(--red), transparent);
+  box-shadow: 0 0 9px rgba(212, 162, 74, 0.72);
+  animation: seat-turn-brush 0.9s var(--ease-decelerate) both;
+}
+
+.seat-turn-sweep {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  border-radius: inherit;
+}
+
+.seat-turn-sweep::before {
+  content: "";
+  position: absolute;
+  top: -25%;
+  bottom: -25%;
+  left: 0;
+  width: 34%;
+  background: linear-gradient(90deg, transparent, rgba(255, 249, 234, 0.44), transparent);
+  transform: translateX(-180%) skewX(-16deg);
+  animation: seat-turn-sheen 2.8s var(--ease-standard) 0.8s infinite;
+}
+
+.seat-turn-sweep::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 30%;
+  height: 3px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, transparent, var(--red), var(--gold), transparent);
+  box-shadow: 0 0 12px rgba(188, 138, 61, 0.72);
+  transform: translateX(18%);
+  animation: seat-turn-orbit 2.1s ease-in-out infinite alternate;
+}
+
+.seat-strip.active .avatar {
+  animation:
+    seat-turn-avatar 0.72s var(--ease-spring) both,
+    seat-turn-avatar-glow 2.35s ease-in-out 0.72s infinite;
+  filter: drop-shadow(0 0 7px rgba(176, 58, 46, 0.35));
 }
 
 .seat-strip.empty { border-style: dashed; box-shadow: none; background: rgba(255, 253, 248, 0.5); }
@@ -3692,6 +3776,117 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
 
 .seat-strip.active .seat-strip-clock { color: var(--ink); }
 .seat-strip-clock.low { color: var(--red); }
+
+@keyframes seat-turn-breathe {
+  0%,
+  100% {
+    border-color: rgba(188, 138, 61, 0.48);
+    box-shadow: 0 0 0 0 rgba(176, 58, 46, 0);
+  }
+  50% {
+    border-color: rgba(188, 138, 61, 0.9);
+    box-shadow:
+      0 0 0 2px rgba(176, 58, 46, 0.08),
+      0 0 18px rgba(188, 138, 61, 0.28);
+  }
+}
+
+@keyframes seat-turn-flare {
+  0% {
+    opacity: 0.78;
+    transform: scale(0.96);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.13);
+  }
+}
+
+@keyframes seat-turn-brush {
+  0% {
+    opacity: 0;
+    transform: scaleX(0.25);
+  }
+  35% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: scaleX(1.9);
+  }
+}
+
+@keyframes seat-turn-avatar {
+  0% {
+    opacity: 0.45;
+    transform: scale(0.82);
+  }
+  65% {
+    opacity: 1;
+    transform: scale(1.08);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes seat-turn-sheen {
+  0%,
+  18% {
+    opacity: 0;
+    transform: translateX(-180%) skewX(-16deg);
+  }
+  42% {
+    opacity: 0.8;
+  }
+  78%,
+  100% {
+    opacity: 0;
+    transform: translateX(390%) skewX(-16deg);
+  }
+}
+
+@keyframes seat-turn-orbit {
+  0% {
+    opacity: 0.42;
+    transform: translateX(18%);
+  }
+  100% {
+    opacity: 1;
+    transform: translateX(228%);
+  }
+}
+
+@keyframes seat-turn-avatar-glow {
+  0%,
+  100% {
+    filter: drop-shadow(0 0 4px rgba(176, 58, 46, 0.24));
+  }
+  50% {
+    filter: drop-shadow(0 0 10px rgba(188, 138, 61, 0.62));
+  }
+}
+
+.motion-reduced .seat-turn-effect,
+.motion-reduced .seat-turn-effect::before,
+.motion-reduced .seat-turn-effect::after,
+.motion-reduced .seat-turn-sweep::before,
+.motion-reduced .seat-strip.active .avatar {
+  animation: none !important;
+}
+
+.motion-reduced .seat-turn-effect::before,
+.motion-reduced .seat-turn-effect::after,
+.motion-reduced .seat-turn-sweep,
+.motion-reduced .seat-turn-sweep::after {
+  display: none;
+}
+
+.motion-reduced .seat-turn-effect {
+  border-color: rgba(176, 58, 46, 0.46);
+  box-shadow: none;
+}
 
 .canvas-host {
   grid-area: board;
@@ -5581,7 +5776,9 @@ button:focus-visible {
 
 .seat-strip.active {
   border-color: rgba(157, 48, 38, 0.5);
-  box-shadow: inset 3px 0 0 var(--red-deep);
+  box-shadow:
+    0 0 0 1px rgba(157, 48, 38, 0.08),
+    0 8px 20px rgba(157, 48, 38, 0.11);
   transform: none;
 }
 
