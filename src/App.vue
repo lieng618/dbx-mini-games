@@ -1469,10 +1469,10 @@ watch(seats, (next, previous) => {
             type="button"
             class="lobby-settings-button"
             :class="{ active: lobbyTab === 'settings' }"
-            :aria-label="lobbyTab === 'settings' ? '返回房间列表' : '设置'"
-            :aria-expanded="lobbyTab === 'settings'"
-            :title="lobbyTab === 'settings' ? '返回房间列表' : '设置'"
-            @click="lobbyTab = lobbyTab === 'settings' ? 'rooms' : 'settings'"
+            aria-label="设置"
+            :aria-current="lobbyTab === 'settings' ? 'page' : undefined"
+            title="设置"
+            @click="lobbyTab = 'settings'"
           >
             <svg aria-hidden="true" viewBox="0 0 24 24">
               <path d="M4 7h9M17 7h3M4 17h3M11 17h9M4 12h4M12 12h8" />
@@ -1480,7 +1480,7 @@ watch(seats, (next, previous) => {
               <circle cx="9" cy="17" r="2" />
               <circle cx="10" cy="12" r="2" />
             </svg>
-            <span class="settings-label">{{ lobbyTab === "settings" ? "返回" : "设置" }}</span>
+            <span class="settings-label">设置</span>
           </button>
         </header>
 
@@ -1725,10 +1725,22 @@ watch(seats, (next, previous) => {
         </section>
 
         <section v-show="lobbyTab === 'settings'" class="lobby-view lobby-settings">
-          <div class="settings-head">
+          <header class="lobby-form-heading settings-heading">
+            <button
+              type="button"
+              class="lobby-form-back"
+              aria-label="返回房间列表"
+              title="返回房间列表"
+              @click="lobbyTab = 'rooms'"
+            >
+              <svg aria-hidden="true" viewBox="0 0 24 24">
+                <path d="M19 12H5m6-6-6 6 6 6" />
+              </svg>
+            </button>
+            <span class="lobby-kicker">个人偏好</span>
             <h2>设置</h2>
-            <span>个人资料与显示偏好</span>
-          </div>
+            <p>个人资料与显示偏好</p>
+          </header>
           <div class="settings-grid">
             <div class="setting-row setting-nickname-row">
               <span class="setting-copy">
@@ -6325,6 +6337,23 @@ button:focus-visible {
     min-height: 44px;
     padding-inline: 12px;
     font-size: 13px;
+  }
+}
+
+/* Wide, short windows make the 16:9 scene height-constrained before its width is used.
+   Cap the canvas by viewport height so the paper frame stays inside its host while keeping
+   a distinct size for each board option. */
+@media (min-width: 901px) and (min-aspect-ratio: 7/4) {
+  .workbench[data-board-size="compact"]:not(.lobby-mode) .canvas-host canvas {
+    max-height: 68vh;
+  }
+
+  .workbench[data-board-size="standard"]:not(.lobby-mode) .canvas-host canvas {
+    max-height: 76vh;
+  }
+
+  .workbench[data-board-size="large"]:not(.lobby-mode) .canvas-host canvas {
+    max-height: 80vh;
   }
 }
 
