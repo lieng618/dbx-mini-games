@@ -29,6 +29,14 @@ function seatColour(seat) {
   return seat === 0 ? PALETTE.red : PALETTE.black;
 }
 
+/** Colour of the landing ink after a move, using the next seat to identify the mover. */
+export function landingColour(game, nextTurn) {
+  if (game === "xiangqi") return nextTurn === 1 ? PALETTE.red : PALETTE.black;
+  // Five-in-a-row uses one contrasting warm halo for both sides. A piece-coloured ripple
+  // disappears for either black (into the grid) or white (into the paper).
+  return PALETTE.gold;
+}
+
 export class BoardScene {
   constructor(callbacks = {}) {
     this.callbacks = callbacks;
@@ -345,7 +353,15 @@ export class BoardScene {
       const travel = move.duration || 0;
       // One hand, on the first move of the update. A scenario replay produces several
       // moves in one snapshot, and a hand per move would look like a crowd at the table.
-      if (!this.effectsOff && !this.lowMotion && !this.hand && travel > 0) {
+      // The hand belongs to xiangqi piece travel. A gomoku tap places a new stone directly;
+      // showing a full hand shadow for both sides made openings look like a shared cursor.
+      if (
+        this.game === "xiangqi" &&
+        !this.effectsOff &&
+        !this.lowMotion &&
+        !this.hand &&
+        travel > 0
+      ) {
         const carrier = this.pieces.nodeAt(move.toCell);
         if (carrier) this.startHand(carrier, travel, move);
       }
@@ -355,18 +371,17 @@ export class BoardScene {
         const turn = snapshot.turnSeat;
         // The snapshot already points at the next player. A move by seat zero therefore
         // arrives with turnSeat=1, so invert it before choosing the landed ink's colour.
-        const colour = turn === 1 ? PALETTE.red : PALETTE.black;
+        const colour = landingColour(this.game, turn);
         if (!this.effectsOff) {
-          this.effects.push(
-            new RippleEffect({
-              x: move.to.x,
-              y: move.to.y,
-              radius: lay2.step * 0.34,
-              colour,
-              heavy: this.game === "xiangqi",
-              lowMotion: this.lowMotion,
-            }),
-          );
+          const ripple = new RippleEffect({
+            x: move.to.x,
+            y: move.to.y,
+            radius: lay2.step * 0.34,
+            colour,
+            heavy: this.game === "xiangqi",
+            lowMotion: this.lowMotion,
+          });
+          this.effects.push(ripple);
         }
         this.audio.play(this.game === "xiangqi" ? "landHeavy" : "land", {
           pitch: (move.to.x + move.to.y) % 2 < 1 ? 1.02 : 0.97,
@@ -668,6 +683,7 @@ export class BoardScene {
       radius: lay.step * 0.42,
       lowMotion: this.lowMotion || this.effectsOff,
       duration,
+      wave: this.game === "gomoku",
     });
     this.lastMoveEffect = effect;
     this.effects.push(effect);

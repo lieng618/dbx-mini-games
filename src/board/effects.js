@@ -700,8 +700,9 @@ export class CheckEffect {
  * compete with the pieces.
  */
 export class LastMoveEffect {
-  constructor({ from, to, radius, lowMotion = false, seed, duration }) {
+  constructor({ from, to, radius, lowMotion = false, seed, duration, wave = false }) {
     this.lowMotion = lowMotion;
+    this.wave = wave;
     this.age = 0;
     // The automatic cue is intentionally brief. The manual "last move" control can request
     // a longer replay without changing the normal move rhythm for every player.
@@ -710,9 +711,10 @@ export class LastMoveEffect {
     this.done = false;
     this.view = new Container();
     this.glow = new Graphics();
+    this.halo = new Graphics();
     this.trail = new Graphics();
     this.ring = new Graphics();
-    this.view.addChild(this.glow, this.trail, this.ring);
+    this.view.addChild(this.glow, this.halo, this.trail, this.ring);
     this.from = from;
     this.to = to;
     this.radius = radius;
@@ -726,8 +728,31 @@ export class LastMoveEffect {
     const t = Math.min(1, this.age / this.duration);
 
     this.glow.clear();
+    this.halo.clear();
     this.trail.clear();
     this.ring.clear();
+
+    // Gomoku uses one bright halo for both sides. A ring in the mover's ink colour vanishes
+    // for black against the grid and for white against the paper.
+    if (this.wave) {
+      const waveDuration = this.lowMotion ? 0.3 : 0.82;
+      const waveT = Math.min(1, this.age / waveDuration);
+      const spread = 1 - Math.pow(1 - waveT, 3);
+      const fade = Math.pow(1 - waveT, 1.25);
+      const ringRadius = this.radius * (1.35 + spread * 7.65);
+      for (let i = 0; i < 3; i++) {
+        this.halo
+          .circle(this.to.x, this.to.y, ringRadius * (1 - i * 0.025))
+          .stroke({
+            width: this.radius * (0.68 - i * 0.16),
+            color: 0xfff7e7,
+            alpha: (0.28 - i * 0.055) * fade,
+          });
+      }
+      this.halo
+        .circle(this.to.x, this.to.y, ringRadius)
+        .stroke({ width: 1.8, color: GOLD, alpha: 0.36 * fade });
+    }
 
     if (this.lowMotion) {
       const alpha = (1 - t) * 0.45;

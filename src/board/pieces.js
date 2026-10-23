@@ -284,7 +284,11 @@ export class PieceLayer {
       return this.moves;
     }
 
-    if (this.nodes.length && animate) {
+    // The first gomoku stone starts from a board with no piece nodes, but it is still a
+    // placement that must produce the landing timeline. The diff can recognise it from the
+    // cached cell count; requiring an existing node sent that opening move down the silent
+    // rebuild path and skipped its ripple, sound, and board response.
+    if (animate) {
       const diff = this.diffCells(cells);
       if (diff.kind === "move") {
         this.applyMove(diff, cells, lay);
@@ -392,7 +396,7 @@ export class PieceLayer {
     node.startPlace(pt);
     this.nodes.push(node);
     this.body.addChild(node.container);
-    this.moves.push({ from: null, to: pt, captured: false, duration: 0.18 });
+    this.moves.push({ from: null, to: pt, fromCell: -1, toCell: to, captured: false, duration: 0.18 });
   }
 
   /** Removes a node from reconciliation while its death animation plays out. */

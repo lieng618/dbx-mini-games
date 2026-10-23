@@ -7,6 +7,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { BoardScene } from "./board/scene.js";
 import { createBridge, whenReady } from "./bridge.js";
+import { reconcileLastMove } from "./snapshot.js";
 import { clearLegacyRecords, loadSettings, saveSettings } from "./storage.js";
 
 const GAMES = [
@@ -285,7 +286,7 @@ function applySnapshot(snapshot) {
       turnSeat: snapshot.turnSeat ?? cells.value.turnSeat ?? null,
     };
   }
-  if (snapshot.lastMove !== undefined) lastMove.value = snapshot.lastMove;
+  lastMove.value = reconcileLastMove(snapshot, lastMove.value);
   const isRoomSnapshot = Array.isArray(snapshot.members) && typeof snapshot.phase === "string";
   if (isRoomSnapshot) {
     aiSeat.value = typeof snapshot.aiSeat === "number" ? snapshot.aiSeat : -1;
