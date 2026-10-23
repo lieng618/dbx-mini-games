@@ -3,9 +3,12 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { loadGameServerConfig } from "./game-server-config.mjs";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const manifest = JSON.parse(await readFile(resolve(projectRoot, "manifest.json"), "utf8"));
+const storeMetadata = JSON.parse(await readFile(resolve(projectRoot, ".dbx-store.json"), "utf8"));
+const gameServer = await loadGameServerConfig();
 const target = "universal";
 const packageName = `${manifest.id}-${manifest.version}-${target}.dbxp`;
 const packagePath = resolve(projectRoot, "dist", packageName);
@@ -19,7 +22,10 @@ const bytes = await readFile(packagePath);
 const sha256 = createHash("sha256").update(bytes).digest("hex");
 const entries = execFileSync("tar", ["-tf", packagePath], { encoding: "utf8" }).split(/\r?\n/);
 const packagedManifest = JSON.parse(execFileSync("tar", ["-xOf", packagePath, "manifest.json"], { encoding: "utf8" }));
+const packagedUi = execFileSync("tar", ["-xOf", packagePath, "ui/app.js"], { encoding: "utf8" });
 const releaseArtifact = releaseCandidates.artifacts?.find((artifact) => artifact.target === target);
+const loopbackEndpointPattern =
+  /(?:https?|wss?):\/\/(?:localhost|127(?:\.\d{1,3}){3}|\[::1\])(?=[:/?#]|$)/i;
 
 const failures = [];
 function check(condition, message) {
@@ -39,6 +45,15 @@ check(
     JSON.stringify([...manifest.permissions].sort()),
   "packaged Manifest permissions differ from source Manifest",
 );
+check(!loopbackEndpointPattern.test(packagedUi), "packaged UI contains a local development endpoint");
+check(
+  packagedUi.includes(gameServer.websocketUrl),
+  "packaged UI does not contain the configured public WebSocket endpoint",
+);
+check(
+  packagedUi.includes(gameServer.publicOrigin),
+  "packaged UI does not contain the configured public origin",
+);
 check(releaseCandidates.plugin?.id === manifest.id, "release-candidates plugin ID is wrong");
 check(releaseCandidates.plugin?.version === manifest.version, "release-candidates version is wrong");
 check(releaseCandidates.artifacts?.length === 1, "release-candidates must contain one universal artifact");
@@ -47,6 +62,10 @@ check(releaseCandidates.artifacts?.[0]?.size === bytes.length, "release-candidat
 check(storeCandidate.id === manifest.id, "store candidate plugin ID is wrong");
 check(storeCandidate.version === manifest.version, "store candidate version is wrong");
 check(storeCandidate.publisher === manifest.publisher, "store candidate publisher is wrong");
+check(
+  storeCandidate.releaseNotes === storeMetadata.releaseNotes,
+  "store candidate release notes differ from .dbx-store.json",
+);
 check(storeCandidate.targets?.length === 1, "store candidate must contain one target");
 check(storeCandidate.targets?.[0]?.target === target, "store candidate target is not universal");
 check(storeCandidate.targets?.[0]?.sha256 === sha256, "store candidate SHA-256 is wrong");

@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const manifest = JSON.parse(await readFile(resolve(projectRoot, "manifest.json"), "utf8"));
+const storeMetadata = JSON.parse(await readFile(resolve(projectRoot, ".dbx-store.json"), "utf8"));
 const tag = process.argv[2] || `v${manifest.version}`;
 const target = "universal";
 const packageName = `${manifest.id}-${manifest.version}-${target}.dbxp`;
@@ -62,8 +63,7 @@ const candidate = {
   source: `https://github.com/lieng618/dbx-mini-games/tree/${tag}`,
   homepage: manifest.homepage,
   license: "Apache-2.0",
-  releaseNotes:
-    "Initial public release with Chinese chess, Gomoku, rooms, spectators, match clocks, consent-based undo, rematches, and Chinese-ink presentation.",
+  releaseNotes: storeMetadata.releaseNotes,
   localizations,
   targets: [
     {

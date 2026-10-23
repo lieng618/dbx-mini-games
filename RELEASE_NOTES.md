@@ -1,7 +1,4 @@
-# DBX Mini Games 0.3.1
-
-First public release of the anonymous online board-game lobby, with the
-release workflow pinned to a valid DBX plugin SDK revision.
+# DBX Mini Games 0.4.0
 
 ## Highlights
 
@@ -11,9 +8,14 @@ release workflow pinned to a valid DBX plugin SDK revision.
 - configurable match and per-move clocks;
 - consent-based undo requests;
 - rematch and departure feedback;
+- responsive lobby, mobile board, and wide-screen layouts;
+- last-move replay control and animated active-turn indicators;
+- corrected Gomoku landing effects for both seats;
 - traditional Chinese-ink board effects and sound;
 - DBX sandbox connectivity over HTTPS long polling;
-- browser connectivity over WebSocket.
+- browser connectivity over WebSocket;
+- production bundles contain only the configured public endpoint, with no
+  local development loopback fallback.
 
 ## Network and data
 

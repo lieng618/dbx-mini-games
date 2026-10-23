@@ -35,17 +35,6 @@ export function resolveServerUrl() {
   const override = typeof window !== "undefined" ? window.__DBX_MINI_GAMES_SERVER__ : undefined;
   if (typeof override === "string" && override.trim()) return override.trim();
 
-  const localConfigured =
-    typeof __DBX_LOCAL_GAME_SERVER_URL__ === "string" ? __DBX_LOCAL_GAME_SERVER_URL__ : "";
-  if (localConfigured && typeof window !== "undefined") {
-    const local = new URL(localConfigured);
-    const localPort = local.port || (local.protocol === "https:" ? "443" : "80");
-    if (window.location.port === localPort) {
-      const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
-      return `${scheme}//${window.location.host}${local.pathname}`;
-    }
-  }
-
   const configured =
     typeof __DBX_GAME_SERVER_URL__ === "string" ? __DBX_GAME_SERVER_URL__.trim() : "";
   if (typeof configured === "string" && configured.trim()) return configured.trim();

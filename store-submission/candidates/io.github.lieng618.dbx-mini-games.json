@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "io.github.lieng618.dbx-mini-games",
   "publisher": "lieng618",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "name": "DBX Mini Games",
   "description": "A quiet online parlour for Chinese chess and Gomoku, with rooms, spectators, and match clocks.",
-  "icon": "https://raw.githubusercontent.com/lieng618/dbx-mini-games/v0.3.1/assets/plugin.svg",
+  "icon": "https://raw.githubusercontent.com/lieng618/dbx-mini-games/v0.4.0/assets/plugin.svg",
   "tags": [
     "game",
     "chess",
@@ -16,10 +16,10 @@
   "permissions": [
     "host.network:https://1.92.64.227"
   ],
-  "source": "https://github.com/lieng618/dbx-mini-games/tree/v0.3.1",
+  "source": "https://github.com/lieng618/dbx-mini-games/tree/v0.4.0",
   "homepage": "https://github.com/lieng618/dbx-mini-games",
   "license": "Apache-2.0",
-  "releaseNotes": "Initial public release with Chinese chess, Gomoku, rooms, spectators, match clocks, consent-based undo, rematches, and Chinese-ink presentation.",
+  "releaseNotes": "本次更新优化了大厅、对局、设置和移动端画面的界面布局，新增上一手重播与行棋回合动画，并优化了五子棋双方的落子效果。",
   "localizations": {
     "zh-CN": {
       "name": "棋牌小馆",
@@ -29,9 +29,9 @@
   "targets": [
     {
       "target": "universal",
-      "url": "https://github.com/lieng618/dbx-mini-games/releases/download/v0.3.1/io.github.lieng618.dbx-mini-games-0.3.1-universal.dbxp",
-      "sha256": "75eb9eae06729f51ee67c56e234373e53e358f81ec832a58a67bd6c7e06de7be",
-      "size": 246014
+      "url": "https://github.com/lieng618/dbx-mini-games/releases/download/v0.4.0/io.github.lieng618.dbx-mini-games-0.4.0-universal.dbxp",
+      "sha256": "e25055cf3f7b7cd7f3cf615acc2350288d2881aa9136e6b76d0543866c59bee3",
+      "size": 254512
     }
   ]
 }

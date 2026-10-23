@@ -65,19 +65,21 @@ scripts/http-smoke.mjs       DBX HTTPS 长轮询验收
 
 ```powershell
 npm ci
-npm run build
 
 cd backend
 go run . -addr 127.0.0.1:8787 -ui ..\ui
 ```
 
-打开：
+在仓库根目录另开一个终端：
 
-```text
-http://127.0.0.1:8787
+```powershell
+npm run dev
 ```
 
-公网入口、WebSocket 路径和本地开发地址都集中在
+打开 Vite 输出的开发页面地址（通常是 `http://127.0.0.1:5173`）。
+`npm run dev` 使用 `LOCAL_ORIGIN` 连接本地 Go 服务。
+
+公网入口、WebSocket 路径和本地开发地址集中在
 [`config/game-server.env`](config/game-server.env)。插件构建会自动把
 `PUBLIC_ORIGIN` 同步到 `manifest.json` 和前端产物，不需要再分别修改。
 
@@ -85,8 +87,8 @@ http://127.0.0.1:8787
 npm run build
 ```
 
-`npm run dev` 使用 `LOCAL_ORIGIN`；生产构建使用 `PUBLIC_ORIGIN` 加
-`WEBSOCKET_PATH`。
+生产构建使用 `PUBLIC_ORIGIN` 加 `WEBSOCKET_PATH`，并在构建结束时检查
+`ui/` 中不存在 `localhost` 或回环地址；发现开发地址时构建会失败。
 
 ## 验收
 

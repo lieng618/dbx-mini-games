@@ -15,18 +15,19 @@ Go module:        github.com/lieng618/dbx-mini-games/backend
 
 ```powershell
 npm ci
-npm run build
 
 cd backend
 go test ./...
 go run . -addr 127.0.0.1:8787 -ui ..\ui
 ```
 
-开发页面：
+在仓库根目录另开一个终端：
 
-```text
-http://127.0.0.1:8787
+```powershell
+npm run dev
 ```
+
+开发页面使用 Vite 输出的地址（通常是 `http://127.0.0.1:5173`）。
 
 三客户端验收：
 
@@ -49,7 +50,8 @@ npm run package:dbx
 ```
 
 构建脚本会从 `PUBLIC_ORIGIN` 和 `WEBSOCKET_PATH` 自动生成前端 WebSocket
-地址，并同步 `manifest.json` 的 `host.network` 权限。Caddy 读取同一文件；
+地址，并同步 `manifest.json` 的 `host.network` 权限。生产构建还会扫描
+`ui/`，拒绝包含 `localhost` 或回环地址的构建。Caddy 读取同一文件；
 正式发布后检查生成的 Manifest 不再包含 `localhost`。
 
 入口地址会固化进前端产物和 Manifest，替换后必须重新打包并重新安装 `.dbxp`。
