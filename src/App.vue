@@ -164,7 +164,6 @@ function seatLabel(seat) {
  * shared screen orientation for both players: seat zero stays near and seat one stays far.
  */
 function isNearSeat(seat) {
-  if (game.value === "gomoku") return seat === 0;
   return seat === (mySeat.value >= 0 ? mySeat.value : 0);
 }
 
