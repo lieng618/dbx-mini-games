@@ -162,3 +162,25 @@ export function tap(pattern = 8) {
     // Vibration is blocked outside a user gesture on some platforms.
   }
 }
+
+/** True for touch-first devices, including DBX hosts with no vibration support. */
+export function isCoarsePointer() {
+  if (typeof window === "undefined") return false;
+  try {
+    if (typeof window.matchMedia === "function" && window.matchMedia("(pointer: coarse)").matches) {
+      return true;
+    }
+  } catch {
+    // Some embedded webviews expose matchMedia but reject pointer queries.
+  }
+  return Number(globalThis.navigator?.maxTouchPoints || 0) > 0;
+}
+
+/**
+ * The landing pulse is deliberately tiny and only fires on touch-first devices.
+ * Callers should invoke it at the same moment as the landing ripple, not on pointerdown:
+ * the authoritative stone may still be travelling or the host may reject the move.
+ */
+export function tapLanding() {
+  if (isCoarsePointer()) tap(8);
+}

@@ -917,6 +917,7 @@ async function onCell(index) {
 
   // Gomoku: one click is one move.
   if (code) return;
+  scene?.armLandingHaptic(index);
   await call("game.move", { to: index });
 }
 

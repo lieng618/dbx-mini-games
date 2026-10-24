@@ -26,9 +26,11 @@ import {
   FlashEffect,
   GhostMoveEffect,
   KeyCaptureCinematicEffect,
+  LandingWeightEffect,
   LastMoveEffect,
   PALETTE,
   PieceCaptureAccentEffect,
+  RematchInkEffect,
   RippleEffect,
   RiverSurgeEffect,
   ShatterEffect,
@@ -39,7 +41,7 @@ import {
   isCinematicCapture,
 } from "./effects.js";
 import { HandShadow } from "./hand.js";
-import { BoardAudio, tap } from "./sound.js";
+import { BoardAudio, tap, tapLanding } from "./sound.js";
 import { PieceLayer } from "./pieces.js";
 
 /** Resolves a player's ink colour from their seat. */
@@ -53,6 +55,32 @@ export function landingColour(game, nextTurn) {
   // Five-in-a-row uses one contrasting warm halo for both sides. A piece-coloured ripple
   // disappears for either black (into the grid) or white (into the paper).
   return PALETTE.gold;
+}
+
+/**
+ * A finished gomoku room becomes a fresh empty round without changing board geometry.
+ * Checking every condition keeps an undo back to the first move or an ordinary snapshot
+ * from being mistaken for a rematch.
+ */
+export function startsFreshGomokuRound({
+  game,
+  previousCells,
+  cells,
+  previousMoveCount,
+  moveCount,
+  previousFinished,
+}) {
+  return (
+    game === "gomoku" &&
+    previousFinished === true &&
+    Number(previousMoveCount) > 0 &&
+    Number(moveCount) === 0 &&
+    Array.isArray(previousCells) &&
+    previousCells.some((cell) => cell !== 0) &&
+    Array.isArray(cells) &&
+    cells.length === previousCells.length &&
+    cells.every((cell) => cell === 0)
+  );
 }
 
 /**
@@ -134,6 +162,9 @@ export class BoardScene {
     this.shock = null;
     // The hand that carries the piece the player just moved, or null.
     this.hand = null;
+    // A local tap arms this only after the board accepts input. The landing callback consumes
+    // it at the exact frame of the ripple, never on pointerdown and never for an opponent move.
+    this.landingHaptic = null;
   }
 
   /** Boots Pixi and mounts the canvas. Throws when the renderer cannot start. */
@@ -466,6 +497,39 @@ export class BoardScene {
       tap([34, 22, 12]);
     }
 
+    const freshGomokuRound = startsFreshGomokuRound({
+      game: this.game,
+      previousCells: prev,
+      cells,
+      previousMoveCount,
+      moveCount: incomingMoveCount,
+      previousFinished,
+    });
+    if (freshGomokuRound && !this.effectsOff) {
+      // The win line and seal belong to the old round. Capture their stones first, rebuild
+      // the clean board beneath the transition, then let the empty authoritative position
+      // clear the piece layer as usual.
+      this.clearEffects();
+      this.drawBoard();
+      const stoneRadius = this.pieces.radius || lay.step * 0.4;
+      const stones = [];
+      for (let index = 0; index < prev.length; index++) {
+        const code = prev[index] || 0;
+        if (!code) continue;
+        const point = cellCenter(lay, index);
+        stones.push({ code, radius: stoneRadius, x: point.x, y: point.y });
+      }
+      if (this.boardBounds && stones.length) {
+        this.effects.push(
+          new RematchInkEffect({
+            stones,
+            bounds: this.boardBounds,
+            lowMotion: this.lowMotion,
+          }),
+        );
+      }
+    }
+
     this.lastCells = Array.from(cells);
     const moves = this.drawPieces(cells, snapshot) || [];
 
@@ -538,6 +602,7 @@ export class BoardScene {
       // burst and the knock-back overlap instead of queueing.
       this.schedule(travel, () => {
         const turn = snapshot.turnSeat;
+        const localLanding = this.game === "gomoku" && this.consumeLandingHaptic(move.toCell);
         // The snapshot already points at the next player. A move by seat zero therefore
         // arrives with turnSeat=1, so invert it before choosing the landed ink's colour.
         const colour = landingColour(this.game, turn);
@@ -551,11 +616,22 @@ export class BoardScene {
             lowMotion: this.lowMotion,
           });
           this.effects.push(ripple);
+          if (this.game === "gomoku") {
+            this.effects.push(
+              new LandingWeightEffect({
+                x: move.to.x,
+                y: move.to.y,
+                radius: lay2.step * 0.4,
+                lowMotion: this.lowMotion,
+              }),
+            );
+          }
         }
         this.audio.play(this.game === "xiangqi" ? "landHeavy" : "land", {
           pitch: (move.to.x + move.to.y) % 2 < 1 ? 1.02 : 0.97,
         });
-        tap(6);
+        if (this.game === "xiangqi") tap(6);
+        else if (localLanding && !this.effectsOff) tapLanding();
 
         // A quiet move gets a local board answer. A capture already owns the hit through
         // its directional scar and shock, so doubling the response would make the cut hard
@@ -999,6 +1075,28 @@ export class BoardScene {
     const index = cellAt(this.lay, point.x, point.y);
     if (index < 0) return;
     this.callbacks.onCell?.(index);
+  }
+
+  /** Records the destination of a locally initiated gomoku move. */
+  armLandingHaptic(index) {
+    const cell = Number(index);
+    if (!Number.isInteger(cell) || cell < 0) return;
+    this.landingHaptic = {
+      cell,
+      at: typeof performance !== "undefined" ? performance.now() : Date.now(),
+    };
+  }
+
+  /**
+   * Consumes a matching local tap only when the authoritative stone lands. A short expiry
+   * protects the next move from inheriting a haptic after a rejected or timed-out request.
+   */
+  consumeLandingHaptic(index) {
+    const pending = this.landingHaptic;
+    this.landingHaptic = null;
+    if (!pending || pending.cell !== Number(index)) return false;
+    const now = typeof performance !== "undefined" ? performance.now() : Date.now();
+    return now - pending.at <= 3000;
   }
 
   /**

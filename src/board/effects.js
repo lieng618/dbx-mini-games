@@ -402,6 +402,77 @@ export class RippleEffect {
 }
 
 /**
+ * The physical half of a gomoku landing: the grid stays still while the paper under the
+ * new stone visibly takes its weight. This sits below the piece layer, so it reads as a
+ * compression in the sheet rather than another ring painted over the stone.
+ */
+export class LandingWeightEffect {
+  constructor({ x, y, radius, lowMotion = false, seed }) {
+    this.lowMotion = lowMotion;
+    this.age = 0;
+    this.duration = lowMotion ? 0.12 : 0.24;
+    this.done = false;
+    this.radius = radius;
+    this.under = true;
+    this.view = new Container();
+    this.view.position.set(x, y);
+    this.press = new Graphics();
+    this.creases = new Graphics();
+    this.view.addChild(this.press, this.creases);
+
+    const rand = mulberry32(seed ?? nextSeed());
+    this.outline = blobRadii(rand, 18, 0.12);
+    this.fibres = [];
+    const count = lowMotion ? 0 : 7;
+    for (let i = 0; i < count; i++) {
+      const angle = (Math.PI * 2 * i) / count + (rand() - 0.5) * 0.42;
+      this.fibres.push({
+        angle,
+        inner: radius * (1.12 + rand() * 0.18),
+        outer: radius * (1.28 + rand() * 0.34),
+        bend: (rand() - 0.5) * 0.16,
+      });
+    }
+  }
+
+  update(dt) {
+    this.age += dt;
+    const t = Math.min(1, this.age / this.duration);
+    this.press.clear();
+    this.creases.clear();
+
+    const settle = smoothstep(Math.min(1, t * 2.6));
+    const fade = Math.pow(1 - t, 1.5);
+    const contactRadius = this.radius * (1.06 - settle * 0.075);
+    this.press
+      .poly(radiiToPoints(this.outline, contactRadius, 0.7), true)
+      .fill({ color: 0x4b3926, alpha: this.lowMotion ? fade * 0.08 : fade * 0.16 });
+
+    if (!this.lowMotion) {
+      const creaseRadius = this.radius * (1.08 + Math.pow(t, 0.55) * 0.32);
+      const creaseAlpha = fade * 0.2;
+      this.creases
+        .poly(radiiToPoints(this.outline, creaseRadius, 0.8), true)
+        .stroke({ width: 1.25, color: 0x8a6a3c, alpha: creaseAlpha });
+      for (const fibre of this.fibres) {
+        const a0 = fibre.angle;
+        const a1 = fibre.angle + fibre.bend;
+        this.creases
+          .moveTo(Math.cos(a0) * fibre.inner, Math.sin(a0) * fibre.inner)
+          .lineTo(Math.cos(a1) * fibre.outer, Math.sin(a1) * fibre.outer)
+          .stroke({ width: 0.8, color: 0x8a6a3c, alpha: creaseAlpha * 0.72 });
+      }
+    }
+
+    if (t >= 1) this.done = true;
+  }
+
+  destroy() {
+    this.view.destroy({ children: true });
+  }
+}
+
+/**
  * CaptureBurstEffect shatters a captured piece into ink dust.
  *
  * Three kinds of debris, because one kind of dot is what made the old burst look like a
@@ -2620,13 +2691,16 @@ export class WinEffect {
     // The line belongs behind the stones; the seal must land on top of them. One container
     // cannot be in both layers, so the seal rides in its own overlay.
     this.overlayView = new Container();
+    // The winning stones light up in the same order as the brush advances. This layer
+    // stays above the stones so even the black line under them has a legible pulse.
+    this.stoneGlow = new Graphics();
     // A group carries the placement and tilt so the carved glyph can rotate with the block;
     // a Graphics cannot own a Text child.
     this.sealGroup = new Container();
     this.seal = new Graphics();
     this.sealGlyph = sealGlyph;
     this.sealGroup.addChild(this.seal);
-    this.overlayView.addChild(this.sealGroup);
+    this.overlayView.addChild(this.stoneGlow, this.sealGroup);
     this.points = points || [];
     this.step = step;
     this.sealAt = sealAt || (this.points.length ? this.points[this.points.length - 1] : null);
@@ -2672,9 +2746,42 @@ export class WinEffect {
     const holdEnd = growEnd + this.holdDuration;
 
     this.line.clear();
+    this.stoneGlow.clear();
 
     // Phase one: the stroke is laid down segment by segment, with a brush tip at the front.
     const growT = Math.min(1, this.age / growEnd);
+    if (!this.lowMotion && this.points.length > 1) {
+      // Each stone receives a short held glow as the brush reaches it. The spacing is
+      // derivable from the authoritative winning line, so both players see the same order.
+      const pulseDuration = Math.min(0.32, growEnd * 0.58);
+      const pointSpacing = growEnd / Math.max(1, this.points.length - 1);
+      for (let i = 0; i < this.points.length; i++) {
+        const point = this.points[i];
+        const start = Math.max(0, i * pointSpacing - pulseDuration * 0.2);
+        const local = (this.age - start) / pulseDuration;
+        if (local < 0 || local > 1) continue;
+        const pulse = Math.sin(local * Math.PI);
+        const radius = this.step * (0.52 + local * 0.2);
+        this.stoneGlow
+          .circle(point.x, point.y, radius * 1.12)
+          .fill({ color: 0xffedbd, alpha: pulse * 0.1 });
+        this.stoneGlow
+          .circle(point.x, point.y, radius)
+          .stroke({ width: 2.4, color: PALETTE.gold, alpha: pulse * 0.72 });
+        this.stoneGlow
+          .circle(point.x, point.y, radius * 1.18)
+          .stroke({ width: 1, color: 0xfff8e8, alpha: pulse * 0.54 });
+        // A small four-point glint makes the pulse feel like a polished stone catching
+        // lamplight without introducing a generic particle sprite.
+        const glint = this.step * 0.17 * pulse;
+        this.stoneGlow
+          .moveTo(point.x - glint, point.y - this.step * 0.32)
+          .lineTo(point.x + glint, point.y - this.step * 0.32)
+          .moveTo(point.x, point.y - this.step * 0.32 - glint)
+          .lineTo(point.x, point.y - this.step * 0.32 + glint)
+          .stroke({ width: 1, color: 0xfff3cd, alpha: pulse * 0.7 });
+      }
+    }
     if (!this.lowMotion && this.points.length > 1) {
       const segments = this.points.length - 1;
       const drawn = growT * segments;
@@ -2825,6 +2932,128 @@ export class WinEffect {
   destroy() {
     this.view.destroy({ children: true });
     this.overlayView.destroy({ children: true });
+  }
+}
+
+/**
+ * A rematch starts from an empty authoritative board, but the felt experience should be
+ * continuous: the previous stones bleed into a fresh sheet, then the sheet is lifted from
+ * top to bottom to reveal the new grid. All stone positions are passed in before the piece
+ * layer clears its nodes, so this effect never changes game state.
+ */
+export class RematchInkEffect {
+  constructor({ stones = [], bounds, lowMotion = false, seed }) {
+    this.lowMotion = lowMotion;
+    this.age = 0;
+    this.duration = lowMotion ? 0.52 : 1.42;
+    this.done = false;
+    this.stones = stones;
+    this.bounds = bounds;
+    this.view = new Container();
+    this.sheet = new Graphics();
+    this.ink = new Graphics();
+    this.edge = new Graphics();
+    this.view.addChild(this.sheet, this.ink, this.edge);
+
+    const rand = mulberry32(seed ?? nextSeed());
+    this.edgePoints = [];
+    const count = 18;
+    for (let i = 0; i <= count; i++) {
+      this.edgePoints.push({
+        at: i / count,
+        offset: (rand() - 0.5) * 4.2,
+        alpha: 0.45 + rand() * 0.55,
+      });
+    }
+    this.streaks = stones.map((stone) => ({
+      ...stone,
+      angle: (rand() - 0.5) * 0.5,
+      length: stone.radius * (1.1 + rand() * 1.6),
+      delay: rand() * 0.12,
+    }));
+  }
+
+  update(dt) {
+    this.age += dt;
+    const t = Math.min(1, this.age / this.duration);
+    this.sheet.clear();
+    this.ink.clear();
+    this.edge.clear();
+
+    const { left, top, width, height } = this.bounds;
+    const padding = 34;
+    const reveal = this.lowMotion
+      ? smoothstep(t)
+      : smoothstep(Math.max(0, (t - 0.28) / 0.72));
+    const revealY = top - padding + (height + padding * 2) * reveal;
+
+    // Cover the old grid with the paper that will become the new sheet. Revealing downward
+    // leaves a clean line behind, like lifting the free edge of a scroll.
+    if (revealY < top + height + padding) {
+      this.sheet
+        .rect(left - padding, revealY, width + padding * 2, top + height + padding - revealY)
+        .fill({ color: PALETTE.paper, alpha: this.lowMotion ? 0.94 : 0.985 });
+    }
+
+    const absorbEnd = this.lowMotion ? 0.35 : 0.64;
+    const absorb = Math.min(1, this.age / absorbEnd);
+    if (absorb < 1) {
+      const fade = Math.pow(1 - absorb, 1.35);
+      for (const stone of this.streaks) {
+        if (stone.code !== 1 && stone.code !== 2) continue;
+        const local = Math.max(0, Math.min(1, (absorb - stone.delay) / (1 - stone.delay)));
+        const radius = stone.radius * (1 - local * 0.18);
+        const x = stone.x;
+        const y = stone.y + stone.radius * local * 0.12;
+        const stoneColour = stone.code === 2 ? 0xfbf8f1 : PALETTE.ink;
+        const edgeColour = stone.code === 2 ? 0x8b8272 : 0x463a2a;
+
+        this.ink
+          .circle(x, y, radius)
+          .fill({ color: stoneColour, alpha: fade });
+        this.ink
+          .circle(x, y, radius)
+          .stroke({ width: 1.4, color: edgeColour, alpha: fade * 0.72 });
+
+        // The stone opens into a lateral wash instead of shrinking into a dot. That is the
+        // part that makes the reset read as paper absorbing ink.
+        const stainRadius = radius * (1.18 + local * 1.4);
+        this.ink
+          .circle(x, y, stainRadius)
+          .fill({ color: stone.code === 2 ? 0x8b8272 : PALETTE.ink, alpha: fade * 0.07 });
+        if (!this.lowMotion) {
+          this.ink
+            .moveTo(x - radius * 0.3, y)
+            .lineTo(x + Math.cos(stone.angle) * stone.length * local, y + Math.sin(stone.angle) * stone.length * local)
+            .stroke({ width: radius * 0.16, color: 0x6b5b45, alpha: fade * 0.12 });
+        }
+      }
+    }
+
+    if (!this.lowMotion && reveal > 0.002 && reveal < 0.998) {
+      let previous = null;
+      for (const point of this.edgePoints) {
+        const x = left - padding + point.at * (width + padding * 2);
+        const y = revealY + point.offset;
+        if (previous) {
+          this.edge
+            .moveTo(previous.x, previous.y)
+            .lineTo(x, y)
+            .stroke({ width: 2, color: 0x8a6a3c, alpha: 0.1 * point.alpha });
+          this.edge
+            .moveTo(previous.x, previous.y - 2)
+            .lineTo(x, y - 2)
+            .stroke({ width: 1, color: 0xfffbf2, alpha: 0.38 * point.alpha });
+        }
+        previous = { x, y };
+      }
+    }
+
+    if (t >= 1) this.done = true;
+  }
+
+  destroy() {
+    this.view.destroy({ children: true });
   }
 }
 
