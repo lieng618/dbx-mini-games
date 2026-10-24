@@ -656,6 +656,19 @@ watch(notice, (message) => {
   if (message) showFloatingMessage(message, "info", 3200);
 });
 
+// Every participant receives the same room-state push. Announce the transition here rather
+// than only in the host's click handler so both players and any early spectators see it.
+watch(
+  [roomId, phase],
+  ([nextRoomId, nextPhase], [previousRoomId, previousPhase]) => {
+    if (nextRoomId !== previousRoomId || previousPhase !== "lobby" || nextPhase !== "playing") {
+      return;
+    }
+    if (!nextRoomId || role.value === "idle") return;
+    showFloatingMessage("游戏已开始", "info", 3200);
+  },
+);
+
 async function call(method, params = {}) {
   error.value = "";
   try {
