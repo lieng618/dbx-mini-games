@@ -6628,6 +6628,16 @@ button:focus-visible {
   background: rgba(248, 242, 231, 0.36);
 }
 
+/* Match the phone layout: the player information sits directly on the room surface.
+   Turn highlighting still comes from the separate animated ring. */
+.workbench:not(.lobby-mode) .seat-strip,
+.workbench:not(.lobby-mode) .seat-strip.active,
+.workbench:not(.lobby-mode) .seat-strip.empty {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
 .seat-self {
   padding: 2px 5px;
   color: var(--red-deep);
