@@ -29,6 +29,8 @@ const VOICES = {
   check: { noise: 0.16, gain: 0.3, body: 96, bodyGain: 0.5, q: 0.6, ring: 1.5 },
   /** Victory: two rising chimes, deliberately short so it does not loop annoyingly. */
   win: { noise: 0.02, gain: 0.16, body: 520, bodyGain: 0.34, q: 2, ring: 0.9 },
+  /** Emote: two soft sine notes a fifth apart, short enough to stay unobtrusive. */
+  emote: { noise: 0, gain: 0, body: 660, bodyGain: 0.15, q: 1, ring: 0.25 },
 };
 
 export class BoardAudio {
@@ -88,6 +90,29 @@ export class BoardAudio {
     if (ctx.state === "suspended") ctx.resume().catch(() => {});
 
     const t0 = ctx.currentTime;
+
+    // A dedicated two-note chime reads as friendly rather than as another board knock.
+    if (name === "emote") {
+      const notes = [
+        { delay: 0, frequency: spec.body, gain: spec.bodyGain, duration: spec.ring },
+        { delay: 0.055, frequency: spec.body * 1.5, gain: spec.bodyGain * 0.46, duration: 0.19 },
+      ];
+      for (const note of notes) {
+        const chime = ctx.createOscillator();
+        const chimeGain = ctx.createGain();
+        const start = t0 + note.delay;
+        chime.type = "sine";
+        chime.frequency.setValueAtTime(note.frequency * 1.025, start);
+        chime.frequency.exponentialRampToValueAtTime(note.frequency, start + 0.09);
+        chimeGain.gain.setValueAtTime(0, start);
+        chimeGain.gain.linearRampToValueAtTime(note.gain * volume, start + 0.008);
+        chimeGain.gain.exponentialRampToValueAtTime(0.0001, start + note.duration);
+        chime.connect(chimeGain).connect(ctx.destination);
+        chime.start(start);
+        chime.stop(start + note.duration + 0.02);
+      }
+      return;
+    }
 
     // Body: a sine that drops in pitch, which is what gives a knock its weight.
     const body = ctx.createOscillator();

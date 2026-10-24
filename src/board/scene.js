@@ -1077,6 +1077,16 @@ export class BoardScene {
     this.callbacks.onCell?.(index);
   }
 
+  /** Opens the shared match audio context from a user gesture. */
+  unlockAudio() {
+    this.audio.unlock();
+  }
+
+  /** Plays a short named interface sound through the board's shared audio context. */
+  playSound(name) {
+    this.audio.play(name);
+  }
+
   /** Records the destination of a locally initiated gomoku move. */
   armLandingHaptic(index) {
     const cell = Number(index);

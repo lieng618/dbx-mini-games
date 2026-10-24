@@ -531,11 +531,13 @@ function closeEmoteTray() {
 
 function toggleEmoteTray(seat) {
   if (phase.value !== "playing" || seat !== mySeat.value || emoteSending.value) return;
+  scene?.unlockAudio();
   emoteTraySeat.value = emoteTraySeat.value === seat ? -1 : seat;
 }
 
 function showSeatEmote(seat, emote) {
   if ((seat !== 0 && seat !== 1) || !emote?.id) return;
+  scene?.playSound("emote");
   clearTimeout(emoteTimers[seat]);
   const shown = {
     ...emote,
@@ -586,6 +588,7 @@ async function sendEmote(emote) {
   }
   emoteSending.value = true;
   closeEmoteTray();
+  scene?.unlockAudio();
   try {
     const reply = await bridge.invoke("room.emote", { id: emote.id });
     if (reply?.ok) {
@@ -4322,13 +4325,12 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
   position: absolute;
   bottom: -6px;
   left: var(--seat-emote-tail-x);
-  width: 11px;
-  height: 11px;
+  width: 12px;
+  height: 6px;
   content: "";
   background: var(--seat-emote-surface);
-  border-right: 1px solid rgba(76, 54, 30, 0.15);
-  border-bottom: 1px solid rgba(76, 54, 30, 0.15);
-  transform: translateX(-50%) rotate(45deg);
+  clip-path: polygon(0 0, 100% 0, 50% 100%);
+  transform: translateX(-50%);
 }
 
 .seat-emote-option {
@@ -4429,13 +4431,12 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
   position: absolute;
   bottom: -6px;
   left: 50%;
-  width: 11px;
-  height: 11px;
+  width: 12px;
+  height: 6px;
   content: "";
   background: var(--seat-emote-bubble-surface);
-  border-right: 1px solid rgba(76, 54, 30, 0.17);
-  border-bottom: 1px solid rgba(76, 54, 30, 0.17);
-  transform: translateX(-50%) rotate(45deg);
+  clip-path: polygon(0 0, 100% 0, 50% 100%);
+  transform: translateX(-50%);
 }
 
 .seat-strip.far .seat-emote-bubble {
@@ -4451,9 +4452,7 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
 .seat-strip.far .seat-emote-bubble::after {
   top: -6px;
   bottom: auto;
-  border: 0;
-  border-top: 1px solid rgba(76, 54, 30, 0.17);
-  border-left: 1px solid rgba(76, 54, 30, 0.17);
+  clip-path: polygon(50% 0, 100% 100%, 0 100%);
 }
 
 .seat-emote-bubble-glyph {
