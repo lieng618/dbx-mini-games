@@ -1,4 +1,4 @@
-# DBX Mini Games 0.4.1
+# DBX Mini Games 0.4.2
 
 ## Highlights
 
@@ -14,6 +14,11 @@
 - cinematic Xiangqi cannon blasts, river surges, piece-specific capture
   accents, glyph shattering, escalating checks, victory fractures, and undo
   rewind effects;
+- room scoring and confirmed seat swaps;
+- Xiangqi key-piece shatter effects and enhanced Gomoku cinematic effects;
+- in-match emote reactions with visual and sound feedback;
+- match-start announcements and consistent player strips across desktop and
+  mobile layouts;
 - traditional Chinese-ink board effects and sound;
 - DBX sandbox connectivity over HTTPS long polling;
 - browser connectivity over WebSocket;

@@ -1,7 +1,7 @@
 {
   "name": "DBX Mini Games",
   "description": "A quiet online parlour for Chinese chess and Gomoku, with rooms, spectators, and match clocks.",
-  "icon": "https://raw.githubusercontent.com/lieng618/dbx-mini-games/v0.4.1/assets/plugin.svg",
+  "icon": "https://raw.githubusercontent.com/lieng618/dbx-mini-games/v0.4.2/assets/plugin.svg",
   "tags": [
     "game",
     "chess",
@@ -12,10 +12,10 @@
   "permissions": [
     "host.network:https://1.92.64.227"
   ],
-  "source": "https://github.com/lieng618/dbx-mini-games/tree/v0.4.1",
+  "source": "https://github.com/lieng618/dbx-mini-games/tree/v0.4.2",
   "homepage": "https://github.com/lieng618/dbx-mini-games",
   "license": "Apache-2.0",
-  "releaseNotes": "本次更新为中国象棋加入炮击吃子、将军升级和胜局裂印等动态特效，并优化上一手回放与悔棋反馈；同时修复 DBX 沙箱中昵称和密码输入无法正常提交的问题。",
+  "releaseNotes": "本次更新加入房间计分与确认换座，新增象棋关键棋子碎裂、五子棋动态特效和局内表情互动，并优化对局提示、音效和移动端布局。",
   "localizations": {
     "zh-CN": {
       "name": "棋牌小馆",
