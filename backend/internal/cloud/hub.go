@@ -23,7 +23,18 @@ const (
 	maxRooms            = 250
 	lobbyEventName      = "lobby.updated"
 	roomEventName       = "room.state"
+	emoteEventName      = "room.emote"
+	emoteCooldown       = 3 * time.Second
 )
+
+var roomEmoteIDs = map[string]struct{}{
+	"smug":   {},
+	"hurry":  {},
+	"tea":    {},
+	"praise": {},
+	"crack":  {},
+	"next":   {},
+}
 
 type clientState struct {
 	id              string
@@ -33,6 +44,7 @@ type clientState struct {
 	send            func(method string, params any)
 	timer           *time.Timer
 	connectionToken string
+	lastEmote       time.Time
 }
 
 type cloudRoom struct {
@@ -219,6 +231,8 @@ func (h *Hub) CallSession(clientID, connectionToken, method string, params map[s
 		h.leaveRoomLocked(client)
 		h.notifyLobbyLocked()
 		return map[string]any{"role": "idle"}, nil
+	case "room.emote":
+		return h.emoteLocked(client, params, time.Now())
 	case "room.start", "room.seat", "room.release",
 		"room.swap.request", "room.swap.consent", "room.swap.decline", "room.practice.start",
 		"room.practice.end", "room.ai.start", "room.ai.move",
@@ -621,6 +635,50 @@ func (h *Hub) actLocked(client *clientState, method string, params map[string]an
 	h.notifyRoomLocked(record)
 	h.notifyLobbyLocked()
 	return h.snapshotLocked(record, client.id, now), nil
+}
+
+// emoteLocked broadcasts one short-lived match reaction without making it part of the
+// authoritative room snapshot. Only a seated player in a running match may send, and the
+// server controls both the vocabulary and the cooldown.
+func (h *Hub) emoteLocked(client *clientState, params map[string]any, now time.Time) (any, error) {
+	record := h.rooms[client.roomID]
+	if record == nil {
+		return nil, errors.New("join a room first")
+	}
+	if record.room.Phase() != room.PhasePlaying {
+		return nil, errors.New("emotes are only available during a match")
+	}
+	seat := -1
+	for index, id := range record.room.Seats() {
+		if id == client.id {
+			seat = index
+			break
+		}
+	}
+	if seat < 0 {
+		return nil, errors.New("only seated players may send emotes")
+	}
+	emoteID := stringParam(params, "id")
+	if _, ok := roomEmoteIDs[emoteID]; !ok {
+		return nil, errors.New("unknown emote")
+	}
+	if !client.lastEmote.IsZero() && now.Sub(client.lastEmote) < emoteCooldown {
+		return nil, errors.New("emote is cooling down")
+	}
+	client.lastEmote = now
+
+	payload := map[string]any{
+		"id":     emoteID,
+		"seat":   seat,
+		"sentAt": now.UnixMilli(),
+	}
+	for _, recipient := range h.clients {
+		if recipient.id == client.id || recipient.roomID != client.roomID || recipient.send == nil {
+			continue
+		}
+		recipient.send(emoteEventName, payload)
+	}
+	return map[string]any{"ok": true, "seat": seat}, nil
 }
 
 func (h *Hub) legalLocked(client *clientState, params map[string]any) (any, error) {

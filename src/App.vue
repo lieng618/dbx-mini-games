@@ -47,6 +47,17 @@ const BOARD_SIZE_OPTIONS = [
   { value: "standard", label: "标准" },
   { value: "large", label: "大" },
 ];
+const MATCH_EMOTES = Object.freeze([
+  { id: "smug", glyph: "😏", label: "就这？" },
+  { id: "hurry", glyph: "😴", label: "想好了吗" },
+  { id: "tea", glyph: "🍵", label: "茶都凉了" },
+  { id: "praise", glyph: "👏", label: "妙啊" },
+  { id: "crack", glyph: "😵", label: "我裂开了" },
+  { id: "next", glyph: "😎", label: "还有后手" },
+]);
+const MATCH_EMOTE_BY_ID = new Map(MATCH_EMOTES.map((emote) => [emote.id, emote]));
+const EMOTE_BUBBLE_MS = 2800;
+const EMOTE_COOLDOWN_MS = 3000;
 const NICKNAME_PATTERN = /^[\p{L}\p{N}_-]{2,12}$/u;
 
 const bridge = createBridge();
@@ -104,6 +115,10 @@ const swapRemainingMs = ref(0);
 const undoRequestedBy = ref("");
 const undoRequestedSeat = ref(-1);
 const undoRemainingMs = ref(0);
+const seatEmotes = ref([null, null]);
+const emoteTraySeat = ref(-1);
+const emoteSending = ref(false);
+const emoteCooldown = ref(false);
 const hasLastMove = computed(
   () => !!lastMove.value && Number.isInteger(Number(lastMove.value.to)) && Number(lastMove.value.to) >= 0,
 );
@@ -115,6 +130,9 @@ let undoTimer = null;
 let swapRequestTimer = null;
 let swapSeatsBefore = null;
 let lastMovePreviewTimer = null;
+const emoteTimers = [null, null];
+let emoteCooldownTimer = null;
+let emoteSerial = 0;
 // The practice partner's seat, or -1. Kept separate from `seats` because the partner is
 // not a member: it has a seat but no id, no nickname and no connection.
 const aiSeat = ref(-1);
@@ -159,15 +177,15 @@ function seatLabel(seat) {
   return m ? m.nickname : "空座";
 }
 
-/**
- * Xiangqi is read from each player's side, so the viewer's seat stays near. Gomoku uses one
- * shared screen orientation for both players: seat zero stays near and seat one stays far.
- */
+/** Keep the seated viewer's avatar on the near edge for both games. */
 function isNearSeat(seat) {
   return seat === (mySeat.value >= 0 ? mySeat.value : 0);
 }
 
-/** Only xiangqi is drawn from each player's own side of the table. */
+/**
+ * Xiangqi is drawn from each player's own side of the table. Gomoku keeps one board
+ * orientation for both players, while the avatar strips are still placed from their side.
+ */
 function shouldFlipBoard(gameId, seat) {
   return gameId === "xiangqi" && seat === 1;
 }
@@ -319,6 +337,7 @@ function applySnapshot(snapshot) {
     clockBase = null;
     cells.value = [];
     aiSeat.value = -1;
+    clearMatchEmotes();
     return;
   }
   if (Array.isArray(snapshot.members)) members.value = snapshot.members;
@@ -435,6 +454,10 @@ function describeError(raw) {
     ["a match is already in progress", "对局正在进行中，无法调整座位"],
     ["room is full", "房间人数已满（8 人）"],
     ["spectating is only available while a match is in progress", "对局开始后才能观战"],
+    ["emote is cooling down", "表情发得太快了，稍等一下"],
+    ["emotes are only available during a match", "对局开始后才能发表情"],
+    ["only seated players may send emotes", "坐下后才能发表情"],
+    ["unknown emote", "这个表情不存在"],
     ["not your turn", "还没轮到你走棋"],
     ["illegal move", "这一步不合规则"],
     ["only seated players may do that", "你在观战，坐下后才能操作"],
@@ -500,6 +523,86 @@ function showFloatingMessage(text, tone = "info", duration = 3200) {
     floatingMessage.value = null;
     floatingTimer = null;
   }, duration);
+}
+
+function closeEmoteTray() {
+  emoteTraySeat.value = -1;
+}
+
+function toggleEmoteTray(seat) {
+  if (phase.value !== "playing" || seat !== mySeat.value || emoteSending.value) return;
+  emoteTraySeat.value = emoteTraySeat.value === seat ? -1 : seat;
+}
+
+function showSeatEmote(seat, emote) {
+  if ((seat !== 0 && seat !== 1) || !emote?.id) return;
+  clearTimeout(emoteTimers[seat]);
+  const shown = {
+    ...emote,
+    serial: ++emoteSerial,
+  };
+  const next = seatEmotes.value.slice();
+  next[seat] = shown;
+  seatEmotes.value = next;
+  emoteTimers[seat] = setTimeout(() => {
+    emoteTimers[seat] = null;
+    const current = seatEmotes.value.slice();
+    if (current[seat]?.serial === shown.serial) {
+      current[seat] = null;
+      seatEmotes.value = current;
+    }
+  }, EMOTE_BUBBLE_MS);
+}
+
+function clearMatchEmotes() {
+  closeEmoteTray();
+  clearTimeout(emoteCooldownTimer);
+  emoteCooldownTimer = null;
+  emoteCooldown.value = false;
+  seatEmotes.value = [null, null];
+  for (let seat = 0; seat < emoteTimers.length; seat += 1) {
+    clearTimeout(emoteTimers[seat]);
+    emoteTimers[seat] = null;
+  }
+}
+
+function beginEmoteCooldown() {
+  clearTimeout(emoteCooldownTimer);
+  emoteCooldown.value = true;
+  emoteCooldownTimer = setTimeout(() => {
+    emoteCooldown.value = false;
+    emoteCooldownTimer = null;
+  }, EMOTE_COOLDOWN_MS);
+}
+
+async function sendEmote(emote) {
+  if (
+    phase.value !== "playing" ||
+    !isSeated.value ||
+    emoteSending.value ||
+    emoteCooldown.value
+  ) {
+    return;
+  }
+  emoteSending.value = true;
+  closeEmoteTray();
+  try {
+    const reply = await bridge.invoke("room.emote", { id: emote.id });
+    if (reply?.ok) {
+      showSeatEmote(mySeat.value, emote);
+      beginEmoteCooldown();
+    }
+  } catch (emoteError) {
+    error.value = describeError(emoteError?.message || emoteError);
+  } finally {
+    emoteSending.value = false;
+  }
+}
+
+function handleEmoteOutside(event) {
+  if (emoteTraySeat.value < 0) return;
+  if (event.target instanceof Element && event.target.closest("[data-seat-emote]")) return;
+  closeEmoteTray();
 }
 
 function validateNicknameDraft(value) {
@@ -854,6 +957,7 @@ async function rematch() {
 async function leaveRoom() {
   scene?.clearEffects();
   await call("room.leave");
+  clearMatchEmotes();
   role.value = "idle";
   roomId.value = null;
   phase.value = "lobby";
@@ -1032,6 +1136,10 @@ function dismissMvp() {
 
 function closeResultOnEscape(event) {
   if (event.key !== "Escape") return;
+  if (emoteTraySeat.value >= 0) {
+    closeEmoteTray();
+    return;
+  }
   if (joinPrompt.value) {
     closeJoinPrompt();
     return;
@@ -1115,6 +1223,12 @@ function startEvents() {
   if (stopEvents) return;
   stopEvents = bridge.on((event) => {
     const method = event?.method;
+    if (method === "room.emote") {
+      const seat = Number(event?.params?.seat);
+      const emote = MATCH_EMOTE_BY_ID.get(String(event?.params?.id || ""));
+      if (emote) showSeatEmote(seat, emote);
+      return;
+    }
     if (method === "room.state" || method === "room.members") {
       if (event?.params?.members && event?.params?.phase) {
         applySnapshot(event.params);
@@ -1283,6 +1397,7 @@ async function ensureScene() {
 
 onMounted(async () => {
   document.addEventListener("visibilitychange", handleVisibilityChange);
+  document.addEventListener("pointerdown", handleEmoteOutside, true);
   window.addEventListener("focus", handleWindowFocus);
   window.addEventListener("pageshow", handleVisibilityChange);
   window.addEventListener("resize", scheduleSeatLayout);
@@ -1324,6 +1439,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("pageshow", handleVisibilityChange);
   window.removeEventListener("resize", scheduleSeatLayout);
   document.removeEventListener("visibilitychange", handleVisibilityChange);
+  document.removeEventListener("pointerdown", handleEmoteOutside, true);
   clearTimeout(seatLayoutTimer);
   seatResizeObserver?.disconnect();
   seatResizeObserver = null;
@@ -1339,6 +1455,7 @@ onBeforeUnmount(() => {
   mvpTimer = null;
   clearTimeout(floatingTimer);
   floatingTimer = null;
+  clearMatchEmotes();
   stopEventListening();
   stopClockTimers();
   scene?.destroy();
@@ -1368,14 +1485,21 @@ watch(
 );
 
 // Seating can settle after the board is already mounted: a guest joins, a seat is released,
-// or a spectator sits down. Xiangqi follows the viewer's side; Gomoku keeps one orientation
-// so the same coordinate is visible in the same place on both screens.
+// or a spectator sits down. Xiangqi follows the viewer's side; Gomoku keeps one board
+// orientation so the same coordinate is visible in the same place on both screens.
 watch(mySeat, (seat) => {
   scene?.setFlipped(shouldFlipBoard(game.value, seat));
   scheduleSeatLayout();
 });
 
-watch(phase, scheduleSeatLayout, { flush: "post" });
+watch(
+  phase,
+  (next) => {
+    if (next !== "playing") clearMatchEmotes();
+    scheduleSeatLayout();
+  },
+  { flush: "post" },
+);
 
 watch([undoRequestedBy, moveCount, phase, undoRemainingMs], ([nextBy, nextMoves, nextPhase], [previousBy, previousMoves]) => {
   clearTimeout(undoTimer);
@@ -1562,6 +1686,53 @@ watch(seats, (next, previous) => {
       >
         开始对局
       </button>
+      <div
+        v-if="phase === 'playing' && isSeated"
+        class="rail-emote-wrap"
+        data-seat-emote
+      >
+        <button
+          type="button"
+          class="ghost seat-emote-trigger rail-emote-action"
+          :class="{ open: emoteTraySeat === mySeat, cooling: emoteCooldown }"
+          :aria-label="emoteCooldown ? '表情冷却中，稍后再发' : '发送表情'"
+          :aria-expanded="emoteTraySeat === mySeat"
+          :aria-controls="`seat-emote-tray-${mySeat}`"
+          :title="emoteCooldown ? '表情冷却中，稍后再发' : '发送表情'"
+          @click.stop="toggleEmoteTray(mySeat)"
+        >
+          <svg aria-hidden="true" viewBox="0 0 24 24">
+            <circle cx="12" cy="12" r="8.5" />
+            <circle class="seat-emote-eye" cx="9" cy="10.1" r="1.15" />
+            <circle class="seat-emote-eye" cx="15" cy="10.1" r="1.15" />
+            <path d="M7.8 13.4c1 1.45 2.4 2.15 4.2 2.15s3.2-.7 4.2-2.15" />
+          </svg>
+        </button>
+        <Transition name="seat-emote-tray">
+          <div
+            v-if="emoteTraySeat === mySeat"
+            :id="`seat-emote-tray-${mySeat}`"
+            class="seat-emote-tray"
+            role="menu"
+            aria-label="对局表情"
+            data-seat-emote
+          >
+            <button
+              v-for="emote in MATCH_EMOTES"
+              :key="emote.id"
+              type="button"
+              class="seat-emote-option"
+              role="menuitem"
+              :aria-label="`发送表情：${emote.label}`"
+              :disabled="emoteSending || emoteCooldown"
+              @click.stop="sendEmote(emote)"
+            >
+              <span class="seat-emote-glyph" aria-hidden="true">{{ emote.glyph }}</span>
+              <span>{{ emote.label }}</span>
+            </button>
+          </div>
+        </Transition>
+      </div>
       <button
         v-if="phase === 'playing' || phase === 'practice' || phase === 'finished'"
         class="ghost last-move-action"
@@ -2062,8 +2233,8 @@ watch(seats, (next, previous) => {
       <!-- Seats flank the board so the players are placed around the table rather than
            listed away in the sidebar. Each one carries the person, the name and the clock. -->
       <div ref="boardColumn" class="board-col">
-        <!-- Seats sit across the table, not beside it. Xiangqi puts the viewer's own side
-             near; Gomoku keeps seat zero near for both players so their boards match. -->
+        <!-- Seats sit across the table. The viewer's own side stays near for both games;
+             the Gomoku board itself keeps one shared orientation. -->
         <aside
           v-for="seat in [0, 1]"
           :key="seat"
@@ -2080,13 +2251,29 @@ watch(seats, (next, previous) => {
           <span v-if="seatActive(seat)" class="seat-turn-effect" aria-hidden="true">
             <span class="seat-turn-sweep"></span>
           </span>
-          <svg class="avatar" viewBox="0 0 64 72" aria-hidden="true">
-            <!-- A robe silhouette: head, shoulders, and a collar V. Kept as three shapes so
-                 it reads at 44px without any asset, which the single-bundle CSP forbids. -->
-            <circle class="avatar-head" cx="32" cy="19" r="10" />
-            <path class="avatar-body" d="M32 31c-12 0-21 9-21 21v14h42V52c0-12-9-21-21-21z" />
-            <path class="avatar-collar" d="M32 31l-7 8 7 5 7-5-7-8z" />
-          </svg>
+          <div class="seat-avatar-wrap">
+            <Transition name="seat-emote-bubble">
+              <div
+                v-if="seatEmotes[seat]"
+                :key="seatEmotes[seat].serial"
+                class="seat-emote-bubble"
+                role="status"
+                aria-live="polite"
+              >
+                <span class="seat-emote-bubble-glyph" aria-hidden="true">
+                  {{ seatEmotes[seat].glyph }}
+                </span>
+                <strong>{{ seatEmotes[seat].label }}</strong>
+              </div>
+            </Transition>
+            <svg class="avatar" viewBox="0 0 64 72" aria-hidden="true">
+              <!-- A robe silhouette: head, shoulders, and a collar V. Kept as three shapes so
+                   it reads at 44px without any asset, which the single-bundle CSP forbids. -->
+              <circle class="avatar-head" cx="32" cy="19" r="10" />
+              <path class="avatar-body" d="M32 31c-12 0-21 9-21 21v14h42V52c0-12-9-21-21-21z" />
+              <path class="avatar-collar" d="M32 31l-7 8 7 5 7-5-7-8z" />
+            </svg>
+          </div>
           <span class="seat-panel-tag">{{ seat === 0 ? "先手" : "后手" }}</span>
           <span class="seat-panel-name">{{ seatLabel(seat) }}</span>
           <span v-if="mySeat === seat" class="seat-self">你</span>
@@ -3935,6 +4122,7 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
 
 .seat-strip {
   position: relative;
+  z-index: 6;
   isolation: isolate;
   grid-area: far;
   display: flex;
@@ -4049,6 +4237,312 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
 
 .seat-strip.empty { border-style: dashed; box-shadow: none; background: rgba(255, 253, 248, 0.5); }
 .seat-strip.empty .avatar { opacity: 0.3; }
+
+.seat-emote-trigger {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  min-width: 32px;
+  padding: 0;
+  place-items: center;
+  color: var(--muted-text);
+  border: 1px solid rgba(79, 61, 39, 0.18);
+  border-radius: 50%;
+  background: rgba(255, 252, 245, 0.7);
+  box-shadow: none;
+  transition:
+    color var(--dur-fast) var(--ease-standard),
+    background var(--dur-fast) var(--ease-standard),
+    border-color var(--dur-fast) var(--ease-standard),
+    transform var(--dur-fast) var(--ease-spring);
+}
+
+.seat-emote-trigger svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.seat-emote-trigger:hover,
+.seat-emote-trigger.open {
+  color: var(--red-deep);
+  border-color: rgba(176, 58, 46, 0.32);
+  background: rgba(255, 248, 236, 0.96);
+  transform: translateY(-1px);
+}
+
+.seat-emote-trigger.cooling {
+  opacity: 0.62;
+}
+
+.seat-emote-trigger:focus-visible {
+  outline: 3px solid rgba(176, 58, 46, 0.24);
+  outline-offset: 2px;
+}
+
+.rail-emote-wrap {
+  position: relative;
+  display: flex;
+  flex: 0 0 48px;
+  align-items: center;
+  align-self: center;
+  width: 48px;
+  height: 44px;
+}
+
+.rail-emote-wrap > .seat-emote-tray {
+  --seat-emote-surface: rgba(255, 250, 240, 0.46);
+  --seat-emote-tail-x: 58px;
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: -34px;
+  z-index: 70;
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px;
+  width: 392px;
+  max-width: calc(100vw - 24px);
+  padding: 8px;
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.08), transparent 62%),
+    var(--seat-emote-surface);
+  border: 1px solid rgba(76, 54, 30, 0.15);
+  border-radius: 16px 20px 13px 18px;
+  box-shadow: 0 12px 30px rgba(45, 31, 16, 0.12);
+  -webkit-backdrop-filter: blur(12px) saturate(1.08);
+  backdrop-filter: blur(12px) saturate(1.08);
+  transform: none;
+}
+
+.seat-emote-tray::after {
+  position: absolute;
+  bottom: -6px;
+  left: var(--seat-emote-tail-x);
+  width: 11px;
+  height: 11px;
+  content: "";
+  background: var(--seat-emote-surface);
+  border-right: 1px solid rgba(76, 54, 30, 0.15);
+  border-bottom: 1px solid rgba(76, 54, 30, 0.15);
+  transform: translateX(-50%) rotate(45deg);
+}
+
+.seat-emote-option {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  min-width: 0;
+  min-height: 60px;
+  padding: 6px 2px 5px;
+  color: var(--soft-text);
+  font-size: 9px;
+  line-height: 1.2;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  box-shadow: none;
+  white-space: nowrap;
+}
+
+.workbench:not(.lobby-mode) > .rail-actions .seat-emote-option {
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  height: auto;
+  padding: 6px 1px 5px;
+}
+
+.seat-emote-option:hover,
+.seat-emote-option:focus-visible {
+  color: var(--red-deep);
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+  outline: none;
+  transform: translateY(-1px) scale(1.04);
+  filter: drop-shadow(0 3px 4px rgba(56, 39, 20, 0.18));
+}
+
+.seat-emote-option:disabled {
+  cursor: default;
+  opacity: 0.48;
+  transform: none;
+}
+
+.seat-emote-glyph {
+  font-family: "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif;
+  font-size: 23px;
+  line-height: 1;
+}
+
+.seat-avatar-wrap {
+  position: relative;
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+}
+
+.seat-emote-bubble {
+  --seat-emote-bubble-surface: rgba(255, 250, 240, 0.46);
+  position: absolute;
+  bottom: calc(100% + 18px);
+  left: 50%;
+  z-index: 65;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  min-width: 68px;
+  max-width: 140px;
+  min-height: 62px;
+  padding: 6px 9px;
+  color: var(--ink);
+  text-align: center;
+  white-space: nowrap;
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.08), transparent 62%),
+    var(--seat-emote-bubble-surface);
+  border: 1px solid rgba(76, 54, 30, 0.17);
+  border-radius: 15px;
+  box-shadow:
+    1px 1px 0 rgba(56, 39, 20, 0.06),
+    0 8px 20px rgba(45, 31, 16, 0.14);
+  -webkit-backdrop-filter: blur(8px) saturate(1.05);
+  backdrop-filter: blur(8px) saturate(1.05);
+  transform: translateX(-50%);
+  transform-origin: 50% 100%;
+}
+
+.seat-emote-bubble::before {
+  display: none;
+}
+
+.seat-emote-bubble::after {
+  position: absolute;
+  bottom: -6px;
+  left: 50%;
+  width: 11px;
+  height: 11px;
+  content: "";
+  background: var(--seat-emote-bubble-surface);
+  border-right: 1px solid rgba(76, 54, 30, 0.17);
+  border-bottom: 1px solid rgba(76, 54, 30, 0.17);
+  transform: translateX(-50%) rotate(45deg);
+}
+
+.seat-strip.far .seat-emote-bubble {
+  top: calc(100% + 18px);
+  bottom: auto;
+  transform-origin: 50% 0;
+}
+
+.seat-strip.far .seat-emote-bubble::before {
+  display: none;
+}
+
+.seat-strip.far .seat-emote-bubble::after {
+  top: -6px;
+  bottom: auto;
+  border: 0;
+  border-top: 1px solid rgba(76, 54, 30, 0.17);
+  border-left: 1px solid rgba(76, 54, 30, 0.17);
+}
+
+.seat-emote-bubble-glyph {
+  font-family: "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif;
+  font-size: 22px;
+  line-height: 1;
+}
+
+.seat-emote-bubble strong {
+  font-family: var(--font-display);
+  font-size: 15px;
+  letter-spacing: 0.04em;
+}
+
+[data-theme="ink"] .seat-emote-trigger {
+  color: var(--soft-text);
+  border-color: rgba(243, 234, 217, 0.16);
+  background: rgba(255, 248, 235, 0.055);
+}
+
+[data-theme="ink"] .seat-emote-trigger:hover,
+[data-theme="ink"] .seat-emote-trigger.open {
+  color: #f0ad9f;
+  border-color: rgba(218, 101, 83, 0.38);
+  background: rgba(176, 58, 46, 0.16);
+}
+
+[data-theme="ink"] .seat-emote-tray {
+  --seat-emote-surface: rgba(36, 33, 28, 0.54);
+  border-color: rgba(243, 234, 217, 0.14);
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.04), transparent 62%),
+    var(--seat-emote-surface);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.24);
+}
+
+[data-theme="ink"] .seat-emote-option {
+  background: transparent;
+}
+
+[data-theme="ink"] .seat-emote-option:hover,
+[data-theme="ink"] .seat-emote-option:focus-visible {
+  color: #f0ad9f;
+  border-color: transparent;
+  background: transparent;
+}
+
+[data-theme="ink"] .seat-emote-bubble {
+  --seat-emote-bubble-surface: rgba(36, 33, 28, 0.54);
+  border-color: rgba(243, 234, 217, 0.15);
+}
+
+.seat-emote-bubble-enter-active,
+.seat-emote-bubble-leave-active {
+  transition:
+    opacity 180ms var(--ease-standard),
+    transform 220ms var(--ease-spring);
+}
+
+.seat-emote-bubble-enter-from,
+.seat-emote-bubble-leave-to {
+  opacity: 0;
+  transform: translate(-50%, 8px) scale(0.45);
+}
+
+.seat-strip.far .seat-emote-bubble-enter-from,
+.seat-strip.far .seat-emote-bubble-leave-to {
+  transform: translate(-50%, -8px) scale(0.45);
+}
+
+.seat-emote-tray-enter-active,
+.seat-emote-tray-leave-active {
+  transition:
+    opacity 150ms var(--ease-standard),
+    transform 190ms var(--ease-spring);
+}
+
+.seat-emote-tray-enter-from,
+.seat-emote-tray-leave-to {
+  opacity: 0;
+  transform: translateY(5px) scale(0.96);
+}
+
+.motion-reduced .seat-emote-bubble-enter-active,
+.motion-reduced .seat-emote-bubble-leave-active,
+.motion-reduced .seat-emote-tray-enter-active,
+.motion-reduced .seat-emote-tray-leave-active {
+  transition-duration: 1ms;
+}
 
 .avatar {
   width: 24px;
@@ -5959,6 +6453,46 @@ button:focus-visible {
   transform: translate(1px, 1px);
 }
 
+.workbench:not(.lobby-mode) > .rail-actions button.rail-emote-action {
+  flex: 0 0 48px;
+  width: 48px;
+  min-width: 48px;
+  min-height: 44px;
+  padding: 0;
+  color: var(--ink);
+  border-color: transparent;
+  border-radius: 4px;
+  background: transparent;
+  box-shadow: none;
+}
+
+.rail-emote-action svg {
+  width: 29px;
+  height: 29px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.65;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.rail-emote-action .seat-emote-eye {
+  fill: currentColor;
+  stroke: none;
+}
+
+.workbench:not(.lobby-mode) > .rail-actions button.rail-emote-action:hover,
+.workbench:not(.lobby-mode) > .rail-actions button.rail-emote-action.open {
+  color: var(--red-deep);
+  border-color: transparent;
+  background: transparent;
+  transform: translateY(-1px);
+}
+
+.workbench:not(.lobby-mode) > .rail-actions button.rail-emote-action.cooling {
+  opacity: 0.54;
+}
+
 .rail-actions .resign-action,
 .rail-actions .room-leave-action {
   color: var(--red-deep);
@@ -6525,6 +7059,19 @@ button:focus-visible {
   color: #f0a095;
   border-color: rgba(212, 162, 74, 0.56);
   background: rgba(212, 162, 74, 0.14);
+}
+
+[data-theme="ink"] .rail-actions .rail-emote-action {
+  color: var(--ink);
+  border-color: transparent;
+  background: transparent;
+}
+
+[data-theme="ink"] .rail-actions .rail-emote-action:hover,
+[data-theme="ink"] .rail-actions .rail-emote-action.open {
+  color: #ef8b7f;
+  border-color: transparent;
+  background: transparent;
 }
 
 [data-theme="ink"] .rail-actions .resign-action,
@@ -7164,6 +7711,47 @@ button:focus-visible {
     border: 1px solid rgba(92, 73, 49, 0.16);
     border-radius: 50%;
     background: rgba(255, 252, 246, 0.7);
+  }
+
+  .workbench:not(.lobby-mode) .rail-emote-action svg {
+    width: 26px;
+    height: 26px;
+  }
+
+  .workbench:not(.lobby-mode) .seat-emote-tray {
+    --seat-emote-tail-x: 34px;
+    left: -10px;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    width: 300px;
+    max-width: calc(100vw - 20px);
+    gap: 6px;
+    padding: 8px;
+  }
+
+  .workbench:not(.lobby-mode) .seat-emote-option {
+    min-height: 52px;
+    padding-inline: 3px;
+    font-size: 9px;
+  }
+
+  .workbench:not(.lobby-mode) .seat-emote-glyph {
+    font-size: 23px;
+  }
+
+  .workbench:not(.lobby-mode) .seat-emote-bubble {
+    gap: 2px;
+    min-width: 72px;
+    max-width: 132px;
+    min-height: 58px;
+    padding: 6px 8px;
+  }
+
+  .workbench:not(.lobby-mode) .seat-emote-bubble-glyph {
+    font-size: 20px;
+  }
+
+  .workbench:not(.lobby-mode) .seat-emote-bubble strong {
+    font-size: 13px;
   }
 
   .workbench:not(.lobby-mode) .seat-panel-tag {
