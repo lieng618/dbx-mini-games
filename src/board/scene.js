@@ -925,7 +925,12 @@ export class BoardScene {
    * destroyed and rebuilt every piece here, which is why nothing on the board ever moved.
    */
   drawPieces(cells, snapshot = {}) {
-    const moves = this.pieces.sync(cells, this.lay, { animate: true });
+    const terminal =
+      this.game === "xiangqi" &&
+      snapshot.result?.finished === true &&
+      !!snapshot.lastMove &&
+      Number(snapshot.lastMove.to) >= 0;
+    const moves = this.pieces.sync(cells, this.lay, { animate: true, terminal });
     this.lastMoves = moves;
     return moves;
   }

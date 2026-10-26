@@ -48,6 +48,11 @@ function pieceColour(code, game) {
 const TRAVEL_SPEED = 1100;
 const MIN_TRAVEL = 0.18;
 const MAX_TRAVEL = 0.34;
+/**
+ * A terminal xiangqi move is evidence, not merely a transition. Keep it on screen long
+ * enough to read regardless of the participant's decorative-effects setting.
+ */
+const XIANGQI_TERMINAL_TRAVEL = 1;
 
 /** easeOutQuint: fast departure, sharp settle. What a sliding object follows. */
 function easeOutQuint(t) {
@@ -298,7 +303,7 @@ export class PieceLayer {
    * Applies a cell array and returns the moves it animated as
    * `[{ from, to, captured, duration }]`, with points.
    */
-  sync(cells, lay, { animate = true } = {}) {
+  sync(cells, lay, { animate = true, terminal = false } = {}) {
     this.moves = [];
 
     if (this.game !== lay.game || this.cellCount !== cells.length) {
@@ -315,7 +320,7 @@ export class PieceLayer {
     if (animate) {
       const diff = this.diffCells(cells);
       if (diff.kind === "move") {
-        this.applyMove(diff, cells, lay);
+        this.applyMove(diff, cells, lay, terminal);
         this.drawSelection();
         return this.moves;
       }
@@ -376,7 +381,7 @@ export class PieceLayer {
     return null;
   }
 
-  applyMove({ from, to }, cells, lay) {
+  applyMove({ from, to }, cells, lay, terminal = false) {
     const mover = this.nodeAt(from);
     if (!mover) {
       this.rebuild(cells, lay);
@@ -391,7 +396,10 @@ export class PieceLayer {
     // Duration proportional to distance: a long rook slide must not read as a teleport, and
     // a one-step pawn nudge must not feel sluggish.
     const distance = Math.hypot(toPt.x - fromPt.x, toPt.y - fromPt.y);
-    const duration = Math.min(MAX_TRAVEL, Math.max(MIN_TRAVEL, distance / TRAVEL_SPEED));
+    const duration =
+      terminal && lay.game === "xiangqi"
+        ? XIANGQI_TERMINAL_TRAVEL
+        : Math.min(MAX_TRAVEL, Math.max(MIN_TRAVEL, distance / TRAVEL_SPEED));
 
     let victimColour = null;
     if (victim) {
