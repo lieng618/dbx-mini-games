@@ -6,4 +6,6 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 ExecStart=/opt/dbx-mini-games/deploy/systemd/certbot-renew.sh
-TimeoutStartSec=300
+# Restore Caddy even when certbot is killed before its own post hook can run.
+ExecStopPost=-/bin/systemctl start caddy
+TimeoutStartSec=600
