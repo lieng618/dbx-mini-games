@@ -3,8 +3,7 @@ const SETTINGS_KEY = "dbxmg.settings";
 const CREATE_ROOM_SETTINGS_KEY = "dbxmg.createRoom";
 
 export const DEFAULT_SETTINGS = Object.freeze({
-  lowMotion: false,
-  effectsLevel: "full",
+  effectsEnabled: true,
   boardSize: "standard",
   theme: "paper",
 });
@@ -24,8 +23,12 @@ export function loadSettings() {
     if (!raw) return { ...DEFAULT_SETTINGS };
     const stored = JSON.parse(raw);
     return {
-      lowMotion: stored.lowMotion === true,
-      effectsLevel: stored.effectsLevel || DEFAULT_SETTINGS.effectsLevel,
+      // Older builds stored a three-way effectsLevel. "off" remains off; the former
+      // "reduced" tier now comes from the operating system's motion preference.
+      effectsEnabled:
+        typeof stored.effectsEnabled === "boolean"
+          ? stored.effectsEnabled
+          : stored.effectsLevel !== "off",
       boardSize: ["compact", "standard", "large"].includes(stored.boardSize)
         ? stored.boardSize
         : DEFAULT_SETTINGS.boardSize,

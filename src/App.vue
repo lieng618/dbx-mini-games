@@ -8,45 +8,16 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import { BoardScene } from "./board/scene.js";
 import { createBridge, whenReady } from "./bridge.js";
 import { reconcileLastMove } from "./snapshot.js";
+import CreateRoomPanel from "./components/CreateRoomPanel.vue";
+import LobbyRoomCard from "./components/LobbyRoomCard.vue";
+import ResultSummary from "./components/ResultSummary.vue";
+import SettingsDrawer from "./components/SettingsDrawer.vue";
 import {
   clearLegacyRecords,
-  loadCreateRoomSettings,
   loadSettings,
-  saveCreateRoomSettings,
   saveSettings,
 } from "./storage.js";
 
-const GAMES = [
-  { id: "xiangqi", name: "中国象棋" },
-  { id: "gomoku", name: "五子棋" },
-];
-const TOTAL_TIME_OPTIONS = [
-  { value: 0, label: "不限" },
-  { value: 10, label: "10 分钟" },
-  { value: 20, label: "20 分钟" },
-  { value: 30, label: "30 分钟" },
-  { value: 60, label: "60 分钟" },
-];
-const MOVE_TIME_OPTIONS = [
-  { value: 0, label: "不限" },
-  { value: 15, label: "15 秒" },
-  { value: 30, label: "30 秒" },
-  { value: 60, label: "60 秒" },
-];
-const EFFECT_OPTIONS = [
-  { value: "full", label: "完整" },
-  { value: "reduced", label: "精简" },
-  { value: "off", label: "关闭" },
-];
-const THEME_OPTIONS = [
-  { value: "paper", label: "纸白" },
-  { value: "ink", label: "墨色" },
-];
-const BOARD_SIZE_OPTIONS = [
-  { value: "compact", label: "紧凑" },
-  { value: "standard", label: "标准" },
-  { value: "large", label: "大" },
-];
 const MATCH_EMOTES = Object.freeze([
   { id: "smug", glyph: "😏", label: "就这？" },
   { id: "hurry", glyph: "😴", label: "想好了吗" },
@@ -63,23 +34,26 @@ const NICKNAME_PATTERN = /^[\p{L}\p{N}_-]{2,12}$/u;
 const bridge = createBridge();
 const ready = ref(false);
 const settings = ref(loadSettings());
-const createRoomDefaults = loadCreateRoomSettings();
 const role = ref("idle");
 const roomId = ref(null);
 const roomName = ref("");
 const game = ref("xiangqi");
-const inputGame = ref(createRoomDefaults.game);
 const phase = ref("lobby");
 const members = ref([]);
 const seats = ref(["", ""]);
 const selfId = ref("");
-const lowMotion = ref(Boolean(settings.value.lowMotion));
-// Visual effect intensity is a local preference; it is not part of the cloud protocol.
-const effectsLevel = ref(settings.value.effectsLevel || "full");
+// Effects are a local preference. The operating system's reduced-motion setting still
+// selects the calm render path when effects are enabled.
+const effectsEnabled = ref(settings.value.effectsEnabled !== false);
+const systemReducedMotion = ref(
+  typeof window !== "undefined" && window.matchMedia
+    ? window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    : false,
+);
 const boardSize = ref(settings.value.boardSize || "standard");
 const theme = ref(settings.value.theme || "paper");
 const pendingInviteRoomId = readInviteRoomId();
-const reducedMotion = computed(() => lowMotion.value || effectsLevel.value !== "full");
+const reducedMotion = computed(() => systemReducedMotion.value || !effectsEnabled.value);
 const lobbyRooms = ref([]);
 const lobbyOnline = ref(0);
 const scanning = ref(false);
@@ -99,6 +73,9 @@ const joinPasswordError = ref("");
 const joinSubmitting = ref(false);
 const joinPasswordInput = ref(null);
 const lobbyNow = ref(Date.now());
+const settingsOpen = ref(false);
+const settingsButton = ref(null);
+const settingsDrawer = ref(null);
 
 const cells = ref([]);
 const lastMove = ref(null);
@@ -139,21 +116,13 @@ const aiSeat = ref(-1);
 const aiThinking = ref(false);
 const moveCount = ref(0);
 
-const inputPassword = ref("");
-const passwordEnabled = ref(createRoomDefaults.passwordEnabled);
-const showPassword = ref(false);
-// Time control chosen before the table exists. 0 means "no limit" for either field.
-const inputMinutes = ref(createRoomDefaults.minutes);
-const inputMoveSeconds = ref(createRoomDefaults.moveSeconds);
-const inputSeat = ref(createRoomDefaults.seat);
-const inputScoreTracking = ref(createRoomDefaults.scoring);
-
 const boardHost = ref(null);
 const boardColumn = ref(null);
 const railActions = ref(null);
 const canvasFailed = ref(false);
 let scene = null;
 let sceneInitPromise = null;
+let reducedMotionMedia = null;
 let seatLayoutFrame = 0;
 let seatLayoutTimer = 0;
 let seatResizeObserver = null;
@@ -205,10 +174,6 @@ function sideNameFor(gameId, seat) {
 
 function sideName(seat) {
   return sideNameFor(game.value, seat);
-}
-
-function inputSideName(seat) {
-  return sideNameFor(inputGame.value, seat);
 }
 
 /** True while the practice partner holds the turn. */
@@ -424,15 +389,13 @@ function paint() {
     winLine: winLine.value,
     moveCount: moveCount.value,
     lowMotion: reducedMotion.value,
-    effectsOff: effectsLevel.value === "off",
   });
 }
 
 function persistSettings() {
   settings.value = {
     ...settings.value,
-    lowMotion: lowMotion.value,
-    effectsLevel: effectsLevel.value,
+    effectsEnabled: effectsEnabled.value,
     boardSize: boardSize.value,
     theme: theme.value,
   };
@@ -685,35 +648,16 @@ watch(nickname, (value) => {
   nicknameDraft.value = value;
 });
 
-watch(
-  [inputGame, inputSeat, passwordEnabled, inputMinutes, inputMoveSeconds, inputScoreTracking],
-  () => {
-    saveCreateRoomSettings({
-      game: inputGame.value,
-      seat: inputSeat.value,
-      minutes: inputMinutes.value,
-      moveSeconds: inputMoveSeconds.value,
-      scoring: inputScoreTracking.value,
-      passwordEnabled: passwordEnabled.value,
-    });
-  },
-);
-
-async function createRoom() {
-  const roomName = `${nickname.value || "棋友"}的${inputGame.value === "xiangqi" ? "象棋室" : "五子棋室"}`;
-  const roomPassword = String(inputPassword.value || "").trim();
-  if (passwordEnabled.value && !roomPassword) {
-    error.value = "请输入房间密码，或切换为公开房间";
-    return;
-  }
+async function createRoom(options) {
+  const roomName = `${nickname.value || "棋友"}的${options.game === "xiangqi" ? "象棋室" : "五子棋室"}`;
   await call("room.create", {
     name: roomName,
-    game: inputGame.value,
-    password: passwordEnabled.value ? roomPassword : "",
-    minutes: Number(inputMinutes.value) || 0,
-    moveSeconds: Number(inputMoveSeconds.value) || 0,
-    seat: Number(inputSeat.value),
-    trackScore: inputScoreTracking.value,
+    game: options.game,
+    password: options.password,
+    minutes: Number(options.minutes) || 0,
+    moveSeconds: Number(options.moveSeconds) || 0,
+    seat: Number(options.seat),
+    trackScore: options.scoring,
   });
 }
 
@@ -993,18 +937,31 @@ async function leaveRoom() {
   await scan();
 }
 
-async function toggleLowMotion() {
-  lowMotion.value = !lowMotion.value;
-  persistSettings();
-  paint();
-}
-
-function updateEffectsLevel() {
-  if (effectsLevel.value === "off") {
+function setEffectsEnabled(enabled) {
+  if (effectsEnabled.value === enabled) return;
+  effectsEnabled.value = enabled;
+  if (!effectsEnabled.value) {
     scene?.clearEffects();
   }
   persistSettings();
   paint();
+}
+
+function handleSystemReducedMotion(event) {
+  systemReducedMotion.value = event.matches;
+  if (event.matches) scene?.clearEffects();
+  paint();
+}
+
+function openSettings() {
+  settingsOpen.value = true;
+  void nextTick(() => settingsDrawer.value?.focusClose());
+}
+
+function closeSettings() {
+  if (!settingsOpen.value) return;
+  settingsOpen.value = false;
+  void nextTick(() => settingsButton.value?.focus());
 }
 
 /** Handles a click on a board intersection. */
@@ -1142,7 +1099,7 @@ watch(result, (next) => {
     mvpTimer = setTimeout(() => {
       mvpReady.value = true;
       mvpTimer = null;
-    }, effectsLevel.value === "off" ? 300 : reducedMotion.value ? 1000 : 2300);
+    }, reducedMotion.value ? 1000 : 2300);
   }
 });
 
@@ -1152,6 +1109,10 @@ function dismissMvp() {
 
 function closeResultOnEscape(event) {
   if (event.key !== "Escape") return;
+  if (settingsOpen.value) {
+    closeSettings();
+    return;
+  }
   if (emoteTraySeat.value >= 0) {
     closeEmoteTray();
     return;
@@ -1161,17 +1122,6 @@ function closeResultOnEscape(event) {
     return;
   }
   if (mvp.value) dismissMvp();
-}
-
-// Fixed pseudo-random placement: the ribbons must not jump around when the panel re-renders.
-function confettiStyle(n) {
-  const colors = ["#c8a24a", "#8f2f28", "#4a6b52", "#2f2a24", "#d9c48a"];
-  return {
-    left: `${(n * 37) % 100}%`,
-    animationDelay: `${((n * 13) % 30) / 10}s`,
-    animationDuration: `${2.6 + ((n * 7) % 20) / 10}s`,
-    background: colors[n % colors.length],
-  };
 }
 
 // ── Clock ───────────────────────────────────────────────────────────────────────────
@@ -1412,6 +1362,15 @@ async function ensureScene() {
 }
 
 onMounted(async () => {
+  if (window.matchMedia) {
+    reducedMotionMedia = window.matchMedia("(prefers-reduced-motion: reduce)");
+    systemReducedMotion.value = reducedMotionMedia.matches;
+    if (reducedMotionMedia.addEventListener) {
+      reducedMotionMedia.addEventListener("change", handleSystemReducedMotion);
+    } else {
+      reducedMotionMedia.addListener(handleSystemReducedMotion);
+    }
+  }
   document.addEventListener("visibilitychange", handleVisibilityChange);
   document.addEventListener("pointerdown", handleEmoteOutside, true);
   window.addEventListener("focus", handleWindowFocus);
@@ -1450,6 +1409,12 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  if (reducedMotionMedia?.removeEventListener) {
+    reducedMotionMedia.removeEventListener("change", handleSystemReducedMotion);
+  } else {
+    reducedMotionMedia?.removeListener?.(handleSystemReducedMotion);
+  }
+  reducedMotionMedia = null;
   window.removeEventListener("keydown", closeResultOnEscape);
   window.removeEventListener("focus", handleWindowFocus);
   window.removeEventListener("pageshow", handleVisibilityChange);
@@ -1608,6 +1573,26 @@ watch(seats, (next, previous) => {
     :data-board-size="boardSize"
     :data-game="game"
   >
+    <button
+      ref="settingsButton"
+      type="button"
+      class="settings-trigger"
+      :class="{ active: settingsOpen }"
+      :aria-label="settingsOpen ? '关闭设置' : '打开设置'"
+      aria-controls="settings-drawer"
+      :aria-expanded="settingsOpen"
+      title="设置"
+      @click="settingsOpen ? closeSettings() : openSettings()"
+    >
+      <svg aria-hidden="true" viewBox="0 0 24 24">
+        <path d="M4 7h9M17 7h3M4 17h3M11 17h9M4 12h4M12 12h8" />
+        <circle cx="15" cy="7" r="2" />
+        <circle cx="9" cy="17" r="2" />
+        <circle cx="10" cy="12" r="2" />
+      </svg>
+      <span class="settings-label">设置</span>
+    </button>
+
     <aside v-show="role !== 'idle'" class="rail">
       <header class="rail-head">
         <div class="brand-block">
@@ -1830,87 +1815,21 @@ watch(seats, (next, previous) => {
               </span>
             </div>
           </div>
-          <button
-            type="button"
-            class="lobby-settings-button"
-            :class="{ active: lobbyTab === 'settings' }"
-            aria-label="设置"
-            :aria-current="lobbyTab === 'settings' ? 'page' : undefined"
-            title="设置"
-            @click="lobbyTab = 'settings'"
-          >
-            <svg aria-hidden="true" viewBox="0 0 24 24">
-              <path d="M4 7h9M17 7h3M4 17h3M11 17h9M4 12h4M12 12h8" />
-              <circle cx="15" cy="7" r="2" />
-              <circle cx="9" cy="17" r="2" />
-              <circle cx="10" cy="12" r="2" />
-            </svg>
-            <span class="settings-label">设置</span>
-          </button>
         </header>
 
         <main class="lobby-main">
         <section v-show="lobbyTab === 'rooms'" class="lobby-view">
           <div v-if="visibleLobbyRooms.length" class="lobby-room-grid">
-            <article
+            <LobbyRoomCard
               v-for="roomItem in visibleLobbyRooms"
               :key="roomItem.roomId"
-              class="lobby-room-card"
-              :class="`status-${roomItem.phase}`"
-              :data-game="roomItem.game"
-            >
-              <div class="lobby-room-top">
-                <span class="game-mark">
-                  <span class="game-seal" aria-hidden="true">
-                    <svg v-if="roomItem.game === 'xiangqi'" viewBox="0 0 24 24">
-                      <circle cx="12" cy="12" r="8" />
-                      <path d="M8.5 10h7M8.5 14h7M12 7.5v9" />
-                    </svg>
-                    <svg v-else viewBox="0 0 24 24">
-                      <circle cx="6" cy="6" r="2" />
-                      <circle cx="12" cy="9" r="2" />
-                      <circle cx="18" cy="12" r="2" />
-                      <circle cx="9" cy="15" r="2" />
-                      <circle cx="15" cy="18" r="2" />
-                    </svg>
-                  </span>
-                  {{ gameLabel(roomItem.game) }}
-                </span>
-                <span class="room-badges">
-                  <span v-if="roomItem.locked" class="lock-badge" title="需要密码">
-                    <svg aria-hidden="true" viewBox="0 0 16 16">
-                      <rect x="3.5" y="7" width="9" height="6" rx="1.5" />
-                      <path d="M5.5 7V5.5a2.5 2.5 0 0 1 5 0V7" />
-                    </svg>
-                    私房
-                  </span>
-                  <span class="room-state">{{ roomStatusLabel(roomItem) }}</span>
-                </span>
-              </div>
-              <h3>{{ roomItem.name }}</h3>
-              <div class="room-stats">
-                <span><b>{{ roomItem.players }}/{{ roomItem.capacity }}</b> 玩家</span>
-                <span v-if="roomItem.phase === 'playing'"><b>{{ roomItem.spectators }}</b> 观战</span>
-                <span>{{ roomDurationLabel(roomItem) }}</span>
-              </div>
-              <div class="room-actions" :class="{ 'single-action': roomItem.phase !== 'playing' }">
-                <button
-                  class="primary"
-                  :disabled="roomItem.players >= roomItem.capacity || roomItem.phase === 'finished'"
-                  @click="requestJoin(roomItem, 'player')"
-                >
-                  {{ roomItem.phase === "finished" ? "已结束" : roomItem.players >= roomItem.capacity ? "满桌" : "加入" }}
-                </button>
-                <button
-                  v-if="roomItem.phase === 'playing'"
-                  class="ghost"
-                  :disabled="roomItem.spectators >= roomItem.spectatorCap"
-                  @click="requestJoin(roomItem, 'spectator')"
-                >
-                  观战
-                </button>
-              </div>
-            </article>
+              :room="roomItem"
+              :game-label="gameLabel(roomItem.game)"
+              :status-label="roomStatusLabel(roomItem)"
+              :duration-label="roomDurationLabel(roomItem)"
+              @join="requestJoin(roomItem, 'player')"
+              @spectate="requestJoin(roomItem, 'spectator')"
+            />
             <article class="lobby-create-card">
               <div class="create-card-top">
                 <span class="create-card-mark" aria-hidden="true">
@@ -1943,305 +1862,12 @@ watch(seats, (next, previous) => {
           </div>
         </section>
 
-        <section v-show="lobbyTab === 'create'" class="lobby-view lobby-form-card">
-          <header class="lobby-form-heading">
-            <button
-              type="button"
-              class="lobby-form-back"
-              aria-label="返回房间列表"
-              title="返回房间列表"
-              @click="lobbyTab = 'rooms'"
-            >
-              <svg aria-hidden="true" viewBox="0 0 24 24">
-                <path d="M19 12H5m6-6-6 6 6 6" />
-              </svg>
-            </button>
-            <span class="lobby-kicker">新开一席</span>
-            <h2>创建房间</h2>
-            <p>制定规则，邀请朋友入座。</p>
-          </header>
-          <div class="lobby-form-grid">
-            <div class="field">
-              <span>玩法</span>
-              <div class="side-pick game-pick">
-                <button
-                  v-for="item in GAMES"
-                  :key="item.id"
-                  type="button"
-                  class="time-option"
-                  :class="{ on: inputGame === item.id }"
-                  @click="inputGame = item.id"
-                >
-                  <span>{{ item.name }}</span>
-                  <svg v-if="inputGame === item.id" class="choice-check" aria-hidden="true" viewBox="0 0 20 20">
-                    <path d="m5 10.5 3.2 3.2L15 6.8" />
-                  </svg>
-                </button>
-              </div>
-            </div>
-            <div class="field">
-              <span>执方</span>
-              <div class="side-pick">
-                <button type="button" class="time-option" :class="{ on: inputSeat === 0 }" @click="inputSeat = 0">
-                  <span>{{ inputSideName(0) }}</span>
-                  <svg v-if="inputSeat === 0" class="choice-check" aria-hidden="true" viewBox="0 0 20 20">
-                    <path d="m5 10.5 3.2 3.2L15 6.8" />
-                  </svg>
-                </button>
-                <button type="button" class="time-option" :class="{ on: inputSeat === 1 }" @click="inputSeat = 1">
-                  <span>{{ inputSideName(1) }}</span>
-                  <svg v-if="inputSeat === 1" class="choice-check" aria-hidden="true" viewBox="0 0 20 20">
-                    <path d="m5 10.5 3.2 3.2L15 6.8" />
-                  </svg>
-                </button>
-              </div>
-            </div>
-            <div class="field">
-              <span>访问方式</span>
-              <div class="password-row" :class="{ enabled: passwordEnabled }">
-                <div class="password-options">
-                  <button
-                    type="button"
-                    class="time-option"
-                    :class="{ on: !passwordEnabled }"
-                    :aria-pressed="!passwordEnabled"
-                    @click="passwordEnabled = false"
-                  >
-                    公开房间
-                    <svg v-if="!passwordEnabled" aria-hidden="true" viewBox="0 0 20 20">
-                      <path d="m5 10.5 3.2 3.2L15 6.8" />
-                    </svg>
-                  </button>
-                  <button
-                    type="button"
-                    class="time-option"
-                    :class="{ on: passwordEnabled }"
-                    :aria-pressed="passwordEnabled"
-                    @click="passwordEnabled = true"
-                  >
-                    密码房
-                    <svg v-if="passwordEnabled" aria-hidden="true" viewBox="0 0 20 20">
-                      <path d="m5 10.5 3.2 3.2L15 6.8" />
-                    </svg>
-                  </button>
-                </div>
+        <CreateRoomPanel
+          v-show="lobbyTab === 'create'"
+          @cancel="lobbyTab = 'rooms'"
+          @submit="createRoom"
+        />
 
-                <div v-if="passwordEnabled" class="password-control">
-                  <input
-                    v-model="inputPassword"
-                    :type="showPassword ? 'text' : 'password'"
-                    maxlength="32"
-                    autocomplete="new-password"
-                    placeholder="输入房间密码"
-                  />
-                  <button
-                    type="button"
-                    class="password-reveal"
-                    :aria-label="showPassword ? '隐藏密码' : '显示密码'"
-                    @click="showPassword = !showPassword"
-                  >
-                    <svg aria-hidden="true" viewBox="0 0 20 20">
-                      <path d="M2.5 10s2.8-4.5 7.5-4.5 7.5 4.5 7.5 4.5-2.8 4.5-7.5 4.5S2.5 10 2.5 10z" />
-                      <circle cx="10" cy="10" r="2.2" />
-                      <path v-if="!showPassword" d="m4 4 12 12" />
-                    </svg>
-                  </button>
-                </div>
-              </div>
-            </div>
-            <div class="field">
-              <span>总时间</span>
-              <div class="time-options">
-                <button
-                  v-for="option in TOTAL_TIME_OPTIONS"
-                  :key="option.value"
-                  type="button"
-                  class="time-option"
-                  :class="{ on: inputMinutes === option.value }"
-                  @click="inputMinutes = option.value"
-                >
-                  {{ option.label }}
-                  <svg v-if="inputMinutes === option.value" class="choice-check" aria-hidden="true" viewBox="0 0 20 20">
-                    <path d="m5 10.5 3.2 3.2L15 6.8" />
-                  </svg>
-                </button>
-              </div>
-            </div>
-            <div class="field">
-              <span>计分</span>
-              <div class="time-options">
-                <button
-                  type="button"
-                  class="time-option"
-                  :class="{ on: inputScoreTracking }"
-                  @click="inputScoreTracking = true"
-                >
-                  计分
-                  <svg v-if="inputScoreTracking" class="choice-check" aria-hidden="true" viewBox="0 0 20 20">
-                    <path d="m5 10.5 3.2 3.2L15 6.8" />
-                  </svg>
-                </button>
-                <button
-                  type="button"
-                  class="time-option"
-                  :class="{ on: !inputScoreTracking }"
-                  @click="inputScoreTracking = false"
-                >
-                  不计分
-                  <svg v-if="!inputScoreTracking" class="choice-check" aria-hidden="true" viewBox="0 0 20 20">
-                    <path d="m5 10.5 3.2 3.2L15 6.8" />
-                  </svg>
-                </button>
-              </div>
-            </div>
-            <div class="field">
-              <span>每步限时</span>
-              <div class="time-options">
-                <button
-                  v-for="option in MOVE_TIME_OPTIONS"
-                  :key="option.value"
-                  type="button"
-                  class="time-option"
-                  :class="{ on: inputMoveSeconds === option.value }"
-                  @click="inputMoveSeconds = option.value"
-                >
-                  {{ option.label }}
-                  <svg v-if="inputMoveSeconds === option.value" class="choice-check" aria-hidden="true" viewBox="0 0 20 20">
-                    <path d="m5 10.5 3.2 3.2L15 6.8" />
-                  </svg>
-                </button>
-              </div>
-            </div>
-          </div>
-          <button class="primary lobby-create" @click="createRoom">创建并进入</button>
-        </section>
-
-        <section v-show="lobbyTab === 'settings'" class="lobby-view lobby-settings">
-          <header class="lobby-form-heading settings-heading">
-            <button
-              type="button"
-              class="lobby-form-back"
-              aria-label="返回房间列表"
-              title="返回房间列表"
-              @click="lobbyTab = 'rooms'"
-            >
-              <svg aria-hidden="true" viewBox="0 0 24 24">
-                <path d="M19 12H5m6-6-6 6 6 6" />
-              </svg>
-            </button>
-            <span class="lobby-kicker">个人偏好</span>
-            <h2>设置</h2>
-            <p>个人资料与显示偏好</p>
-          </header>
-          <div class="settings-grid">
-            <div class="setting-row setting-nickname-row">
-              <span class="setting-copy">
-                <strong>昵称</strong>
-              </span>
-              <div class="nickname-settings-control">
-                <div class="nickname-settings-form">
-                  <input
-                    v-model="nicknameDraft"
-                    :class="{ invalid: Boolean(nicknameError) }"
-                    type="text"
-                    maxlength="12"
-                    autocomplete="nickname"
-                    autocapitalize="off"
-                    spellcheck="false"
-                    aria-label="昵称"
-                    :aria-invalid="Boolean(nicknameError)"
-                    :aria-describedby="nicknameError ? 'nickname-settings-error' : undefined"
-                    :disabled="nicknameSaving"
-                    @input="nicknameError = ''"
-                    @keydown.enter.prevent="saveNickname"
-                    @keydown.esc.prevent="resetNicknameDraft"
-                  />
-                  <button
-                    type="button"
-                    class="nickname-save"
-                    aria-label="保存昵称"
-                    title="保存昵称"
-                    :disabled="nicknameSaving || nicknameDraft.trim() === nickname"
-                    @click="saveNickname"
-                  >
-                    <svg aria-hidden="true" viewBox="0 0 20 20">
-                      <path d="m5 10.5 3.2 3.2L15 6.8" />
-                    </svg>
-                  </button>
-                </div>
-                <span
-                  v-if="nicknameError"
-                  id="nickname-settings-error"
-                  class="nickname-settings-error"
-                  role="alert"
-                >
-                  {{ nicknameError }}
-                </span>
-              </div>
-            </div>
-            <label class="setting-row">
-              <span><strong>低动效</strong></span>
-              <input :checked="lowMotion" type="checkbox" @change="toggleLowMotion" />
-            </label>
-            <div class="setting-row setting-choice-row">
-              <span><strong>特效</strong></span>
-              <div class="time-options">
-                <button
-                  v-for="option in EFFECT_OPTIONS"
-                  :key="option.value"
-                  type="button"
-                  class="time-option"
-                  :class="{ on: effectsLevel === option.value }"
-                  @click="effectsLevel = option.value; updateEffectsLevel()"
-                >
-                  {{ option.label }}
-                  <svg v-if="effectsLevel === option.value" class="choice-check" aria-hidden="true" viewBox="0 0 20 20">
-                    <path d="m5 10.5 3.2 3.2L15 6.8" />
-                  </svg>
-                </button>
-              </div>
-            </div>
-            <div class="setting-row setting-choice-row">
-              <span>
-                <strong>棋盘大小</strong>
-                <small>对局中的棋盘显示尺寸</small>
-              </span>
-              <div class="time-options">
-                <button
-                  v-for="option in BOARD_SIZE_OPTIONS"
-                  :key="option.value"
-                  type="button"
-                  class="time-option"
-                  :class="{ on: boardSize === option.value }"
-                  @click="boardSize = option.value; persistSettings()"
-                >
-                  {{ option.label }}
-                  <svg v-if="boardSize === option.value" class="choice-check" aria-hidden="true" viewBox="0 0 20 20">
-                    <path d="m5 10.5 3.2 3.2L15 6.8" />
-                  </svg>
-                </button>
-              </div>
-            </div>
-            <div class="setting-row setting-choice-row">
-              <span><strong>主题</strong></span>
-              <div class="time-options">
-                <button
-                  v-for="option in THEME_OPTIONS"
-                  :key="option.value"
-                  type="button"
-                  class="time-option"
-                  :class="{ on: theme === option.value }"
-                  @click="theme = option.value; persistSettings()"
-                >
-                  {{ option.label }}
-                  <svg v-if="theme === option.value" class="choice-check" aria-hidden="true" viewBox="0 0 20 20">
-                    <path d="m5 10.5 3.2 3.2L15 6.8" />
-                  </svg>
-                </button>
-              </div>
-            </div>
-          </div>
-        </section>
         </main>
       </section>
 
@@ -2359,51 +1985,16 @@ watch(seats, (next, previous) => {
         </div>
       </Transition>
 
-      <!-- MVP 面板显示时让出横幅，关掉面板后横幅接回，免得同一句话出现两遍。 -->
-      <div v-if="result && result.finished && !mvp" class="result-banner">
-        <strong>{{ outcomeText(result.outcome) }}</strong>
-        <span>{{ resultReasonLabel(result.reason) }}</span>
-      </div>
-
-      <!-- 结算整活。低动效模式只留淡入：不撒彩带、不旋转，符合本项目的降级约定。
-           等棋盘的连线、印章演完后，居中的结算卡再出现。 -->
-      <div v-if="mvp && !reducedMotion" class="mvp-confetti" aria-hidden="true">
-        <i v-for="n in 26" :key="n" :style="confettiStyle(n)"></i>
-      </div>
-
-      <div
-        v-if="mvp"
-        class="mvp"
-        :class="{ calm: reducedMotion, draw: mvp.draw }"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="mvp-title"
-        @click.self="dismissMvp"
-      >
-        <div class="mvp-card">
-          <button
-            class="mvp-close"
-            type="button"
-            aria-label="收起结算卡"
-            @click="dismissMvp"
-          >×</button>
-          <p class="mvp-eyebrow">本 局 最 有 价 值</p>
-          <h2 id="mvp-title" class="mvp-badge">MVP</h2>
-          <p class="mvp-name">{{ mvp.name }}</p>
-          <p class="mvp-title">{{ mvp.title }}</p>
-          <dl class="mvp-stats">
-            <div v-for="s in mvp.stats" :key="s.label">
-              <dt>{{ s.label }}</dt>
-              <dd>{{ s.value }}</dd>
-            </div>
-          </dl>
-          <p class="mvp-reason">{{ mvp.reason }}</p>
-          <div class="mvp-actions">
-            <button v-if="role === 'host'" class="primary" @click="rematch">再来一局</button>
-            <p v-else class="mvp-awaiting">等待房主开始下一局</p>
-          </div>
-        </div>
-      </div>
+      <ResultSummary
+        :result="result"
+        :mvp="mvp"
+        :reduced-motion="reducedMotion"
+        :role="role"
+        :outcome-label="result ? outcomeText(result.outcome) : ''"
+        :reason-label="result ? resultReasonLabel(result.reason) : ''"
+        @dismiss="dismissMvp"
+        @rematch="rematch"
+      />
 
       </div>
     </main>
@@ -2480,6 +2071,25 @@ watch(seats, (next, previous) => {
         <span>{{ floatingMessage.text }}</span>
       </div>
     </Transition>
+
+    <SettingsDrawer
+      ref="settingsDrawer"
+      :open="settingsOpen"
+      :nickname="nickname"
+      :nickname-draft="nicknameDraft"
+      :nickname-saving="nicknameSaving"
+      :nickname-error="nicknameError"
+      :effects-enabled="effectsEnabled"
+      :board-size="boardSize"
+      :theme="theme"
+      @close="closeSettings"
+      @save="saveNickname"
+      @reset-nickname="resetNicknameDraft"
+      @update:nickname-draft="nicknameDraft = $event; nicknameError = ''"
+      @update:effects-enabled="setEffectsEnabled"
+      @update:board-size="boardSize = $event; persistSettings()"
+      @update:theme="theme = $event"
+    />
   </div>
 </template>
 
@@ -2932,8 +2542,7 @@ watch(seats, (next, previous) => {
 .identity-edit { display: flex; gap: 8px; }
 
 .identity-edit input,
-.lobby-password input,
-.setting-row select {
+.lobby-password input {
   min-height: 38px;
   padding: 0 12px;
   color: var(--ink);
@@ -3349,16 +2958,6 @@ watch(seats, (next, previous) => {
 }
 
 .lobby-form-card,
-.lobby-settings {
-  width: min(680px, 100%);
-  margin-inline: auto;
-  padding: 24px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-panel);
-  background: rgba(255, 253, 248, 0.8);
-  box-shadow: var(--shadow-1);
-}
-
 .lobby-form-grid {
   display: grid;
   grid-template-columns: 1fr;
@@ -3367,32 +2966,6 @@ watch(seats, (next, previous) => {
 
 .lobby-form-card > h2 { text-align: center; }
 .lobby-create { align-self: center; min-width: 200px; }
-
-.settings-grid {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 10px;
-}
-
-.setting-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  min-height: 54px;
-  padding: 10px 14px;
-  border: 1px solid var(--line-soft);
-  border-radius: var(--radius-card);
-  background: rgba(255, 253, 248, 0.72);
-}
-
-.setting-row > span { display: flex; flex-direction: column; gap: 3px; }
-.setting-row strong { font-size: 14px; }
-.setting-row small { color: var(--soft-text); font-size: 11px; line-height: 1.45; }
-.setting-row > input[type="checkbox"] { width: 20px; height: 20px; accent-color: var(--red); }
-.setting-row.disabled { opacity: 0.5; }
-.setting-range { flex-wrap: wrap; }
-.setting-range input[type="range"] { width: 100%; accent-color: var(--red); }
 
 :root[data-theme="ink"] {
   --ink: #f3ead9;
@@ -3431,8 +3004,6 @@ watch(seats, (next, previous) => {
 [data-theme="ink"] .lobby-room-card,
 [data-theme="ink"] .identity-card,
 [data-theme="ink"] .lobby-form-card,
-[data-theme="ink"] .lobby-settings,
-[data-theme="ink"] .setting-row,
 [data-theme="ink"] .server-pill {
   background-color: rgba(36, 33, 28, 0.9);
 }
@@ -4743,7 +4314,7 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
 
 .undo-request {
   position: fixed;
-  top: 92px;
+  top: clamp(140px, 22vh, 240px);
   left: calc(50% + 152px);
   z-index: 55;
   width: min(400px, calc(100vw - 40px));
@@ -5200,8 +4771,7 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
   }
   .lobby-main { padding: 4px 0 32px; }
   .lobby-toolbar { align-items: flex-start; flex-direction: column; }
-  .lobby-form-grid,
-  .settings-grid { grid-template-columns: 1fr; }
+  .lobby-form-grid { grid-template-columns: 1fr; }
   .identity-card { align-items: stretch; flex-direction: column; }
   .identity-edit { width: 100%; }
   .identity-edit input { flex: 1; min-width: 0; }
@@ -5314,7 +4884,7 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
   grid-template-columns: auto minmax(0, 1fr) auto;
   gap: 34px;
   align-items: center;
-  padding: 15px 0 17px;
+  padding: 15px 108px 17px 0;
   border: 0;
   border-bottom: 1px solid rgba(42, 34, 24, 0.28);
   border-radius: 0;
@@ -5443,7 +5013,7 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
   gap: 10px;
 }
 
-.lobby-settings-button,
+.settings-trigger,
 .lobby-form-back {
   display: grid;
   place-items: center;
@@ -5457,20 +5027,32 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
   box-shadow: none;
 }
 
-.lobby-settings-button {
+.settings-trigger {
+  position: fixed;
+  top: max(18px, env(safe-area-inset-top, 0px));
+  right: max(18px, env(safe-area-inset-right, 0px));
+  z-index: 82;
   display: inline-flex;
   width: auto;
   min-width: 88px;
   height: 46px;
-  margin-left: 0;
   padding: 0 13px;
   gap: 7px;
+  color: var(--ink);
   background: transparent;
-  border: 0;
+  border: 1px solid transparent;
+  border-radius: 4px;
   box-shadow: none;
   font-size: 13px;
   font-weight: 600;
   letter-spacing: 0.04em;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  transition:
+    color var(--dur-fast) var(--ease-standard),
+    background var(--dur-fast) var(--ease-standard),
+    border-color var(--dur-fast) var(--ease-standard),
+    transform var(--dur-fast) var(--ease-standard);
 }
 
 .lobby-form-back {
@@ -5530,20 +5112,20 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
   transform: none;
 }
 
-.lobby-settings-button:hover {
+.settings-trigger:hover {
   color: var(--red-deep);
   background: transparent;
   border-color: transparent;
   transform: none;
 }
 
-.lobby-settings-button.active {
+.settings-trigger.active {
   color: var(--red-deep);
   background: transparent;
   border-color: transparent;
 }
 
-.lobby-settings-button svg,
+.settings-trigger svg,
 .lobby-form-back svg {
   width: 17px;
   height: 17px;
@@ -5574,96 +5156,6 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
 
 .settings-label {
   white-space: nowrap;
-}
-
-.setting-nickname-row {
-  align-items: flex-start;
-  gap: 24px;
-}
-
-.setting-nickname-row .setting-copy {
-  flex: 1 1 auto;
-  padding-top: 10px;
-}
-
-.nickname-settings-control {
-  flex: 0 1 248px;
-  width: 248px;
-  min-width: 0;
-}
-
-.nickname-settings-form {
-  display: flex;
-  align-items: stretch;
-  gap: 0;
-}
-
-.nickname-settings-form input {
-  flex: 1;
-  min-width: 0;
-  height: 44px;
-  padding: 0 14px;
-  color: var(--ink);
-  background: rgba(249, 244, 235, 0.42);
-  border: 1px solid rgba(55, 43, 27, 0.25);
-  border-right: 0;
-  border-radius: 0;
-  outline: 0;
-  font: inherit;
-  font-family: var(--font-num);
-  font-size: 14px;
-  letter-spacing: 0.02em;
-}
-
-.nickname-settings-form input:focus {
-  position: relative;
-  z-index: 1;
-  border-color: var(--ink);
-  box-shadow: inset 0 0 0 1px var(--ink);
-}
-
-.nickname-settings-form input.invalid {
-  border-color: var(--red);
-}
-
-.nickname-save {
-  display: grid;
-  place-items: center;
-  flex: 0 0 46px;
-  width: 46px;
-  height: 44px;
-  padding: 0;
-  color: #fffaf0;
-  background: var(--ink);
-  border: 1px solid var(--ink);
-  border-radius: 0;
-  box-shadow: none;
-}
-
-.nickname-save:disabled {
-  color: var(--soft-text);
-  background: rgba(249, 244, 235, 0.42);
-  border-color: rgba(55, 43, 27, 0.25);
-  opacity: 1;
-  box-shadow: none;
-}
-
-.nickname-save svg {
-  width: 18px;
-  height: 18px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 2;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-
-.nickname-settings-error {
-  display: block;
-  margin-top: 7px;
-  color: var(--red-deep);
-  font-size: 11px;
-  line-height: 1.45;
 }
 
 .connection-state {
@@ -6020,15 +5512,6 @@ button:focus-visible {
 }
 
 .lobby-form-card,
-.lobby-settings {
-  width: min(900px, 100%);
-  padding: 0;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  box-shadow: none;
-}
-
 .lobby-form-card {
   gap: 28px;
 }
@@ -6181,26 +5664,6 @@ button:focus-visible {
 
 .settings-head h2 {
   font-size: 30px;
-}
-
-.settings-grid {
-  gap: 0;
-  border-top: 1px solid var(--line-soft);
-}
-
-.setting-row {
-  min-height: 64px;
-  padding: 14px 4px;
-  border: 0;
-  border-bottom: 1px solid var(--line-soft);
-  border-radius: 0;
-  background: transparent;
-}
-
-.setting-row strong {
-  font-family: var(--font-display);
-  font-size: 15px;
-  letter-spacing: 0.06em;
 }
 
 .identity-card {
@@ -6795,9 +6258,7 @@ button:focus-visible {
 }
 
 [data-theme="ink"] .lobby-main,
-[data-theme="ink"] .lobby-form-card,
-[data-theme="ink"] .lobby-settings,
-[data-theme="ink"] .setting-row {
+[data-theme="ink"] .lobby-form-card {
   background: transparent;
 }
 
@@ -6883,7 +6344,6 @@ button:focus-visible {
 }
 
 [data-theme="ink"] .join-prompt-error,
-[data-theme="ink"] .nickname-settings-error,
 [data-theme="ink"] .move-clock.urgent,
 [data-theme="ink"] .move-clock.urgent strong,
 [data-theme="ink"] .seat-strip-clock.low {
@@ -6952,19 +6412,19 @@ button:focus-visible {
   background: #d56559;
 }
 
-[data-theme="ink"] .lobby-settings-button {
+[data-theme="ink"] .settings-trigger {
   color: #d8cebc;
   background: transparent;
   border-color: transparent;
 }
 
-[data-theme="ink"] .lobby-settings-button:hover {
+[data-theme="ink"] .settings-trigger:hover {
   color: #fffaf0;
   background: transparent;
   border-color: transparent;
 }
 
-[data-theme="ink"] .lobby-settings-button.active {
+[data-theme="ink"] .settings-trigger.active {
   color: #ef9b90;
   background: transparent;
   border-color: transparent;
@@ -7005,33 +6465,6 @@ button:focus-visible {
   color: #fffaf0;
   background: #98372d;
   border-color: #d76d61;
-}
-
-[data-theme="ink"] .nickname-settings-form input {
-  color: #f3ead9;
-  background: rgba(255, 248, 235, 0.055);
-  border-color: rgba(243, 234, 217, 0.26);
-}
-
-[data-theme="ink"] .nickname-settings-form input:focus {
-  border-color: #e4d8c5;
-  box-shadow: inset 0 0 0 1px #e4d8c5;
-}
-
-[data-theme="ink"] .nickname-settings-form input.invalid {
-  border-color: #de8072;
-}
-
-[data-theme="ink"] .nickname-save {
-  color: #fffaf0;
-  background: #98372d;
-  border-color: #d76d61;
-}
-
-[data-theme="ink"] .nickname-save:disabled {
-  color: #b7ad9d;
-  background: rgba(255, 248, 235, 0.055);
-  border-color: rgba(243, 234, 217, 0.16);
 }
 
 [data-theme="ink"] .choice-check {
@@ -7292,7 +6725,7 @@ button:focus-visible {
       "brand settings"
       "account account";
     gap: 14px 20px;
-    padding: 14px 0 12px;
+    padding: 14px 104px 12px 0;
     border-radius: 0;
   }
 
@@ -7337,11 +6770,6 @@ button:focus-visible {
     justify-content: flex-end;
   }
 
-  .lobby-settings-button {
-    grid-area: settings;
-    align-self: center;
-  }
-
   .lobby-main {
     padding-top: 16px;
   }
@@ -7368,8 +6796,7 @@ button:focus-visible {
     width: min(390px, 78%);
   }
 
-  .lobby-form-card,
-  .lobby-settings {
+  .lobby-form-card {
     width: 100%;
   }
 
@@ -7392,7 +6819,7 @@ button:focus-visible {
 
   .workbench:not(.lobby-mode) .rail-head {
     grid-column: 1 / -1;
-    padding-bottom: 10px;
+    padding: 0 104px 10px 0;
   }
 
   .workbench:not(.lobby-mode) .panel {
@@ -7482,7 +6909,7 @@ button:focus-visible {
     justify-content: space-between;
     gap: 8px;
     min-width: 0;
-    padding: 0;
+    padding: 0 52px 0 0;
     border-bottom: 0;
   }
 
@@ -7887,6 +7314,7 @@ button:focus-visible {
 
   .lobby-topbar {
     gap: 10px;
+    padding-right: 54px;
   }
 
   .lobby-brand h1 {
@@ -7914,22 +7342,6 @@ button:focus-visible {
     gap: 6px;
   }
 
-  .setting-nickname-row {
-    align-items: stretch;
-    flex-direction: column;
-    gap: 10px;
-  }
-
-  .setting-nickname-row .setting-copy {
-    padding-top: 0;
-  }
-
-  .nickname-settings-control {
-    align-self: flex-start;
-    width: min(248px, 100%);
-    flex-basis: auto;
-  }
-
   .connection-state {
     padding-left: 6px;
     font-size: 10px;
@@ -7945,13 +7357,18 @@ button:focus-visible {
     display: none;
   }
 
-  .lobby-settings-button {
-    width: auto;
-    min-width: 78px;
+  .settings-trigger {
+    top: max(10px, env(safe-area-inset-top, 0px));
+    right: max(10px, env(safe-area-inset-right, 0px));
+    width: 44px;
+    min-width: 44px;
     height: 44px;
-    padding: 0 10px;
-    margin-left: 0;
-    font-size: 12px;
+    padding: 0;
+    justify-content: center;
+  }
+
+  .settings-trigger .settings-label {
+    display: none;
   }
 
   .lobby-nav {

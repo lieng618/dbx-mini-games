@@ -31,11 +31,34 @@ test("winning stones light up while the brush draws the line", () => {
     sealAt: { x: 360, y: 180 },
     step: 54,
     sealGlyph: "五",
+    dragon: true,
   });
 
   effect.update(0.45);
   assert.ok(effect.line.context.instructions.length > 0);
+  assert.ok(effect.dragonArt.context.instructions.length > 0);
   assert.ok(effect.stoneGlow.context.instructions.length > 0);
+
+  effect.destroy();
+});
+
+test("the calm five-in-a-row result keeps the spine without the dragon motion", () => {
+  const points = Array.from({ length: 5 }, (_, index) => ({
+    x: 100 + index * 54,
+    y: 180,
+  }));
+  const effect = new WinEffect({
+    points,
+    sealAt: { x: 360, y: 180 },
+    step: 54,
+    sealGlyph: "五",
+    dragon: true,
+    lowMotion: true,
+  });
+
+  effect.update(0.2);
+  assert.ok(effect.line.context.instructions.length > 0);
+  assert.equal(effect.dragonArt.context.instructions.length, 0);
 
   effect.destroy();
 });

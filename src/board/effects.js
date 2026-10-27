@@ -1696,21 +1696,34 @@ export class CannonBlastEffect {
     this.radius = radius;
     this.colour = colour;
     this.view = new Container();
+    this.wake = new Graphics();
     this.beam = new Graphics();
-    this.view.addChild(this.beam);
+    this.view.addChild(this.wake, this.beam);
 
     this.overlayView = new Container();
     this.charge = new Graphics();
     this.screenLock = new Graphics();
+    this.pressure = new Graphics();
     this.impact = new Graphics();
     this.sparks = new Graphics();
-    this.overlayView.addChild(this.screenLock, this.charge, this.sparks, this.impact);
+    this.pierce = new Graphics();
+    this.overlayView.addChild(
+      this.screenLock,
+      this.charge,
+      this.pressure,
+      this.sparks,
+      this.pierce,
+      this.impact,
+    );
 
     const dx = to.x - from.x;
     const dy = to.y - from.y;
     this.length = Math.hypot(dx, dy) || 1;
     this.ux = dx / this.length;
     this.uy = dy / this.length;
+    // The strike does not stop on the victim. Carry the hottest part of the beam beyond the
+    // target so the eye reads penetration rather than a line ending at a hit point.
+    this.beyond = radius * (3.4 + Math.min(1.4, this.length / (radius * 8)));
 
     const rand = mulberry32(seed ?? nextSeed());
     this.sparkSeeds = [];
@@ -1731,11 +1744,14 @@ export class CannonBlastEffect {
   update(dt) {
     this.age += dt;
     const t = Math.min(1, this.age / this.duration);
+    this.wake.clear();
     this.beam.clear();
     this.charge.clear();
     this.screenLock.clear();
+    this.pressure.clear();
     this.impact.clear();
     this.sparks.clear();
+    this.pierce.clear();
 
     const launchStart = this.lowMotion ? 0.06 : 0.1;
     const launchEnd = this.lowMotion ? 0.17 : 0.24;
@@ -1805,6 +1821,89 @@ export class CannonBlastEffect {
       const impactT = Math.min(1, (this.age - (launchEnd - 0.04)) / 0.54);
       const impactFade = Math.pow(1 - impactT, 1.5);
       const front = this.radius * (0.72 + Math.pow(impactT, 0.48) * 4.4);
+      const pierceT = smoothstep(Math.min(1, (this.age - launchEnd) / 0.2));
+      const pierceEndX = this.to.x + this.ux * this.beyond;
+      const pierceEndY = this.to.y + this.uy * this.beyond;
+      const wake = this.radius * (0.34 + impactFade * 0.42);
+      if (pierceT > 0) {
+        const wakeStartX = this.to.x - this.ux * this.radius * 0.24;
+        const wakeStartY = this.to.y - this.uy * this.radius * 0.24;
+        const wakeEndX = this.to.x + this.ux * this.beyond * pierceT;
+        const wakeEndY = this.to.y + this.uy * this.beyond * pierceT;
+        this.wake
+          .poly(
+            [
+              wakeStartX - this.uy * wake,
+              wakeStartY + this.ux * wake,
+              wakeEndX - this.uy * wake * 0.24,
+              wakeEndY + this.ux * wake * 0.24,
+              wakeEndX + this.uy * wake * 0.24,
+              wakeEndY - this.ux * wake * 0.24,
+              wakeStartX + this.uy * wake,
+              wakeStartY - this.ux * wake,
+            ],
+            true,
+          )
+          .fill({ color: this.colour, alpha: impactFade * 0.13 });
+
+        // Three layers make the through-line hot at the centre, gold at the edge, and wide
+        // enough to survive the paper texture behind the pieces.
+        this.pierce
+          .moveTo(this.to.x, this.to.y)
+          .lineTo(pierceEndX, pierceEndY)
+          .stroke({
+            width: this.radius * (this.lowMotion ? 0.45 : 0.7),
+            color: this.colour,
+            alpha: impactFade * 0.22,
+          });
+        this.pierce
+          .moveTo(this.to.x, this.to.y)
+          .lineTo(pierceEndX, pierceEndY)
+          .stroke({
+            width: Math.max(2, this.radius * 0.13),
+            color: PALETTE.gold,
+            alpha: impactFade * 0.92,
+          });
+        this.pierce
+          .moveTo(this.to.x, this.to.y)
+          .lineTo(pierceEndX, pierceEndY)
+          .stroke({
+            width: Math.max(1.2, this.radius * 0.035),
+            color: 0xfff8e9,
+            alpha: impactFade,
+          });
+
+        if (!this.lowMotion) {
+          for (let side = -1; side <= 1; side += 2) {
+            const offset = side * this.radius * 0.2;
+            this.pierce
+              .moveTo(this.to.x - this.uy * offset, this.to.y + this.ux * offset)
+              .lineTo(pierceEndX - this.uy * offset, pierceEndY + this.ux * offset)
+              .stroke({
+                width: 1.2,
+                color: side < 0 ? PALETTE.gold : this.colour,
+                alpha: impactFade * (side < 0 ? 0.46 : 0.34),
+              });
+          }
+        }
+      }
+
+      const ringPulse = Math.min(1, (this.age - launchEnd) / 0.42);
+      for (let i = 0; i < (this.lowMotion ? 1 : 3); i++) {
+        const travel = Math.min(1, Math.max(0, ringPulse - i * 0.12));
+        if (travel <= 0) continue;
+        const cx = this.to.x + this.ux * this.beyond * 0.72 * travel;
+        const cy = this.to.y + this.uy * this.beyond * 0.72 * travel;
+        const ringR = this.radius * (0.42 + travel * (0.92 + i * 0.12));
+        this.pressure
+          .circle(cx, cy, ringR)
+          .stroke({
+            width: Math.max(1.6, 3.4 - i * 0.55),
+            color: i === 0 ? 0xfff7df : i === 1 ? PALETTE.gold : this.colour,
+            alpha: Math.pow(1 - travel, 1.3) * (0.74 - i * 0.12),
+          });
+      }
+
       this.impact
         .circle(this.to.x, this.to.y, front)
         .stroke({ width: 6, color: this.colour, alpha: impactFade * 0.28 });
@@ -1820,6 +1919,10 @@ export class CannonBlastEffect {
           .lineTo(this.to.x + Math.cos(a) * r1, this.to.y + Math.sin(a) * r1)
           .stroke({ width: i % 2 ? 2 : 3.4, color: i % 3 ? PALETTE.gold : this.colour, alpha: impactFade * 0.72 });
       }
+
+      this.impact
+        .circle(this.to.x, this.to.y, this.radius * (0.2 + pierceT * 0.34))
+        .fill({ color: 0xfff7df, alpha: impactFade * 0.62 });
 
       for (const spark of this.sparkSeeds) {
         const local = Math.max(0, this.age - launchEnd) / spark.life;
@@ -2669,6 +2772,81 @@ export class LastMoveEffect {
   }
 }
 
+/** Samples a point and direction along an ordered polyline. */
+function pointAlongPolyline(points, progress) {
+  if (!points?.length) return null;
+  if (points.length === 1) return { x: points[0].x, y: points[0].y, ux: 1, uy: 0 };
+  const segments = points.length - 1;
+  const position = Math.min(1, Math.max(0, progress)) * segments;
+  const index = Math.min(segments - 1, Math.floor(position));
+  const local = Math.min(1, position - index);
+  const a = points[index];
+  const b = points[index + 1];
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const length = Math.hypot(dx, dy) || 1;
+  return {
+    x: a.x + (b.x - a.x) * local,
+    y: a.y + (b.y - a.y) * local,
+    ux: dx / length,
+    uy: dy / length,
+  };
+}
+
+/**
+ * The head is deliberately graphic rather than illustrative: a wedge-shaped ink skull,
+ * two swept horns, an eye and whiskers. At board scale it reads as a dragon without asking
+ * the renderer for a sprite or hiding the winning stones beneath a detailed painting.
+ */
+function drawInkDragonHead(graphics, tip, size, alpha) {
+  if (!tip || alpha <= 0.01) return;
+  const { x, y, ux, uy } = tip;
+  const nx = -uy;
+  const ny = ux;
+  const point = (forward, side) => [
+    x + ux * size * forward + nx * size * side,
+    y + uy * size * forward + ny * size * side,
+  ];
+  graphics
+    .poly(
+      [
+        ...point(0.72, 0),
+        ...point(0.2, 0.28),
+        ...point(-0.34, 0.34),
+        ...point(-0.18, 0),
+        ...point(-0.34, -0.34),
+        ...point(0.2, -0.28),
+      ],
+      true,
+    )
+    .fill({ color: PALETTE.ink, alpha: alpha * 0.9 });
+  graphics
+    .moveTo(...point(0.2, 0.2))
+    .lineTo(...point(-0.12, 0.52))
+    .lineTo(...point(-0.28, 0.18))
+    .moveTo(...point(0.2, -0.2))
+    .lineTo(...point(-0.12, -0.52))
+    .lineTo(...point(-0.28, -0.18))
+    .stroke({ width: 2.2, color: PALETTE.gold, alpha: alpha * 0.72 });
+  graphics
+    .moveTo(...point(-0.28, 0.24))
+    .lineTo(...point(-0.74, 0.62))
+    .moveTo(...point(-0.28, -0.24))
+    .lineTo(...point(-0.74, -0.62))
+    .stroke({ width: 1.8, color: PALETTE.ink, alpha: alpha * 0.72 });
+  graphics
+    .moveTo(...point(0.18, 0.1))
+    .lineTo(...point(0.82, 0.48))
+    .moveTo(...point(0.18, -0.1))
+    .lineTo(...point(0.82, -0.48))
+    .stroke({ width: 1.2, color: PALETTE.gold, alpha: alpha * 0.64 });
+  const [eyeX, eyeY] = point(0.2, 0.1);
+  graphics.circle(eyeX, eyeY, Math.max(1.4, size * 0.055)).fill({
+    color: 0xfff3c6,
+    alpha,
+  });
+}
+
 /**
  * WinEffect draws the winning line as a brush stroke that grows stone by stone, then stamps
  * a seal onto the paper.
@@ -2677,11 +2855,12 @@ export class LastMoveEffect {
  * looks like a UI decoration, a stroke looks like someone marked the board.
  */
 export class WinEffect {
-  constructor({ points, sealAt, step = 64, lowMotion = false, seed, sealGlyph }) {
+  constructor({ points, sealAt, step = 64, lowMotion = false, seed, sealGlyph, dragon = false }) {
     this.lowMotion = lowMotion;
+    this.dragon = dragon === true;
     this.age = 0;
     // Four beats: draw, hold, stamp, settle.
-    this.growDuration = lowMotion ? 0.2 : 0.85;
+    this.growDuration = lowMotion ? 0.2 : this.dragon ? 1.15 : 0.85;
     this.holdDuration = lowMotion ? 0.1 : 0.35;
     this.stampDuration = lowMotion ? 0.3 : 0.7;
     this.done = false;
@@ -2691,6 +2870,7 @@ export class WinEffect {
     // The line belongs behind the stones; the seal must land on top of them. One container
     // cannot be in both layers, so the seal rides in its own overlay.
     this.overlayView = new Container();
+    this.dragonArt = new Graphics();
     // The winning stones light up in the same order as the brush advances. This layer
     // stays above the stones so even the black line under them has a legible pulse.
     this.stoneGlow = new Graphics();
@@ -2700,7 +2880,7 @@ export class WinEffect {
     this.seal = new Graphics();
     this.sealGlyph = sealGlyph;
     this.sealGroup.addChild(this.seal);
-    this.overlayView.addChild(this.stoneGlow, this.sealGroup);
+    this.overlayView.addChild(this.dragonArt, this.stoneGlow, this.sealGroup);
     this.points = points || [];
     this.step = step;
     this.sealAt = sealAt || (this.points.length ? this.points[this.points.length - 1] : null);
@@ -2746,6 +2926,7 @@ export class WinEffect {
     const holdEnd = growEnd + this.holdDuration;
 
     this.line.clear();
+    this.dragonArt.clear();
     this.stoneGlow.clear();
 
     // Phase one: the stroke is laid down segment by segment, with a brush tip at the front.
@@ -2785,7 +2966,7 @@ export class WinEffect {
     if (!this.lowMotion && this.points.length > 1) {
       const segments = this.points.length - 1;
       const drawn = growT * segments;
-      const w = this.step * 0.14;
+      const w = this.step * (this.dragon ? 0.2 : 0.14);
       for (let i = 0; i < segments; i++) {
         if (i >= drawn) break;
         const a = this.points[i];
@@ -2812,6 +2993,24 @@ export class WinEffect {
           const py1 = a.y + (ey - a.y) * Math.min(t1, local);
           const mid = (t0 + t1) / 2;
           const width = w * (0.55 + Math.sin(mid * Math.PI) * 0.8);
+          if (this.dragon) {
+            const wash = width * 2.15;
+            this.line
+              .poly(
+                [
+                  px0 + nx * wash,
+                  py0 + ny * wash,
+                  px1 + nx * wash,
+                  py1 + ny * wash,
+                  px1 - nx * wash,
+                  py1 - ny * wash,
+                  px0 - nx * wash,
+                  py0 - ny * wash,
+                ],
+                true,
+              )
+              .fill({ color: PALETTE.ink, alpha: 0.055 });
+          }
           this.line
             .poly(
               [
@@ -2837,7 +3036,7 @@ export class WinEffect {
       }
 
       // Brush tip: a bright head that leads the stroke, then vanishes when the line lands.
-      if (growT < 1) {
+      if (growT < 1 && !this.dragon) {
         const tipIndex = Math.min(segments - 1, Math.floor(drawn));
         const a = this.points[tipIndex];
         const b = this.points[Math.min(segments, tipIndex + 1)];
@@ -2846,6 +3045,72 @@ export class WinEffect {
         const ty = a.y + (b.y - a.y) * local;
         this.line.circle(tx, ty, w * 1.6).fill({ color: PALETTE.gold, alpha: 0.5 });
         this.line.circle(tx, ty, w * 0.8).fill({ color: 0xfff2cf, alpha: 0.8 });
+      }
+
+      if (this.dragon) {
+        const headFade =
+          growT >= 1 ? Math.max(0, 1 - Math.max(0, this.age - growEnd) / 0.36) : 1;
+        const dragonAlpha = smoothstep(Math.min(1, growT * 3.4)) * headFade;
+        const tip = pointAlongPolyline(this.points, growT);
+
+        // Every winning stone becomes a vertebra. The glow layer lights each one as the
+        // ink body reaches it; these chevrons keep the "connected spine" readable even for
+        // a white stone on pale paper.
+        for (let i = 0; i < this.points.length; i++) {
+          const at = i / segments;
+          if (at > growT + 0.035) break;
+          const point = this.points[i];
+          const next = this.points[Math.min(segments, i + 1)];
+          const previous = this.points[Math.max(0, i - 1)];
+          const dx = next.x - previous.x;
+          const dy = next.y - previous.y;
+          const length = Math.hypot(dx, dy) || 1;
+          const ux = dx / length;
+          const uy = dy / length;
+          const nx = -uy;
+          const ny = ux;
+          const reach = this.step * (i === this.points.length - 1 ? 0.3 : 0.24);
+          const ridgeAlpha = dragonAlpha * (0.5 + Math.sin(Math.min(1, at * 1.5) * Math.PI) * 0.26);
+          for (let side = -1; side <= 1; side += 2) {
+            this.dragonArt
+              .moveTo(
+                point.x - ux * this.step * 0.18,
+                point.y - uy * this.step * 0.18,
+              )
+              .lineTo(point.x + nx * reach * side, point.y + ny * reach * side)
+              .lineTo(
+                point.x + ux * this.step * 0.2,
+                point.y + uy * this.step * 0.2,
+              )
+              .stroke({
+                width: 2.1,
+                color: side < 0 ? PALETTE.gold : PALETTE.ink,
+                alpha: ridgeAlpha,
+              });
+          }
+        }
+
+        if (tip) {
+          const first = this.points[0];
+          const second = this.points[1];
+          const tailAngle = Math.atan2(first.y - second.y, first.x - second.x);
+          const tailLength = this.step * 0.72 * dragonAlpha;
+          for (let strand = -1; strand <= 1; strand++) {
+            const angle = tailAngle + strand * 0.3;
+            this.dragonArt
+              .moveTo(first.x, first.y)
+              .lineTo(
+                first.x + Math.cos(angle) * tailLength,
+                first.y + Math.sin(angle) * tailLength + strand * this.step * 0.08,
+              )
+              .stroke({
+                width: strand === 0 ? 3 : 1.4,
+                color: strand === 0 ? PALETTE.ink : PALETTE.gold,
+                alpha: dragonAlpha * (strand === 0 ? 0.68 : 0.4),
+              });
+          }
+          drawInkDragonHead(this.dragonArt, tip, this.step * 0.46, dragonAlpha);
+        }
       }
     } else if (this.lowMotion && this.points.length > 1) {
       const first = this.points[0];

@@ -232,10 +232,13 @@ test("signature effects draw their primary geometry", () => {
     radius: 30,
     seed: 7,
   });
-  cannon.update(0.26);
+cannon.update(0.44);
   assert.ok(cannon.beam.context.instructions.length > 0);
   assert.ok(cannon.screenLock.context.instructions.length > 0);
   assert.ok(cannon.impact.context.instructions.length > 0);
+assert.ok(cannon.wake.context.instructions.length > 0);
+assert.ok(cannon.pressure.context.instructions.length > 0);
+assert.ok(cannon.pierce.context.instructions.length > 0);
   cannon.destroy();
 
   const river = new RiverSurgeEffect({

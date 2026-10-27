@@ -135,7 +135,6 @@ export class BoardScene {
     // Whether the board is drawn from seat two's side of the table.
     this.flipped = false;
     this.lowMotion = false;
-    this.effectsOff = false;
     this.effects = [];
     this.lastCells = null;
     this.currentLastMove = null;
@@ -432,13 +431,8 @@ export class BoardScene {
     if (this.destroyed || !this.app) return;
     const cells = snapshot.cells || [];
     const lowMotion = !!snapshot.lowMotion;
-    const effectsOff = !!snapshot.effectsOff;
     if (lowMotion !== this.lowMotion) {
       this.lowMotion = lowMotion;
-    }
-    if (effectsOff !== this.effectsOff) {
-      this.effectsOff = effectsOff;
-      if (effectsOff) this.clearEffects();
     }
 
     const lay = this.lay;
@@ -480,7 +474,7 @@ export class BoardScene {
       previousFinished,
       previousLastMove,
     });
-    if (moveCountDropped && immediateUndo && positionChanged && !this.effectsOff && prev) {
+    if (moveCountDropped && immediateUndo && positionChanged && prev) {
       const undoCode = prev[previousLastMove.to] || 0;
       const undoEffect = new GhostMoveEffect({
         from: cellCenter(this.lay, previousLastMove.to),
@@ -505,7 +499,7 @@ export class BoardScene {
       moveCount: incomingMoveCount,
       previousFinished,
     });
-    if (freshGomokuRound && !this.effectsOff) {
+    if (freshGomokuRound) {
       // The win line and seal belong to the old round. Capture their stones first, rebuild
       // the clean board beneath the transition, then let the empty authoritative position
       // clear the piece layer as usual.
@@ -543,7 +537,7 @@ export class BoardScene {
     const lay2 = lay;
     for (const move of moves) {
       const travel = move.duration || 0;
-      if (this.game === "xiangqi" && !this.effectsOff && move.fromCell >= 0) {
+      if (this.game === "xiangqi" && move.fromCell >= 0) {
         const moverColour = move.moverColour ?? landingColour(this.game, snapshot.turnSeat);
 
         // Cannon captures are the one move whose visual needs an extra rule made visible:
@@ -590,7 +584,6 @@ export class BoardScene {
       // showing a full hand shadow for both sides made openings look like a shared cursor.
       if (
         this.game === "xiangqi" &&
-        !this.effectsOff &&
         !this.lowMotion &&
         !this.hand &&
         travel > 0
@@ -606,37 +599,35 @@ export class BoardScene {
         // The snapshot already points at the next player. A move by seat zero therefore
         // arrives with turnSeat=1, so invert it before choosing the landed ink's colour.
         const colour = landingColour(this.game, turn);
-        if (!this.effectsOff) {
-          const ripple = new RippleEffect({
-            x: move.to.x,
-            y: move.to.y,
-            radius: lay2.step * 0.34,
-            colour,
-            heavy: this.game === "xiangqi",
-            lowMotion: this.lowMotion,
-          });
-          this.effects.push(ripple);
-          if (this.game === "gomoku") {
-            this.effects.push(
-              new LandingWeightEffect({
-                x: move.to.x,
-                y: move.to.y,
-                radius: lay2.step * 0.4,
-                lowMotion: this.lowMotion,
-              }),
-            );
-          }
+        const ripple = new RippleEffect({
+          x: move.to.x,
+          y: move.to.y,
+          radius: lay2.step * 0.34,
+          colour,
+          heavy: this.game === "xiangqi",
+          lowMotion: this.lowMotion,
+        });
+        this.effects.push(ripple);
+        if (this.game === "gomoku") {
+          this.effects.push(
+            new LandingWeightEffect({
+              x: move.to.x,
+              y: move.to.y,
+              radius: lay2.step * 0.4,
+              lowMotion: this.lowMotion,
+            }),
+          );
         }
         this.audio.play(this.game === "xiangqi" ? "landHeavy" : "land", {
           pitch: (move.to.x + move.to.y) % 2 < 1 ? 1.02 : 0.97,
         });
         if (this.game === "xiangqi") tap(6);
-        else if (localLanding && !this.effectsOff) tapLanding();
+        else if (localLanding) tapLanding();
 
         // A quiet move gets a local board answer. A capture already owns the hit through
         // its directional scar and shock, so doubling the response would make the cut hard
         // to read and flash the whole position at the exact moment of the exchange.
-        if (!this.effectsOff && !move.captured) {
+        if (!move.captured) {
           this.pulseShock(move.to, {
             amplitude: 18,
             wavelength: 90,
@@ -644,7 +635,7 @@ export class BoardScene {
             duration: 0.42,
           });
         }
-        if (!this.effectsOff && this.boardBounds && !this.lowMotion && !move.captured) {
+        if (this.boardBounds && !this.lowMotion && !move.captured) {
           this.effects.push(
             new FlashEffect({
               x: this.boardBounds.left,
@@ -666,67 +657,65 @@ export class BoardScene {
           const broken = move.victimColour ?? (this.game === "xiangqi" ? PALETTE.red : PALETTE.ink);
           const keyCapture =
             this.game === "xiangqi" && isCinematicCapture(move.victimKind);
-          if (!this.effectsOff) {
+          this.effects.push(
+            // The disc comes apart first; the dust trails it.
+            new ShatterEffect({
+              x: move.to.x,
+              y: move.to.y,
+              radius: lay2.step * 0.44,
+              colour: broken,
+              glyph: move.victimGlyph,
+              kind: move.victimKind,
+              from: move.from,
+              to: move.to,
+              lowMotion: this.lowMotion,
+            }),
+            new CaptureBurstEffect({
+              x: move.to.x,
+              y: move.to.y,
+              radius: lay2.step * 0.36,
+              colour: broken,
+              kind: move.victimKind,
+              from: move.from,
+              to: move.to,
+              lowMotion: this.lowMotion,
+            }),
+          );
+          if (move.moverKind !== PIECE.cannon) {
             this.effects.push(
-              // The disc comes apart first; the dust trails it.
-              new ShatterEffect({
-                x: move.to.x,
-                y: move.to.y,
-                radius: lay2.step * 0.44,
-                colour: broken,
-                glyph: move.victimGlyph,
-                kind: move.victimKind,
+              new PieceCaptureAccentEffect({
                 from: move.from,
                 to: move.to,
-                lowMotion: this.lowMotion,
-              }),
-              new CaptureBurstEffect({
-                x: move.to.x,
-                y: move.to.y,
-                radius: lay2.step * 0.36,
-                colour: broken,
-                kind: move.victimKind,
-                from: move.from,
-                to: move.to,
+                kind: move.moverKind,
+                radius: lay2.step * 0.38,
+                colour: move.moverColour ?? landingColour(this.game, snapshot.turnSeat),
                 lowMotion: this.lowMotion,
               }),
             );
-            if (move.moverKind !== PIECE.cannon) {
-              this.effects.push(
-                new PieceCaptureAccentEffect({
-                  from: move.from,
-                  to: move.to,
-                  kind: move.moverKind,
-                  radius: lay2.step * 0.38,
-                  colour: move.moverColour ?? landingColour(this.game, snapshot.turnSeat),
-                  lowMotion: this.lowMotion,
-                }),
-              );
-            }
-            if (keyCapture) {
-              this.effects.push(
-                new KeyCaptureCinematicEffect({
-                  start: move.to,
-                  width: this.app.screen.width,
-                  height: this.app.screen.height,
-                  radius: lay2.step * 1.34,
-                  startRadius: lay2.step * 0.36,
-                  colour: broken,
-                  glyph: move.victimGlyph,
-                  kind: move.victimKind,
-                  angle: captureImpactAngle(move.from, move.to),
-                  lowMotion: this.lowMotion,
-                }),
-              );
-            }
-            // A short, tight wave on the struck square: the board takes the hit locally.
-            this.pulseShock(move.to, {
-              amplitude: keyCapture ? 44 : 22,
-              wavelength: keyCapture ? 190 : 105,
-              speed: keyCapture ? 780 : 900,
-              duration: keyCapture ? 0.68 : 0.46,
-            });
           }
+          if (keyCapture) {
+            this.effects.push(
+              new KeyCaptureCinematicEffect({
+                start: move.to,
+                width: this.app.screen.width,
+                height: this.app.screen.height,
+                radius: lay2.step * 1.34,
+                startRadius: lay2.step * 0.36,
+                colour: broken,
+                glyph: move.victimGlyph,
+                kind: move.victimKind,
+                angle: captureImpactAngle(move.from, move.to),
+                lowMotion: this.lowMotion,
+              }),
+            );
+          }
+          // A short, tight wave on the struck square: the board takes the hit locally.
+          this.pulseShock(move.to, {
+            amplitude: keyCapture ? 44 : 22,
+            wavelength: keyCapture ? 190 : 105,
+            speed: keyCapture ? 780 : 900,
+            duration: keyCapture ? 0.68 : 0.46,
+          });
           this.audio.play(keyCapture ? "keyCapture" : "capture", {
             pitch: keyCapture ? 0.9 : 1,
             volume: keyCapture ? 1.12 : 1,
@@ -740,7 +729,6 @@ export class BoardScene {
     // Room snapshots also arrive for clocks and membership. Replaying the last-move marker
     // on every one kept several copies alive and made an idle board look permanently busy.
     if (
-      !this.effectsOff &&
       snapshot.lastMove &&
       snapshot.lastMove.to >= 0 &&
       (positionChanged || lastMoveChanged)
@@ -756,7 +744,7 @@ export class BoardScene {
     // a fresh translucent 将 on top of the last one on every update, so a check read as a
     // muddy blur instead of one decisive slam. The edge also has to be re-armed when check
     // clears, otherwise only the first check of a session would ever be announced.
-    if (!this.effectsOff && snapshot.inCheck && this.boardBounds && this.game === "xiangqi") {
+    if (snapshot.inCheck && this.boardBounds && this.game === "xiangqi") {
       if (!this.cued.check) {
         this.cued.check = true;
         this.checkStreak = nextCheckTier(this.checkStreak, this.lastCheckMove, snapshot.moveCount);
@@ -820,7 +808,7 @@ export class BoardScene {
     // Terminal result.
     if (snapshot.result && snapshot.result.finished && !this.result) {
       this.result = snapshot.result;
-      if (!this.effectsOff) this.playWin(snapshot, cells);
+      this.playWin(snapshot, cells);
     }
     if (!snapshot.result || !snapshot.result.finished) {
       this.result = null;
@@ -882,6 +870,7 @@ export class BoardScene {
         sealAt,
         step: lay.step,
         lowMotion: this.lowMotion,
+        dragon: this.game === "gomoku",
         // 连五 for five-in-a-row, 胜 for a decided chess game: the block should say what
         // actually happened, not just "someone won".
         sealGlyph: this.game === "gomoku" ? "五" : "胜",
@@ -1045,7 +1034,7 @@ export class BoardScene {
       from,
       to,
       radius: lay.step * 0.42,
-      lowMotion: this.lowMotion || this.effectsOff,
+      lowMotion: this.lowMotion,
       duration,
       wave: this.game === "gomoku",
     });
@@ -1168,7 +1157,7 @@ export class BoardScene {
    * every frame a render-to-texture.
    */
   pulseShock(point, { amplitude = 26, wavelength = 150, speed = 700, duration = 0.62 } = {}) {
-    if (this.effectsOff || this.lowMotion || !this.root) return;
+    if (this.lowMotion || !this.root) return;
     if (!point) return;
     try {
       const filter = new ShockwaveFilter({
