@@ -9,10 +9,21 @@ const REQUEST_TIMEOUT_MS = 12_000;
 const CLIENT_ID_KEY = "dbxmg.clientId";
 const NICKNAME_KEY = "dbxmg.nickname";
 
+/**
+ * Every in-flight request is rejected with this code when a socket dies. The connection
+ * itself comes back within a retry or two, so this is a state report, not a failure the
+ * player has to act on — callers use isConnectionLostError() to keep it off the UI.
+ */
+export const CONNECTION_LOST_CODE = "connection-lost";
+
 let singleton = null;
 
 export function hasHost() {
   return typeof window !== "undefined" && !!window.dbxPlugin;
+}
+
+export function isConnectionLostError(error) {
+  return Boolean(error) && error.code === CONNECTION_LOST_CODE;
 }
 
 export async function whenReady() {
@@ -54,6 +65,9 @@ class CloudBridge {
     this.requestSeq = 0;
     this.retryTimer = null;
     this.retryDelay = 500;
+    // Consecutive failed reconnect attempts. Reset by every successful handshake; the UI
+    // uses it to tell "the socket blinked" from "the cloud has been gone for a while".
+    this.reconnectAttempts = 0;
     this.recoveryPromise = null;
     this.manualClose = false;
     const developmentParams = new URLSearchParams(window.location.search);
@@ -94,6 +108,7 @@ class CloudBridge {
       handler({
         connected: this.connected,
         serverUrl: this.serverUrl,
+        attempts: this.reconnectAttempts,
       }),
     );
     return () => this.connectionListeners.delete(handler);
@@ -113,9 +128,14 @@ class CloudBridge {
 
     const socket = new WebSocket(url);
     this.socket = socket;
+    // Distinguishes "the live connection dropped" from "a retry did not get through"; only
+    // the latter counts toward the reconnect streak.
+    let opened = false;
     socket.addEventListener("open", () => {
       if (this.socket !== socket) return;
+      opened = true;
       this.retryDelay = 500;
+      this.reconnectAttempts = 0;
       this.connected = true;
       this.resolveReady?.();
       this.resolveReady = null;
@@ -131,14 +151,20 @@ class CloudBridge {
       if (this.socket !== socket) return;
       this.socket = null;
       this.connected = false;
+      if (!opened) this.reconnectAttempts += 1;
       if (!this.resolveReady) this.readyPromise = null;
       const error = new Error("云端连接已断开");
+      error.code = CONNECTION_LOST_CODE;
       for (const pending of this.pending.values()) {
         clearTimeout(pending.timer);
         pending.reject(error);
       }
       this.pending.clear();
-      this.emitConnection({ connected: false, serverUrl: this.serverUrl });
+      this.emitConnection({
+        connected: false,
+        serverUrl: this.serverUrl,
+        attempts: this.reconnectAttempts,
+      });
       if (!this.manualClose) {
         this.retryTimer = setTimeout(() => this.connect(), this.retryDelay);
         this.retryDelay = Math.min(10_000, this.retryDelay * 2);
@@ -166,6 +192,7 @@ class CloudBridge {
       if (session.nickname) this.rememberNickname(session.nickname);
       if (!this.ephemeralIdentity) persistClientId(this.clientId);
       this.retryDelay = 500;
+      this.reconnectAttempts = 0;
       this.connected = true;
       this.resolveReady?.();
       this.resolveReady = null;
@@ -195,8 +222,13 @@ class CloudBridge {
   connectionLost() {
     this.pollController = null;
     this.connected = false;
+    this.reconnectAttempts += 1;
     if (!this.resolveReady) this.readyPromise = null;
-    this.emitConnection({ connected: false, serverUrl: this.serverUrl });
+    this.emitConnection({
+      connected: false,
+      serverUrl: this.serverUrl,
+      attempts: this.reconnectAttempts,
+    });
     if (!this.manualClose) {
       this.retryTimer = setTimeout(() => this.connect(), this.retryDelay);
       this.retryDelay = Math.min(10_000, this.retryDelay * 2);
@@ -324,7 +356,8 @@ class CloudBridge {
       this.resolveReady = null;
       this.rejectReady = null;
       this.retryDelay = 500;
-      this.emitConnection({ connected: false, serverUrl: this.serverUrl });
+      this.reconnectAttempts = 0;
+      this.emitConnection({ connected: false, serverUrl: this.serverUrl, attempts: 0 });
       this.connect();
       await this.ready();
     })().finally(() => {

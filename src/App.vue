@@ -6,7 +6,8 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { BoardScene } from "./board/scene.js";
-import { createBridge, whenReady } from "./bridge.js";
+import { createBridge, isConnectionLostError, whenReady } from "./bridge.js";
+import { describeError } from "./errors.js";
 import { reconcileLastMove } from "./snapshot.js";
 import CreateRoomPanel from "./components/CreateRoomPanel.vue";
 import LobbyRoomCard from "./components/LobbyRoomCard.vue";
@@ -61,6 +62,39 @@ const error = ref("");
 const notice = ref("");
 const floatingMessage = ref(null);
 const serverConnected = ref(false);
+// The very first handshake is not a reconnect: before it lands the strip says 连接中.
+const everConnected = ref(false);
+const reconnectAttempts = ref(0);
+// A socket that blinks is back on the first automatic retry (about half a second), so a
+// single drop must stay silent. Two failed retries in a row is where the wait becomes
+// real; the cloud releases a seat after 25 s, which is roughly six failed retries.
+const LINK_NOTICE_ATTEMPTS = 2;
+const LINK_OUTAGE_ATTEMPTS = 6;
+const linkState = computed(() => {
+  if (serverConnected.value) return "online";
+  // A first connection that never lands is not a reconnect, but after the seat window it
+  // is no longer "connecting" either.
+  if (reconnectAttempts.value >= LINK_OUTAGE_ATTEMPTS) return "offline";
+  return everConnected.value ? "reconnecting" : "connecting";
+});
+const linkLabel = computed(
+  () =>
+    ({
+      online: "在线",
+      connecting: "连接中",
+      reconnecting: "重连中",
+      offline: "已断线",
+    })[linkState.value],
+);
+const linkTitle = computed(
+  () =>
+    ({
+      online: "云端已连接",
+      connecting: "正在连接云端",
+      reconnecting: "连接中断，正在自动重连",
+      offline: "长时间连不上云端，仍在自动重试",
+    })[linkState.value],
+);
 const serverUrl = ref(bridge.serverUrl || "");
 const lobbyTab = ref("rooms");
 const nickname = ref("");
@@ -402,77 +436,6 @@ function persistSettings() {
   saveSettings(settings.value);
 }
 
-/** Sends one host invocation and folds the reply into state. */
-/** Maps a sidecar error to something a player can act on. */
-function describeError(raw) {
-  const text = String(raw ?? "");
-  const table = [
-    // "Not enough players" is the opposite of "full". These two used to share one error,
-    // so a lone host pressing 开始对局 was told the room was full.
-    ["both seats must be filled", "还差一位对手，等朋友加入后即可开始"],
-    ["both seats are already taken by players", "两个座位都坐着真人，陪练没位置了"],
-    ["no seated player to start practice", "没有人在座位上，无法开始练习"],
-    ["seat already occupied", "这个座位已经有人了"],
-    ["that seat does not exist", "没有这个座位"],
-    ["a match is already in progress", "对局正在进行中，无法调整座位"],
-    ["room is full", "房间人数已满（8 人）"],
-    ["spectating is only available while a match is in progress", "对局开始后才能观战"],
-    ["emote is cooling down", "表情发得太快了，稍等一下"],
-    ["emotes are only available during a match", "对局开始后才能发表情"],
-    ["only seated players may send emotes", "坐下后才能发表情"],
-    ["unknown emote", "这个表情不存在"],
-    ["not your turn", "还没轮到你走棋"],
-    ["illegal move", "这一步不合规则"],
-    ["only seated players may do that", "你在观战，坐下后才能操作"],
-    ["an undo request is already pending", "已有悔棋请求等待处理"],
-    ["no move to undo", "现在没有可以撤回的棋"],
-    ["only the player who made the last move may request an undo", "只能撤回自己刚下的最后一手"],
-    ["only the opponent can answer an undo request", "只有对手可以处理这次悔棋请求"],
-    ["a seat swap request is already pending", "已有交换位置请求等待处理"],
-    ["no seat swap request is pending", "交换位置请求已失效"],
-    ["only the opponent can answer a seat swap request", "只有对手可以处理这次交换位置请求"],
-    ["not hosting a room", "当前没有房间，请先开桌"],
-    ["already hosting or joined a room", "你已经在一个房间里了"],
-    ["you are already in a room", "你已经在一个房间里了"],
-    ["join a room first", "请先加入房间"],
-    ["leave the current room before creating another", "请先离开当前房间再创建新房间"],
-    ["room no longer exists", "房间已关闭或不存在"],
-    ["server room capacity reached", "服务器房间已满，请稍后再试"],
-    ["only the room creator can start the match", "只有房主可以开始对局"],
-    ["only the room creator can rematch", "只有房主可以再来一局"],
-    ["nickname must contain 2 to 12 characters", "昵称需为 2–12 个字符"],
-    [
-      "nickname may only contain letters, numbers, hyphens, and underscores",
-      "昵称只能使用文字、数字、短横线和下划线",
-    ],
-    ["nickname contains unavailable words", "昵称包含不可用词语，请换一个"],
-    ["session was replaced by a newer connection", "连接已更新，正在恢复"],
-    ["session is not connected", "连接已失效，正在恢复"],
-    ["poll session does not exist", "连接已失效，正在恢复"],
-    ["wrong room password", "房间密码不正确"],
-    [
-      "a valid host key is required",
-      "地址不完整：请让房主把「邀请串」整串发你（地址#房间号#公钥），或改用搜索局域网房间",
-    ],
-    ["an address is required", "请填写房间地址"],
-    // Network failures used to surface as raw Go: "dial tcp 192.168.1.116:52525: connect:
-    // no route to host". Each of these means something different and only one of them is
-    // the player's fault, so they get their own words.
-    [
-      "no route to host",
-      "连不上这个地址：确认用的是对方 WiFi 那个地址（不是 VPN/公司网那个），且两台机器在同一个 WiFi",
-    ],
-    ["connection refused", "这个地址没有房间在等：对方可能已经结束了房间，地址是旧的"],
-    ["i/o timeout", "连接超时：两台机器可能不在同一个网络，或被防火墙拦住了"],
-    ["operation not permitted", "系统拦住了局域网访问：请在「系统设置 → 隐私与安全性 → 本地网络」里允许 DBX"],
-    ["join rejected", "加入被拒绝，请确认地址与密码"],
-  ];
-  for (const [needle, message] of table) {
-    if (text.includes(needle)) return message;
-  }
-  return text || "操作失败";
-}
-
 function showFloatingMessage(text, tone = "info", duration = 3200) {
   const message = String(text || "").trim();
   if (!message) return;
@@ -632,6 +595,7 @@ watch(
   },
 );
 
+/** Sends one host invocation and folds the reply into state. */
 async function call(method, params = {}) {
   error.value = "";
   try {
@@ -639,6 +603,11 @@ async function call(method, params = {}) {
     if (reply && typeof reply === "object") applySnapshot(reply);
     return reply;
   } catch (e) {
+    // A closed socket rejects every in-flight request, including the snapshot this app
+    // sends the moment the page becomes visible again. The bridge reconnects by itself,
+    // so that rejection is not news: the connection strip reports it, and only a drop
+    // that outlives a couple of retries earns a message.
+    if (isConnectionLostError(e)) return null;
     error.value = describeError(e?.message || e);
     return null;
   }
@@ -1163,6 +1132,9 @@ function stopClockTimers() {
 // clicks something — which is exactly the "joined but the match never started" freeze.
 let stopEvents = null;
 let stopConnectionEvents = null;
+// One message per outage: a drop that heals in half a second says nothing at all.
+let linkDropAnnounced = false;
+let linkOutageAnnounced = false;
 let refreshInFlight = false;
 let lobbyRefreshTimer = null;
 
@@ -1216,11 +1188,40 @@ function startEvents() {
     }
   });
   stopConnectionEvents = bridge.onConnection?.((state) => {
-    serverConnected.value = Boolean(state?.connected);
+    const nextConnected = Boolean(state?.connected);
+    serverConnected.value = nextConnected;
     if (state?.serverUrl) serverUrl.value = state.serverUrl;
-    if (state?.connected) {
+    if (nextConnected) {
+      reconnectAttempts.value = 0;
+      // Only an outage the player actually sat through gets a closing line.
+      if (linkDropAnnounced) {
+        showFloatingMessage("云端已重新连接", "info", 2200);
+      }
+      linkDropAnnounced = false;
+      linkOutageAnnounced = false;
+      everConnected.value = true;
       void scan();
       void call("room.snapshot");
+      return;
+    }
+    reconnectAttempts.value = Number(state?.attempts) || 0;
+    if (
+      everConnected.value &&
+      reconnectAttempts.value >= LINK_NOTICE_ATTEMPTS &&
+      !linkDropAnnounced
+    ) {
+      linkDropAnnounced = true;
+      showFloatingMessage("云端连接中断，正在自动重连…", "info", 3600);
+    }
+    if (reconnectAttempts.value >= LINK_OUTAGE_ATTEMPTS && !linkOutageAnnounced) {
+      linkOutageAnnounced = true;
+      showFloatingMessage(
+        everConnected.value
+          ? "长时间连不上云端，座位可能已被收回；恢复后会自动同步"
+          : "连不上云端：检查一下网络，恢复后会自动连接",
+        "error",
+        6000,
+      );
     }
   });
 }
@@ -1793,9 +1794,15 @@ watch(seats, (next, previous) => {
               </span>
             </div>
             <div class="account-meta">
-              <span class="connection-state" :class="{ online: serverConnected }">
+              <span
+                class="connection-state"
+                :class="linkState"
+                role="status"
+                aria-live="polite"
+                :title="linkTitle"
+              >
                 <i aria-hidden="true"></i>
-                {{ serverConnected ? "在线" : "连接中" }}
+                {{ linkLabel }}
               </span>
               <span
                 v-if="serverConnected"
@@ -5167,6 +5174,33 @@ hr { margin: 2px 0; border: 0; border-top: 1px dashed var(--line); }
 .connection-state.online i {
   background: #47705a;
   box-shadow: none;
+}
+
+/* Reconnecting is a state, not an error: the dot breathes in gold while the bridge
+ * retries, and only a long outage turns it red. */
+.connection-state.reconnecting i {
+  background: var(--gold);
+  animation: connection-pulse 1.2s ease-in-out infinite;
+}
+
+.connection-state.offline i {
+  background: var(--red);
+  box-shadow: none;
+}
+
+.connection-state.offline {
+  color: var(--red);
+}
+
+@keyframes connection-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.3;
+  }
 }
 
 .lobby-main {
