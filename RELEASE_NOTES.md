@@ -1,7 +1,19 @@
-# DBX Mini Games 0.4.2
+# DBX Mini Games 0.4.3
 
 ## Highlights
 
+- a rebuilt room interface: lobby room cards, a dedicated create-room panel, a
+  settings drawer, and a result summary card, each split out of the workbench;
+- Gomoku victory stroke drawn as an ink dragon, with a calm variant that keeps
+  the spine and drops the motion;
+- one dynamic-effects toggle replacing the earlier three-tier setting; existing
+  choices migrate, and with no stored choice the system motion preference decides;
+- the final Xiangqi move now stays on screen for a full second, so the winning
+  move is readable no matter how decorative effects are configured;
+- connection status distinguishes connecting, online, reconnecting, and offline,
+  and a reconnect that heals within a second no longer shows an error banner;
+- player-facing error wording moved into a unit-tested table, so a wrong phrase
+  is a test failure rather than a style choice;
 - Chinese chess and free-style Gomoku;
 - public and password-protected rooms;
 - spectator support and server-authoritative matches;
